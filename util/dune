@@ -1,0 +1,16 @@
+(executable
+  (name cli)
+  (libraries
+    SZXX
+  )
+  (preprocess (pps
+    lwt_ppx
+  ))
+  (modes exe)
+  (ocamlopt_flags -O3 -unbox-closures)
+)
+
+(env
+  (dev
+    (flags (:standard -warn-error -A)))
+)

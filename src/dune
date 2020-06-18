@@ -1,0 +1,22 @@
+(library
+  (name SZXX)
+  (libraries
+    core_kernel
+    angstrom
+    angstrom-lwt-unix
+    camlzip
+    lwt
+    lwt.unix
+    lwt_ppx
+  )
+  (preprocess (pps
+    lwt_ppx
+    ppx_sexp_conv
+  ))
+  (ocamlopt_flags -O3 -unbox-closures)
+)
+
+(env
+  (dev
+    (flags (:standard -warn-error -A)))
+)

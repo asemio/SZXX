@@ -1,0 +1,17 @@
+(tests
+  (names xlsx xml)
+  (libraries
+    SZXX
+
+    alcotest-lwt
+    core_kernel
+    lwt
+    lwt.unix
+    lwt_ppx
+    yojson
+  )
+  (preprocess (pps
+    lwt_ppx
+  ))
+  (ocamlopt_flags -Oclassic)
+)

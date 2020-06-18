@@ -1,0 +1,27 @@
+opam-version: "2.0"
+maintainer: "sgrondin@asemio.com"
+authors: [
+  "Simon Grondin"
+]
+synopsis: "Streaming ZIP XML XLSX parser"
+description: """
+"""
+license: "Asemio"
+tags: ["Stream" "ZIP" "XML" "XLSX"]
+homepage: "https://github.com/asemio/szxx"
+doc: "https://github.com/asemio/szxx"
+bug-reports: "https://github.com/asemio/szxx/issues"
+depends: [
+  "ocaml" {>= "4.08.1"}
+  "dune" {build & >= "2.4.0"}
+
+  "angstrom" {>= "0.14.1"}
+  "angstrom-lwt-unix" {>= "0.14.1"}
+  "core_kernel" {>= "v0.13.0"}
+  "camlzip"
+  "lwt" {>= "5.0.0"}
+  "lwt_ppx"
+
+  "alcotest-lwt" {with-test}
+  "yojson" {with-test}
+]

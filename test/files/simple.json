@@ -1,0 +1,23 @@
+{
+  "data": [
+    [ "hello", "world" ],
+    [ null, null, "hi & bye" ],
+    [ 123.0, 1.0 ],
+    [ 54.06, 0.024 ],
+    [ null, 0.25, null, null, 32643.0 ],
+    [ null, "355/4" ],
+    [ null, 395.98 ],
+    [ "back!" ],
+    [ "HELLO" ],
+    [ null, "#ERROR# #VALUE!" ],
+    [],
+    [],
+    [],
+    [],
+    [ null, 43928.0 ],
+    [ null, 64.0 ],
+    [ null, 492.0, null, null, 32643.4388657407 ],
+    [ null, 36525.0 ],
+    [ null, 36526.0 ]
+  ]
+}
