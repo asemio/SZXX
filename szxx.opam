@@ -5,6 +5,8 @@ authors: [
 ]
 synopsis: "Streaming ZIP XML XLSX parser"
 description: """
+SZXX is a streaming, non-seeking and efficient XLSX parser built from ground up for low memory usage.
+SZXX is able to output XLSX rows while a file is being read from the file descriptor without buffering any part of the file.
 """
 license: "Asemio"
 tags: ["Stream" "ZIP" "XML" "XLSX"]
@@ -13,7 +15,7 @@ doc: "https://github.com/asemio/szxx"
 bug-reports: "https://github.com/asemio/szxx/issues"
 depends: [
   "ocaml" {>= "4.08.1"}
-  "dune" {build & >= "2.4.0"}
+  "dune" {>= "1.9.0"}
 
   "angstrom" {>= "0.14.1"}
   "angstrom-lwt-unix" {>= "0.14.1"}

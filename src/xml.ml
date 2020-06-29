@@ -172,32 +172,33 @@ let parser =
       | _ -> [], false
       end
       in
-      choice [
-        (* Self-terminating *)
-        (string "/>") >>| (fun _ ->
-          Element { tag; attrs; text = ""; children = [||] }
-        );
-        (* Nested *)
-        (char '>' *> (sep_by blank (choice [
+      let buf = Buffer.create 16 in
+      let queue = Queue.create ~capacity:5 () in
+      let preserve_space = lazy (List.find attrs ~f:(function
+        | ("xml:space", "preserve") -> true
+        | _ -> false) |> Option.is_some
+      )
+      in
+      let nested =
+        (choice [
               (take_while1 is_text) >>| (fun x -> Text x);
               cdata >>| (fun x -> Text x) <* blank;
               (element_parser ?filter_map path) <* blank;
-            ])) <* (string "</" *> ws *> string tag *> ws *> char '>')
-        ) >>| (fun content ->
-          let buf = Buffer.create 16 in
-          let queue = Queue.create ~capacity:5 () in
-          let preserve_space = lazy (List.find attrs ~f:(function
-            | ("xml:space", "preserve") -> true
-            | _ -> false) |> Option.is_some
-          )
-          in
-          List.iter content ~f:(function
-          | Text s ->
-            if Buffer.length buf > 0 then Buffer.add_char buf ' ';
-            Buffer.add_string buf (if Lazy.force preserve_space then String.strip s else s)
-          | Element el -> Queue.enqueue queue el
-          | Skip -> ()
-          );
+            ]) >>| (function
+        | Skip -> ()
+        | Text s ->
+          if Buffer.length buf > 0 then Buffer.add_char buf ' ';
+          Buffer.add_string buf (if Lazy.force preserve_space then String.strip s else s)
+        | Element el ->
+          Queue.enqueue queue el
+        ) <* blank
+      in
+      choice [
+        (* Self-terminating *)
+        (string "/>") >>| (fun _ -> Element { tag; attrs; text = ""; children = [||] });
+        (* Nested *)
+        (char '>' *> (skip_many nested) <* (string "</" *> ws *> string tag *> ws *> char '>'))
+        >>| (fun () ->
           let el = { tag; attrs; text = Buffer.contents buf |> unescape; children = Queue.to_array queue } in
           begin match matching, filter_map with
           | true, Some f ->

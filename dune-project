@@ -1,2 +1,3 @@
-(lang dune 2.4)
-(name magic-box)
+(lang dune 1.9)
+(name szxx)
+(version 0.1.0)

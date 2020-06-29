@@ -3,11 +3,37 @@ open! Core_kernel
 open Zip
 open Xml
 
+type location = {
+  col_index: int;
+  sheet_number: int;
+  row_number: int;
+} [@@deriving sexp_of]
+
+type 'a cell_of_string = {
+  string: location -> string -> 'a;
+  error: location -> string -> 'a;
+  boolean: location -> string -> 'a;
+  number: location -> string -> 'a;
+  null: 'a;
+}
+
+type delayed_string = {
+  location: location;
+  sst_index: string;
+} [@@deriving sexp_of]
+
+type 'a status =
+| Available of 'a
+| Delayed of delayed_string
+[@@deriving sexp_of]
+
 type 'a row = {
   sheet_number: int;
   row_number: int;
   data: 'a array;
 } [@@deriving sexp_of]
+
+type sst = SST of Xml.doc
 
 let origin = Date.add_days (Date.create_exn ~y:1900 ~m:(Month.of_int_exn 1) ~d:1) (-2)
 
@@ -87,7 +113,7 @@ let get_stream ?only_sheet input_channel =
           | Skipped | As_string _ -> ()
           | Parsed (Ok xml) ->
             begin match entry.filename with
-            | "xl/sharedStrings.xml" -> Lwt.wakeup_later sst_w xml
+            | "xl/sharedStrings.xml" -> Lwt.wakeup_later sst_w (SST xml)
             | _ -> ()
             end
           | Parsed (Error msg) -> failwithf "XLSX Parsing error for %s: %s" entry.filename msg ()
@@ -96,10 +122,10 @@ let get_stream ?only_sheet input_channel =
       ) (fun () ->
         begin match Lwt.state sst_p with
         | Return _ | Fail _ -> ()
-        | Sleep -> Lwt.wakeup_later sst_w {
+        | Sleep -> Lwt.wakeup_later sst_w (SST {
             decl_attrs = None;
             top = { tag = "sst"; attrs = []; text = ""; children = [||] }
-          }
+          })
         end;
         Lwt.return_unit
       )
@@ -109,38 +135,25 @@ let get_stream ?only_sheet input_channel =
   in
   stream, sst_p, processed_p
 
-type 'a cell_reader = col_index:int -> sheet_number:int -> row_number:int -> string -> 'a
+let extract ~null location extractor = function
+| None -> Available null
+| Some { text; _ } -> Available (extractor location text)
 
-type 'a cell_of_string = {
-  string: 'a cell_reader;
-  error: 'a cell_reader;
-  boolean: 'a cell_reader;
-  number: 'a cell_reader;
-  null: 'a;
-}
-
-let extract ~null ~col_index ~sheet_number ~row_number extractor = function
-| None -> null
-| Some { text; _ } -> extractor ~col_index ~sheet_number ~row_number text
-
-let extract_cell { string; error; boolean; number; null } sst ~col_index ~sheet_number ~row_number el =
-  let reader = extract ~null ~col_index ~sheet_number ~row_number in
+let extract_cell { string; error; boolean; number; null } location el =
+  let reader = extract ~null location in
   begin match get_attr el "t" with
   | None
   | Some "n" ->
     begin
       try el |> dot "v" |> reader number
-      with _ -> null
+      with _ -> Available null
     end
   | Some "str" -> el |> dot "v" |> reader string
   | Some "inlineStr" -> get el [dot "is"; dot "t"] |> reader string
   | Some "s" ->
     begin match el |> dot "v" with
-    | None -> null
-    | Some { text; _ } ->
-      let table = !sst () in
-      try table |> at text |> reader string
-      with _ -> null
+    | None -> Available null
+    | Some { text = sst_index; _ } -> Delayed { location; sst_index }
     end
   | Some "e" -> el |> dot "v" |> reader error
   | Some "b" -> el |> dot "v" |> reader boolean
@@ -155,7 +168,7 @@ let column_to_index col =
   | _ -> failwithf "Invalid XLSX column name %s" col ()
   ) |> pred
 
-let extract_row cell_of_string sst ({ data; sheet_number; row_number } as row) =
+let extract_row cell_of_string ({ data; sheet_number; row_number } as row) =
   let num_cells = Array.length data in
   if num_cells = 0 then { row with data = [||] } else
   let num_cols =
@@ -164,36 +177,48 @@ let extract_row cell_of_string sst ({ data; sheet_number; row_number } as row) =
     |> Option.value_map ~default:0 ~f:(fun r -> (column_to_index r) + 1)
     |> max num_cells
   in
-  let new_data = Array.create ~len:num_cols cell_of_string.null in
+  let new_data = Array.create ~len:num_cols (Available cell_of_string.null) in
   Array.iteri data ~f:(fun i el ->
     let col_index = get_attr el "r" |> Option.value_map ~default:i ~f:column_to_index in
-    let v = extract_cell cell_of_string sst ~col_index ~sheet_number ~row_number el in
+    let v = extract_cell cell_of_string { col_index; sheet_number; row_number } el in
     Array.set new_data col_index v
   );
   { row with data = new_data }
 
-exception Not_ready
-
 let stream_rows ?only_sheet cell_of_string input_channel =
   let stream, sst_p, processed_p = get_stream ?only_sheet input_channel in
-  let sst = ref (fun () -> raise Not_ready) in
-  let parsed_stream = Lwt_stream.map_s (fun row ->
-      try%lwt
-        Lwt.return (extract_row cell_of_string sst row)
-      with Not_ready ->
-        begin
-          let%lwt sst_doc = sst_p in
-          sst := (fun () -> sst_doc.top);
-          Lwt.return (extract_row cell_of_string sst row)
-        end
+  let parsed_stream = Lwt_stream.map (fun row ->
+      extract_row cell_of_string row
+    ) stream
+  in
+  parsed_stream, sst_p, processed_p
+
+let await_delayed cell_of_string (SST sst) (row: 'a status row) =
+  let data = Array.map row.data ~f:(function
+    | Available x -> x
+    | Delayed { location; sst_index } ->
+      begin match sst.top |> at sst_index with
+      | None -> cell_of_string.null
+      | Some { text; _ } ->
+        cell_of_string.string location text
+      end
+    )
+  in
+  { row with data }
+
+let stream_rows_buffer ?only_sheet cell_of_string input_channel =
+  let stream, sst_p, processed_p = stream_rows ?only_sheet cell_of_string input_channel in
+  let parsed_stream = Lwt_stream.map_s (fun x ->
+      let%lwt sst = sst_p in
+      Lwt.return (await_delayed cell_of_string sst x)
     ) stream
   in
   parsed_stream, processed_p
 
 let yojson_readers : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_of_string = {
-  string = (fun ~col_index:_ ~sheet_number:_ ~row_number:_ s -> `String s);
-  error = (fun ~col_index:_ ~sheet_number:_ ~row_number:_ s -> `String (sprintf "#ERROR# %s" s));
-  boolean = (fun ~col_index:_ ~sheet_number:_ ~row_number:_ s -> `Bool String.(s = "1"));
-  number = (fun ~col_index:_ ~sheet_number:_ ~row_number:_ s -> `Float (Float.of_string s));
+  string = (fun _location s -> `String s);
+  error = (fun _location s -> `String (sprintf "#ERROR# %s" s));
+  boolean = (fun _location s -> `Bool String.(s = "1"));
+  number = (fun _location s -> `Float (Float.of_string s));
   null = `Null;
 }

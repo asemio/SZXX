@@ -1,5 +1,6 @@
 (library
   (name SZXX)
+  (public_name szxx)
   (libraries
     core_kernel
     angstrom

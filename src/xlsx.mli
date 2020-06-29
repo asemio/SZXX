@@ -1,20 +1,36 @@
 open! Core_kernel
 
+type location = {
+  col_index: int;
+  sheet_number: int;
+  row_number: int;
+} [@@deriving sexp_of]
+
+type 'a cell_of_string = {
+  string: location -> string -> 'a;
+  error: location -> string -> 'a;
+  boolean: location -> string -> 'a;
+  number: location -> string -> 'a;
+  null: 'a;
+}
+
+type delayed_string = {
+  location: location;
+  sst_index: string;
+} [@@deriving sexp_of]
+
+type 'a status =
+| Available of 'a
+| Delayed of delayed_string
+[@@deriving sexp_of]
+
 type 'a row = {
   sheet_number: int;
   row_number: int;
   data: 'a array;
 } [@@deriving sexp_of]
 
-type 'a cell_reader = col_index:int -> sheet_number:int -> row_number:int -> string -> 'a
-
-type 'a cell_of_string = {
-  string: 'a cell_reader;
-  error: 'a cell_reader;
-  boolean: 'a cell_reader;
-  number: 'a cell_reader;
-  null: 'a;
-}
+type sst
 
 (** Convenience reader to read rows as JSON *)
 val yojson_readers : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_of_string
@@ -34,7 +50,7 @@ val column_to_index: string -> int
    Most XLSX files can be streamed without buffering.
    However, some documents that make use of the Shared Strings Table (SST) will place it at the end of the Zip archive,
    forcing SZXX to buffer those rows until the SST is found in the archive.
-   Using inline strings and/or placing the SST before the worksheets allows SZXX to run within very little memory.
+   Using inline strings and/or placing the SST before the worksheets allows SZXX as efficiently as possible.
 
    [SZXX.Xlsx.stream_rows ?only_sheet readers ic]
 
@@ -45,14 +61,40 @@ val column_to_index: string -> int
 
    [ic]: The channel to read from
 
-   Returned: [stream * promise]
+   Returned: [stream * sst promise * unit promise]
 
-   [stream]: Lwt_stream.t of rows where the data is encoded as an array of the type returned by your readers.
+   [stream]: Lwt_stream.t of rows where the cell data is either [Available v] where [v] is of the type returned by your readers,
+   or [Delayed d]. [Delayed] cells are caused by that cell's reliance on the SST.
 
-   [promise]: A promise resolved once all the rows have been written to the stream.
-   It is important to bind to (await) this promise in order to capture any errors encountered while processing the file.
+   [sst promise]: A promise resolved once the SST is available.
+
+   [unit promise]: A promise resolved once all the rows have been written to the stream.
+   It is important to bind to/await this promise in order to capture any errors encountered while processing the file.
 *)
 val stream_rows:
+  ?only_sheet:int ->
+  'a cell_of_string ->
+  Lwt_io.input_channel ->
+  'a status row Lwt_stream.t * sst Lwt.t * unit Lwt.t
+
+(**
+   Unwraps a single row, resolving SST references.
+
+   A common workflow is to filter the stream returned by [stream_rows],
+   discarding uninteresting rows in order to buffer as few rows as possible,
+   then await the [sst Lwt.t], and finally call [Lwt_stream.map (await_delayed ... ) stream].
+*)
+val await_delayed:
+  'a cell_of_string ->
+  sst ->
+  'a status row ->
+  'a row
+
+(**
+   Convenience function around [stream_rows] and [await_delayed].
+   As the name implies, it will buffer any cells referencing the SST that are located before the SST.
+*)
+val stream_rows_buffer:
   ?only_sheet:int ->
   'a cell_of_string ->
   Lwt_io.input_channel ->
