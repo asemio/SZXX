@@ -1,8 +1,8 @@
 open! Core_kernel
 
 let extractors = SZXX.Xlsx.{
-    string = (fun _location s -> `String s);
-    error = (fun _location s -> `String s);
+    string = (fun _location s -> `String (SZXX.Xml.unescape s));
+    error = (fun _location s -> `String (sprintf "#ERROR# %s" s));
     boolean = (fun _location s -> `Bool String.(s = "1"));
     number = (fun _location s -> `Float (Float.of_string s));
     null = `Null;
@@ -34,7 +34,7 @@ let xlsx filename () =
   in
   let%lwt parsed = Lwt_io.with_file ~flags:Unix.[O_RDONLY; O_NONBLOCK] ~mode:Input xlsx_path (fun ic ->
       let open SZXX.Xlsx in
-      let stream, processed = stream_rows_buffer yojson_readers ic in
+      let stream, processed = stream_rows_buffer extractors ic in
       let%lwt json = Lwt_stream.fold (fun row acc ->
           (`List (Array.to_list row.data)) :: acc
         ) stream []

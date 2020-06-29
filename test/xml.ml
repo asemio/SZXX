@@ -18,7 +18,7 @@ comment -->
     <c><c><v>BAR</v></c></c>
     < dimension ref = "A1:A38" />
     <t> hello  world <x/>  x </t>
-    <t xml:space="preserve"> hello  world <x/>  x </t>
+    <t xml:space="preserve"> hello!  world <x/>  x </t>
     </worksheet>
     |s}
 
@@ -43,7 +43,7 @@ let data1 = Yojson.Safe.from_string {json|
       ],
       [ "xr:uid", "{00000000-0001-0000-0400-000000000000}" ]
     ],
-    "text": "\n    ",
+    "text": "",
     "children": [
       {
         "tag": "c",
@@ -54,10 +54,10 @@ let data1 = Yojson.Safe.from_string {json|
       {
         "tag": "c",
         "attrs": [],
-        "text": " world  WORLD ",
+        "text": "world WORLD",
         "children": [
-          { "tag": "v", "attrs": [], "text": "  woot", "children": [] },
-          { "tag": "v", "attrs": [], "text": " hurray ", "children": [] }
+          { "tag": "v", "attrs": [], "text": "woot", "children": [] },
+          { "tag": "v", "attrs": [], "text": "hurray", "children": [] }
         ]
       },
       {
@@ -92,7 +92,7 @@ let data1 = Yojson.Safe.from_string {json|
       {
         "tag": "t",
         "attrs": [],
-        "text": " hello  world  x ",
+        "text": "hello  world x",
         "children": [
           { "tag": "x", "attrs": [], "text": "", "children": [] }
         ]
@@ -100,7 +100,7 @@ let data1 = Yojson.Safe.from_string {json|
       {
         "tag": "t",
         "attrs": [ [ "xml:space", "preserve" ] ],
-        "text": "hello  world x",
+        "text": " hello!  world  x ",
         "children": [
           { "tag": "x", "attrs": [], "text": "", "children": [] }
         ]

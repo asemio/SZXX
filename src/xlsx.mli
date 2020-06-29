@@ -59,6 +59,10 @@ val column_to_index: string -> int
    [readers]: the parsers to convert from [string] into the type used in your application.
    [SZXX.Xlsx.yojson_readers] is provided for convenience.
 
+   Note: you must pass your own readers if you need XML escaping, call [SZXX.Xml.unescape].
+
+   Note: XLSX dates are encoded as numbers, call [SZXX.Xlsx.parse_date] or [SZXX.Xlsx.parse_datetime] in your readers to convert them.
+
    [ic]: The channel to read from
 
    Returned: [stream * sst promise * unit promise]

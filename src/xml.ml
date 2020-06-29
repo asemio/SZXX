@@ -173,12 +173,8 @@ let parser =
       end
       in
       let buf = Buffer.create 16 in
-      let queue = Queue.create ~capacity:5 () in
-      let preserve_space = lazy (List.find attrs ~f:(function
-        | ("xml:space", "preserve") -> true
-        | _ -> false) |> Option.is_some
-      )
-      in
+      let queue = Queue.create ~capacity:1 () in
+      let preserve_space = List.mem attrs ("xml:space", "preserve") ~equal:String.(fun (x1, y1) (x2, y2) -> x1 = x2 && y1 = y2) in
       let nested =
         (choice [
               (take_while1 is_text) >>| (fun x -> Text x);
@@ -188,7 +184,7 @@ let parser =
         | Skip -> ()
         | Text s ->
           if Buffer.length buf > 0 then Buffer.add_char buf ' ';
-          Buffer.add_string buf (if Lazy.force preserve_space then String.strip s else s)
+          Buffer.add_string buf (if preserve_space then s else String.strip s)
         | Element el ->
           Queue.enqueue queue el
         ) <* blank
@@ -199,7 +195,9 @@ let parser =
         (* Nested *)
         (char '>' *> (skip_many nested) <* (string "</" *> ws *> string tag *> ws *> char '>'))
         >>| (fun () ->
-          let el = { tag; attrs; text = Buffer.contents buf |> unescape; children = Queue.to_array queue } in
+          let el = { tag; attrs; text = Buffer.contents buf; children = Queue.to_array queue } in
+          Buffer.reset buf;
+          Queue.clear queue;
           begin match matching, filter_map with
           | true, Some f ->
             begin match f el with

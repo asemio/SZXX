@@ -55,7 +55,7 @@ val get_attr: element -> string -> string option
 
 (**
    Limited but efficient function to unescapable XML escape sequences.
-   Good enough for most cases, but ensure it meets your needs before using.
-   [unescape "Fast &amp; Furious"] returns "Fast & Furious"
+   Good enough for most cases, but validate it meets your needs before using.
+   [unescape "Fast &amp; Furious"] returns ["Fast & Furious"]
 *)
 val unescape: string -> string

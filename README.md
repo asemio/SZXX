@@ -49,4 +49,4 @@ Not yet, due to the zlib bindings. It will soon support the [Decompress](https:/
 
 #### Is it fast?
 
-Reasonably so. Using 1 core on a 2018 Macbook Pro, it processes a 28-column, 1,048,576-row file in 120 seconds. The same file takes 65 seconds to open in LibreOffice using 2 cores and 5x more memory.
+Reasonably so. Using 1 core on a 2018 Macbook Pro, it processes a 28-column, 1,048,576-row file in 120 seconds. The same file takes 65 seconds to open in LibreOffice using 2 cores and 4x more memory.

@@ -3,7 +3,7 @@
     [
       "Segment", "Country", "Product", "Discount Band", "Units Sold",
       "Manufacturing Price", "Sale Price", "Gross Sales", "Discounts",
-      "Sales", "COGS", "Profit", "Date", "Month Number", "Month Name", "Year"
+      " Sales", "COGS", "Profit", "Date", "Month Number", "Month Name", "Year"
     ],
     [
       "Government", "Canada", "Carretera", "None", 1618.5, 3.0, 20.0,
