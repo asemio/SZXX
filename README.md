@@ -10,9 +10,7 @@ The ZIP archive is parsed while the file is still being read from the file descr
 
 The XML layer is technically a DOM parser, but allows streaming and pruning a specific path within the document. The XML parser is far from spec-compliant and does not attempt to validate, correct errors, or follow references. Text nodes are seen as opaque bytes.
 
-The XLSX layer always streams rows in the order they are encountered.
-
-The XLSX layer will not automatically load string references from the Shared Strings Table (SST) because it is usually located after the worksheets within the ZIP.
+The XLSX layer always streams rows in the order they are encountered. It does not automatically load string references from the Shared Strings Table (SST) because it is usually located after the worksheets within the ZIP.
 
 ### Example
 ```ocaml
@@ -41,7 +39,7 @@ It's a convenient way to expose this sort of functionality. Unfortunately it res
 
 #### I see it uses [Camlzip](https://github.com/xavierleroy/camlzip), are you sure it's not buffering the whole zip file?
 
-It only uses Camlzip for its zlib bindings. The next version of SZXX will allow the user to decide between zlib and [Decompress](https://github.com/mirage/decompress).
+It only uses Camlzip for its zlib bindings. The next version of SZXX will allow the user to choose between zlib and [Decompress](https://github.com/mirage/decompress).
 
 #### Does this work in the browser?
 
