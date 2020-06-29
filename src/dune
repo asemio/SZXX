@@ -1,6 +1,6 @@
 (library
   (name SZXX)
-  (public_name szxx)
+  (public_name SZXX)
   (libraries
     core_kernel
     angstrom
@@ -14,7 +14,6 @@
     lwt_ppx
     ppx_sexp_conv
   ))
-  (ocamlopt_flags -O3 -unbox-closures)
 )
 
 (env
