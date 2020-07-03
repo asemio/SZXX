@@ -1,3 +1,4 @@
+let flags = Unix.[O_RDONLY; O_NONBLOCK]
 open! Core_kernel
 
 let extractors = SZXX.Xlsx.{
@@ -10,7 +11,7 @@ let extractors = SZXX.Xlsx.{
 
 let readme_example filename () =
   let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
-  Lwt_io.with_file ~flags:Unix.[O_RDONLY; O_NONBLOCK] ~mode:Input xlsx_path (fun ic ->
+  Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
     let open SZXX.Xlsx in
     (* yojson_readers is an easy way to quickly inspect a file *)
     let stream, processed = stream_rows_buffer yojson_readers ic in
@@ -27,12 +28,12 @@ let readme_example filename () =
 let xlsx filename () =
   let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
   let json_path = sprintf "../../../test/files/%s.json" filename in
-  let%lwt against = Lwt_io.with_file ~flags:Unix.[O_RDONLY; O_NONBLOCK] ~mode:Input json_path (fun ic ->
+  let%lwt against = Lwt_io.with_file ~flags ~mode:Input json_path (fun ic ->
       let%lwt contents = Lwt_io.read ic in
       Lwt.return (Yojson.Safe.from_string contents)
     )
   in
-  let%lwt parsed = Lwt_io.with_file ~flags:Unix.[O_RDONLY; O_NONBLOCK] ~mode:Input xlsx_path (fun ic ->
+  let%lwt parsed = Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
       let open SZXX.Xlsx in
       let stream, processed = stream_rows_buffer extractors ic in
       let%lwt json = Lwt_stream.fold (fun row acc ->
