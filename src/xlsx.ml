@@ -59,7 +59,7 @@ let parse_sheet ~sheet_number push =
         if next < i then begin
           (* Insert blank rows *)
           for row_number = next to (pred i) do
-            push (Some { sheet_number; row_number; data = [||] })
+            push { sheet_number; row_number; data = [||] }
           done;
           num := i;
           i
@@ -69,16 +69,40 @@ let parse_sheet ~sheet_number push =
       with _ -> next
     end
     in
-    push (Some { sheet_number; row_number; data = el.children });
+    push { sheet_number; row_number; data = el.children };
     None
   in
   Parse (parser ~filter_map ["worksheet"; "sheetData"; "row"])
 
+let mutex = Lwt_mutex.create ()
+
 let get_stream ?only_sheet input_channel =
-  let stream, push = Lwt_stream.create () in
+  let queue = Queue.create () in
+  let push = Queue.enqueue queue in
+  let stream, bounded = Lwt_stream.create_bounded 1 in
+  let rec flush () =
+    begin match Queue.dequeue queue with
+    | Some row ->
+      let%lwt () = bounded#push row in
+      flush ()
+    | None -> Lwt.return_unit
+    end
+  in
+  let ic =
+    let size = Lwt_io.default_buffer_size () in
+    let buffer = Bytes.create size in
+    Lwt_io.make ~buffer:(Lwt_bytes.create size) ~mode:Input (fun bytes offset len ->
+      Lwt_mutex.with_lock mutex (fun () ->
+        let%lwt () = flush () in
+        let%lwt written = Lwt_io.read_into input_channel buffer offset len in
+        Lwt_bytes.blit_from_bytes buffer offset bytes offset written;
+        Lwt.return written
+      )
+    )
+  in
   let sst_p, sst_w = Lwt.wait () in
   let processed_p =
-    let zip_stream = stream_files input_channel (fun entry ->
+    let zip_stream = stream_files ic (fun entry ->
         begin match entry.filename with
         | "xl/workbook.xml" -> Parse (parser [])
 
@@ -130,7 +154,7 @@ let get_stream ?only_sheet input_channel =
         Lwt.return_unit
       )
     in
-    push None;
+    bounded#close;
     Lwt.return_unit
   in
   stream, sst_p, processed_p

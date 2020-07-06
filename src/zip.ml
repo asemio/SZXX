@@ -263,20 +263,26 @@ let parser cb =
       >>| (begin function
       | (_data, size, _crc), entry when entry.descriptor.uncompressed_size <> size -> failwithf "%s: Size mismatch" entry.filename ()
       | ((_data, _size, crc), entry) when Int32.(entry.descriptor.crc <> crc) -> failwithf "%s: CRC mismatch" entry.filename ()
-      | ((data, _size, _crc), entry) -> Some (entry, data)
+      | ((data, _size, _crc), entry) -> entry, data
       end
       )
     )
   in
   file_parser
 
+let mutex = Lwt_mutex.create ()
+
 let stream_files input_channel cb =
-  let stream, push = Lwt_stream.create () in
+  let stream, bounded = Lwt_stream.create_bounded 1 in
   Lwt.async (fun () ->
     Lwt.finalize (fun () ->
       let%lwt _unconsumed, result = Angstrom_lwt_unix.parse_many
           (parser cb)
-          (fun x -> push x; Lwt.return_unit)
+          (fun pair ->
+              Lwt_mutex.with_lock mutex (fun () ->
+                bounded#push pair
+              )
+          )
           input_channel
       in
       begin match result with
@@ -284,7 +290,7 @@ let stream_files input_channel cb =
       | Error err -> failwithf "Syntax Error: %s" err ()
       end
     ) (fun () ->
-      if not (Lwt_stream.is_closed stream) then push None;
+      if not (Lwt_stream.is_closed stream) then bounded#close;
       if not (Lwt_io.is_closed input_channel) then Lwt_io.close input_channel else Lwt.return_unit
     )
   );
