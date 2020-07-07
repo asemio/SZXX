@@ -1,3 +1,4 @@
+let flags = Unix.[O_RDONLY; O_NONBLOCK]
 open! Core_kernel
 
 open SZXX.Xlsx
@@ -11,7 +12,7 @@ let string_readers = {
 }
 
 let count xlsx_path =
-  Lwt_io.with_file ~flags:Unix.[O_RDONLY; O_NONBLOCK] ~mode:Input xlsx_path (fun ic ->
+  Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
     let stream, _sst_p, processed = stream_rows string_readers ic in
     let t0 = Time_now.nanoseconds_since_unix_epoch () in
 
