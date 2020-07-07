@@ -179,7 +179,7 @@ let parser =
         (choice [
               (take_while1 is_text) >>| (fun x -> Text x);
               cdata >>| (fun x -> Text x) <* blank;
-              (element_parser ?filter_map path) <* blank;
+              (commit >>= (fun () -> element_parser ?filter_map path)) <* blank;
             ]) >>| (function
         | Skip -> ()
         | Text s ->
@@ -194,6 +194,7 @@ let parser =
         (string "/>") >>| (fun _ -> Element { tag; attrs; text = ""; children = [||] });
         (* Nested *)
         (char '>' *> (skip_many nested) <* (string "</" *> ws *> string tag *> ws *> char '>'))
+        >>= (fun () -> commit)
         >>| (fun () ->
           let el = { tag; attrs; text = Buffer.contents buf; children = Queue.to_array queue } in
           Buffer.reset buf;
