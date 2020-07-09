@@ -59,7 +59,7 @@ let parse_sheet ~sheet_number push =
         if next < i then begin
           (* Insert blank rows *)
           for row_number = next to (pred i) do
-            push { sheet_number; row_number; data = [||] }
+            push (Some { sheet_number; row_number; data = [||] })
           done;
           num := i;
           i
@@ -69,37 +69,12 @@ let parse_sheet ~sheet_number push =
       with _ -> next
     end
     in
-    push { sheet_number; row_number; data = el.children };
+    push (Some { sheet_number; row_number; data = el.children });
     None
   in
   Parse (parser ~filter_map ["worksheet"; "sheetData"; "row"])
 
-let mutex = Lwt_mutex.create ()
-
-let get_stream ?only_sheet input_channel =
-  let queue = Queue.create () in
-  let push = Queue.enqueue queue in
-  let stream, bounded = Lwt_stream.create_bounded 1 in
-  let rec flush () =
-    begin match Queue.dequeue queue with
-    | Some row ->
-      let%lwt () = bounded#push row in
-      flush ()
-    | None -> Lwt.return_unit
-    end
-  in
-  let ic =
-    let size = Lwt_io.default_buffer_size () in
-    let buffer = Bytes.create size in
-    Lwt_io.make ~buffer:(Lwt_bytes.create size) ~mode:Input (fun bytes offset len ->
-      Lwt_mutex.with_lock mutex (fun () ->
-        let%lwt () = flush () in
-        let%lwt written = Lwt_io.read_into input_channel buffer offset len in
-        Lwt_bytes.blit_from_bytes buffer offset bytes offset written;
-        Lwt.return written
-      )
-    )
-  in
+let process_file ?only_sheet ic push finalize =
   let sst_p, sst_w = Lwt.wait () in
   let processed_p =
     let zip_stream = stream_files ic (fun entry ->
@@ -154,10 +129,9 @@ let get_stream ?only_sheet input_channel =
         Lwt.return_unit
       )
     in
-    bounded#close;
-    Lwt.return_unit
+    finalize ()
   in
-  stream, sst_p, processed_p
+  sst_p, processed_p
 
 let extract ~null location extractor = function
 | None -> Available null
@@ -210,7 +184,39 @@ let extract_row cell_of_string ({ data; sheet_number; row_number } as row) =
   { row with data = new_data }
 
 let stream_rows ?only_sheet cell_of_string input_channel =
-  let stream, sst_p, processed_p = get_stream ?only_sheet input_channel in
+  let mutex = Lwt_mutex.create () in
+  let queue = Queue.create () in
+  let push = Queue.enqueue queue in
+  let mvar = Lwt_mvar.create_empty () in
+  let rec flush () =
+    begin match Queue.dequeue queue with
+    | Some row ->
+      let%lwt () = Lwt_mvar.put mvar row in
+      flush ()
+    | None -> Lwt.return_unit
+    end
+  in
+  let stream = Lwt_stream.from (fun () -> Lwt_mvar.take mvar) in
+  let ic =
+    let size = Lwt_io.default_buffer_size () in
+    let buffer = Bytes.create size in
+    Lwt_io.make ~buffer:(Lwt_bytes.create size) ~mode:Input (fun bytes offset len ->
+      Lwt_mutex.with_lock mutex (fun () ->
+        let%lwt () = flush () in
+        let%lwt written = Lwt_io.read_into input_channel buffer offset len in
+        Lwt_bytes.blit_from_bytes buffer offset bytes offset written;
+        Lwt.return written
+      )
+    )
+  in
+  let finalize () =
+    push None;
+    let%lwt () = Lwt_mutex.with_lock mutex flush in
+    let%lwt () = Lwt_io.close input_channel in
+    Lwt_io.close ic
+  in
+
+  let sst_p, processed_p = process_file ?only_sheet ic push finalize in
   let parsed_stream = Lwt_stream.map (fun row ->
       extract_row cell_of_string row
     ) stream
@@ -231,10 +237,17 @@ let await_delayed cell_of_string (SST sst) (row: 'a status row) =
   { row with data }
 
 let stream_rows_buffer ?only_sheet cell_of_string input_channel =
-  let stream, sst_p, processed_p = stream_rows ?only_sheet cell_of_string input_channel in
-  let parsed_stream = Lwt_stream.map_s (fun x ->
+  let stream, push = Lwt_stream.create () in
+  let finalize () =
+    push None;
+    Lwt_io.close input_channel
+  in
+  let sst_p, processed_p = process_file ?only_sheet input_channel push finalize in
+  let parsed_stream = Lwt_stream.map_s (fun row ->
       let%lwt sst = sst_p in
-      Lwt.return (await_delayed cell_of_string sst x)
+      extract_row cell_of_string row
+      |> await_delayed cell_of_string sst
+      |> Lwt.return
     ) stream
   in
   parsed_stream, processed_p
