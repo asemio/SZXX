@@ -272,18 +272,19 @@ let mutex = Lwt_mutex.create ()
 
 let stream_files input_channel cb =
   let stream, bounded = Lwt_stream.create_bounded 1 in
-  Lwt.async (fun () ->
-      Lwt.finalize
-        (fun () ->
-          let%lwt _unconsumed, result =
-            Angstrom_lwt_unix.parse_many (parser cb)
-              (fun pair -> Lwt_mutex.with_lock mutex (fun () -> bounded#push pair))
-              input_channel
-          in
-          match result with
-          | Ok () -> Lwt.return_unit
-          | Error err -> failwithf "Syntax Error: %s" err ())
-        (fun () ->
-          if not (Lwt_stream.is_closed stream) then bounded#close;
-          if not (Lwt_io.is_closed input_channel) then Lwt_io.close input_channel else Lwt.return_unit));
-  stream
+  let processed =
+    Lwt.finalize
+      (fun () ->
+        let%lwt _unconsumed, result =
+          Angstrom_lwt_unix.parse_many (parser cb)
+            (fun pair -> Lwt_mutex.with_lock mutex (fun () -> bounded#push pair))
+            input_channel
+        in
+        match result with
+        | Ok () -> Lwt.return_unit
+        | Error err -> failwithf "Syntax Error: %s" err ())
+      (fun () ->
+        if not (Lwt_stream.is_closed stream) then bounded#close;
+        if not (Lwt_io.is_closed input_channel) then Lwt_io.close input_channel else Lwt.return_unit)
+  in
+  stream, processed

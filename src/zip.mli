@@ -46,5 +46,9 @@ type 'a data =
    Returning [Parse] will apply an [Angstrom] parser to the file while it is being uncompressed without having to fully uncompress it first.
 
    The final stream returns all files in the same order they were found in the archive.
+
+   [unit promise]: A promise resolved once the entire zip archive has been processed.
+   It is important to bind to/await this promise in order to capture any errors encountered while processing the file.
 *)
-val stream_files : Lwt_io.input_channel -> (entry -> 'a action) -> (entry * 'a data) Lwt_stream.t
+val stream_files :
+  Lwt_io.input_channel -> (entry -> 'a action) -> (entry * 'a data) Lwt_stream.t * unit Lwt.t

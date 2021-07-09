@@ -81,7 +81,7 @@ let parse_sheet ~sheet_number push =
 let process_file ?only_sheet ic push finalize =
   let sst_p, sst_w = Lwt.wait () in
   let processed_p =
-    let zip_stream =
+    let zip_stream, zip_processed =
       stream_files ic (fun entry ->
           match entry.filename with
           | "xl/workbook.xml" -> Parse (parser [])
@@ -137,7 +137,7 @@ let process_file ?only_sheet ic push finalize =
           end;
           Lwt.return_unit)
     in
-    finalize ()
+    Lwt.( <&> ) (finalize ()) zip_processed
   in
   sst_p, processed_p
 
