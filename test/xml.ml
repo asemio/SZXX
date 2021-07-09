@@ -1,6 +1,7 @@
 open! Core_kernel
 
-let test1 = {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?> <!DOCTYPE stylesheet [<!ENTITY
+let test1 =
+  {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?> <!DOCTYPE stylesheet [<!ENTITY
 nbsp "<xsl:text
 disable-output-escaping='yes'>&amp;nbsp;</xsl:text>">]
 >
@@ -22,7 +23,9 @@ comment -->
     </worksheet>
     |s}
 
-let data1 = Yojson.Safe.from_string {json|
+let data1 =
+  Yojson.Safe.from_string
+    {json|
 {
   "decl_attrs": [
     [ "version", "1.0" ],
@@ -110,10 +113,13 @@ let data1 = Yojson.Safe.from_string {json|
 }
 |json}
 
-let test2 = {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+let test2 =
+  {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="3" uniqueCount="3"><si><t xml:space="preserve">hello</t></si><si><t xml:space="preserve">world</t></si><si><t xml:space="preserve">ok bye</t></si></sst>|s}
 
-let data2 = Yojson.Safe.from_string {json|
+let data2 =
+  Yojson.Safe.from_string
+    {json|
 {
   "decl_attrs": [
     [ "version", "1.0" ],
@@ -175,34 +181,38 @@ let data2 = Yojson.Safe.from_string {json|
 }
 |json}
 
-let yojson_of_attr_list (ll : SZXX.Xml.attr_list) : Yojson.Safe.t = `List (
-    List.map ll ~f:(fun (x, y) -> `List [`String x; `String y])
-  )
+let yojson_of_attr_list (ll : SZXX.Xml.attr_list) : Yojson.Safe.t =
+  `List (List.map ll ~f:(fun (x, y) -> `List [ `String x; `String y ]))
 
-let rec yojson_of_element (el : SZXX.Xml.element) = `Assoc [
-    "tag", `String el.tag;
-    "attrs", yojson_of_attr_list el.attrs;
-    "text", `String el.text;
-    "children", `List (Array.fold_right el.children ~init:[] ~f:(fun x acc -> (yojson_of_element x) :: acc));
-  ]
+let rec yojson_of_element (el : SZXX.Xml.element) =
+  `Assoc
+    [
+      "tag", `String el.tag;
+      "attrs", yojson_of_attr_list el.attrs;
+      "text", `String el.text;
+      ( "children",
+        `List (Array.fold_right el.children ~init:[] ~f:(fun x acc -> yojson_of_element x :: acc)) );
+    ]
 
-let yojson_of_doc (doc : SZXX.Xml.doc) : Yojson.Safe.t = `Assoc [
-    "decl_attrs", Option.value_map doc.decl_attrs ~default:`Null ~f:yojson_of_attr_list;
-    "top", yojson_of_element doc.top;
-  ]
+let yojson_of_doc (doc : SZXX.Xml.doc) : Yojson.Safe.t =
+  `Assoc
+    [
+      "decl_attrs", Option.value_map doc.decl_attrs ~default:`Null ~f:yojson_of_attr_list;
+      "top", yojson_of_element doc.top;
+    ]
 
 let xml test data () =
-  begin match Angstrom.parse_string ~consume:Angstrom.Consume.All (SZXX.Xml.parser ["worksheet"; "sheetData"; "row"; "c"]) test with
+  match
+    Angstrom.parse_string ~consume:Angstrom.Consume.All
+      (SZXX.Xml.parser [ "worksheet"; "sheetData"; "row"; "c" ])
+      test
+  with
   | Ok parsed ->
     Json_diff.check (yojson_of_doc parsed) data;
     Lwt.return_unit
   | Error msg -> failwith msg
-  end
 
 let () =
-  Lwt_main.run @@ Alcotest_lwt.run "SZXX XML" [
-    "XML", [
-      "test1", `Quick, xml test1 data1;
-      "test2", `Quick, xml test2 data2;
-    ];
-  ]
+  Lwt_main.run
+  @@ Alcotest_lwt.run "SZXX XML"
+       [ "XML", [ "test1", `Quick, xml test1 data1; "test2", `Quick, xml test2 data2 ] ]

@@ -4,7 +4,8 @@ type location = {
   col_index: int;
   sheet_number: int;
   row_number: int;
-} [@@deriving sexp_of]
+}
+[@@deriving sexp_of]
 
 type 'a cell_of_string = {
   string: location -> string -> 'a;
@@ -17,32 +18,34 @@ type 'a cell_of_string = {
 type delayed_string = {
   location: location;
   sst_index: string;
-} [@@deriving sexp_of]
+}
+[@@deriving sexp_of]
 
 type 'a status =
-| Available of 'a
-| Delayed of delayed_string
+  | Available of 'a
+  | Delayed   of delayed_string
 [@@deriving sexp_of]
 
 type 'a row = {
   sheet_number: int;
   row_number: int;
   data: 'a array;
-} [@@deriving sexp_of]
+}
+[@@deriving sexp_of]
 
 type sst
 
 (** Convenience reader to read rows as JSON *)
-val yojson_readers : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_of_string
+val yojson_readers : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_of_string
 
 (** XLSX dates are stored as floats. Converts from a [float] to a [Date.t] *)
-val parse_date: float -> Date.t
+val parse_date : float -> Date.t
 
 (** XLSX datetimes are stored as floats. Converts from a [float] to a [Time.t] *)
-val parse_datetime: zone:Time.Zone.t -> float -> Time.t
+val parse_datetime : zone:Time.Zone.t -> float -> Time.t
 
 (** Converts from a cell ref such as [C7] or [AA2] to a 0-based column index *)
-val column_to_index: string -> int
+val column_to_index : string -> int
 
 (**
    Stream rows from an [Lwt_io.input_channel].
@@ -75,7 +78,7 @@ val column_to_index: string -> int
    [unit promise]: A promise resolved once all the rows have been written to the stream.
    It is important to bind to/await this promise in order to capture any errors encountered while processing the file.
 *)
-val stream_rows:
+val stream_rows :
   ?only_sheet:int ->
   'a cell_of_string ->
   Lwt_io.input_channel ->
@@ -88,18 +91,11 @@ val stream_rows:
    discarding uninteresting rows in order to buffer as few rows as possible,
    then await the [sst Lwt.t], and finally call [Lwt_stream.map (await_delayed ... ) stream].
 *)
-val await_delayed:
-  'a cell_of_string ->
-  sst ->
-  'a status row ->
-  'a row
+val await_delayed : 'a cell_of_string -> sst -> 'a status row -> 'a row
 
 (**
    Convenience function around [stream_rows] and [await_delayed].
    As the name implies, it will buffer any cells referencing the SST that are located before the SST.
 *)
-val stream_rows_buffer:
-  ?only_sheet:int ->
-  'a cell_of_string ->
-  Lwt_io.input_channel ->
-  'a row Lwt_stream.t * unit Lwt.t
+val stream_rows_buffer :
+  ?only_sheet:int -> 'a cell_of_string -> Lwt_io.input_channel -> 'a row Lwt_stream.t * unit Lwt.t
