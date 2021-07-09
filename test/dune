@@ -1,5 +1,5 @@
 (tests
-  (names xlsx xml)
+  (names xlsx xml zip)
   (libraries
     SZXX
 

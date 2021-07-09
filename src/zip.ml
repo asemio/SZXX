@@ -31,15 +31,21 @@ type chunk =
   | CBuffer of Buffer.t
   | CBytes  of (bytes * int)
 
-type 'a action =
-  | Skip
-  | String
-  | Parse  of 'a Angstrom.t
+module Action = struct
+  type 'a t =
+    | Skip
+    | String
+    | Chunk  of (string -> unit)
+    | Parse  of 'a Angstrom.t
+end
 
-type 'a data =
-  | Skipped
-  | As_string of string
-  | Parsed    of ('a, string) result
+module Data = struct
+  type 'a t =
+    | Skip
+    | String of string
+    | Chunk
+    | Parse  of ('a, string) result
+end
 
 let double x y = x, y
 
@@ -47,17 +53,13 @@ let triple x y z = x, y, z
 
 let maybe p = option None (p >>| Option.return)
 
-let parser cb =
-  let header_parser = string "PK\003\004" in
-  let descriptor_parser =
-    lift3
-      (fun crc compressed_size uncompressed_size -> { crc; compressed_size; uncompressed_size })
-      LE.any_int32 (* crc *)
-      (LE.any_int32 >>| Int32.to_int_exn) (* compressed_size *)
-      (LE.any_int32 >>| Int32.to_int_exn)
-    (* uncompressed_size *)
-  in
-  let deflated_fns flush =
+module Storage = struct
+  type t = {
+    add: char -> unit;
+    finalize: unit -> unit;
+  }
+
+  let deflated flush =
     let zs = Zlib.inflate_init false in
     let buf = Buffer.create 1024 in
     let inbuf = Bytes.create 1024 in
@@ -86,9 +88,9 @@ let parser cb =
       if used_out > 0 then flush (CBytes (outbuf, used_out));
       Zlib.inflate_end zs
     in
-    add, finalize
-  in
-  let stored_fns flush =
+    { add; finalize }
+
+  let stored flush =
     let buf = Buffer.create 1024 in
     let add c =
       Buffer.add_char buf c;
@@ -98,9 +100,102 @@ let parser cb =
         Buffer.clear buf
       end
     in
-    add, (fun () -> ())
+    { add; finalize = (fun () -> ()) }
+end
+
+module Mode = struct
+  type 'a t = {
+    flush: chunk -> unit;
+    complete: unit -> 'a Data.t * int * int32;
+  }
+
+  let skip () =
+    let crc = ref Int32.zero in
+    let bytes_processed = ref 0 in
+    let flush = function
+      | CBuffer buf ->
+        let len = Buffer.length buf in
+        bytes_processed := !bytes_processed + len;
+        crc := Zlib.update_crc_string !crc (Buffer.contents buf) 0 len
+      | CBytes (bytes, len) ->
+        bytes_processed := !bytes_processed + len;
+        crc := Zlib.update_crc !crc bytes 0 len
+    in
+    let complete () = Data.Skip, !bytes_processed, !crc in
+    { flush; complete }
+
+  let string size =
+    let res = Buffer.create size in
+    let flush = function
+      | CBuffer buf -> Buffer.add_buffer res buf
+      | CBytes (bytes, len) -> Buffer.add_subbytes res bytes ~pos:0 ~len
+    in
+    let complete () =
+      let str = Buffer.contents res in
+      let len = String.length str in
+      Data.String str, len, Zlib.update_crc_string Int32.zero str 0 len
+    in
+    { flush; complete }
+
+  let chunk write =
+    let crc = ref Int32.zero in
+    let bytes_processed = ref 0 in
+    let process s =
+      let len = String.length s in
+      bytes_processed := !bytes_processed + len;
+      crc := Zlib.update_crc_string !crc s 0 len;
+      write s
+    in
+    let flush = function
+      | CBuffer buf -> process (Buffer.contents buf)
+      | CBytes (bytes, len) -> process (Bytes.To_string.sub bytes ~pos:0 ~len)
+    in
+    let complete () = Data.Chunk, !bytes_processed, !crc in
+    { flush; complete }
+
+  let parser angstrom =
+    let crc = ref Int32.zero in
+    let bytes_processed = ref 0 in
+    let open Buffered in
+    let state = ref (parse angstrom) in
+    let process s =
+      let len = String.length s in
+      bytes_processed := !bytes_processed + len;
+      crc := Zlib.update_crc_string !crc s 0 len;
+      match !state with
+      | Done _
+       |Fail _ ->
+        ()
+      | Partial feed -> state := feed (`String s)
+    in
+    let flush = function
+      | CBuffer buf -> process (Buffer.contents buf)
+      | CBytes (bytes, len) -> process (Bytes.To_string.sub bytes ~pos:0 ~len)
+    in
+    let complete () =
+      let final_state =
+        match !state with
+        | (Done _ as x)
+         |(Fail _ as x) ->
+          x
+        | Partial feed -> feed `Eof
+      in
+      Data.Parse (state_to_result final_state), !bytes_processed, !crc
+    in
+    { flush; complete }
+end
+
+let parser cb =
+  let header_parser = string "PK\003\004" in
+  let descriptor_parser =
+    lift3
+      (fun crc compressed_size uncompressed_size -> { crc; compressed_size; uncompressed_size })
+      LE.any_int32 (* crc *)
+      (LE.any_int32 >>| Int32.to_int_exn) (* compressed_size *)
+      (LE.any_int32 >>| Int32.to_int_exn)
+    (* uncompressed_size *)
   in
-  let bounded_file_reader add finalize =
+  let bounded_file_reader Storage.{ add; finalize } =
     let rec loop n ll =
       any_char >>= fun c ->
       match c, n with
@@ -119,7 +214,7 @@ let parser cb =
     in
     loop 0 []
   in
-  let fixed_size_reader size add finalize =
+  let fixed_size_reader size Storage.{ add; finalize } =
     let rec loop = function
       | 0 ->
         finalize ();
@@ -172,85 +267,27 @@ let parser cb =
       ( lift2 double LE.any_uint16 (* filename length *) LE.any_uint16 (* extra length *)
       >>= fun (len1, len2) -> lift2 double (take len1) (take len2) )
   in
-  let skip_mode () =
-    let crc = ref Int32.zero in
-    let bytes_processed = ref 0 in
-    let flush = function
-      | CBuffer buf ->
-        let len = Buffer.length buf in
-        bytes_processed := !bytes_processed + len;
-        crc := Zlib.update_crc_string !crc (Buffer.contents buf) 0 len
-      | CBytes (bytes, len) ->
-        bytes_processed := !bytes_processed + len;
-        crc := Zlib.update_crc !crc bytes 0 len
-    in
-    let complete () = Skipped, !bytes_processed, !crc in
-    flush, complete
-  in
-  let string_mode size =
-    let res = Buffer.create size in
-    let flush = function
-      | CBuffer buf -> Buffer.add_buffer res buf
-      | CBytes (bytes, len) -> Buffer.add_subbytes res bytes ~pos:0 ~len
-    in
-    let complete () =
-      let str = Buffer.contents res in
-      let len = String.length str in
-      As_string str, len, Zlib.update_crc_string Int32.zero str 0 len
-    in
-    flush, complete
-  in
-  let parser_mode angstrom =
-    let crc = ref Int32.zero in
-    let bytes_processed = ref 0 in
-    let open Buffered in
-    let state = ref (parse angstrom) in
-    let process s =
-      let len = String.length s in
-      bytes_processed := !bytes_processed + len;
-      crc := Zlib.update_crc_string !crc s 0 len;
-      match !state with
-      | Done _
-       |Fail _ ->
-        ()
-      | Partial feed -> state := feed (`String s)
-    in
-    let flush = function
-      | CBuffer buf -> process (Buffer.contents buf)
-      | CBytes (bytes, len) -> process (Bytes.To_string.sub bytes ~pos:0 ~len)
-    in
-    let complete () =
-      let final_state =
-        match !state with
-        | (Done _ as x)
-         |(Fail _ as x) ->
-          x
-        | Partial feed -> feed `Eof
-      in
-      Parsed (state_to_result final_state), !bytes_processed, !crc
-    in
-    flush, complete
-  in
   let file_parser =
     entry_parser >>= fun entry ->
     let reader ?(size = 4096) () =
-      let flush, complete =
+      let Mode.{ flush; complete } =
         match cb entry with
-        | Skip -> skip_mode ()
-        | String -> string_mode size
-        | Parse angstrom -> parser_mode angstrom
+        | Action.Skip -> Mode.skip ()
+        | Action.String -> Mode.string size
+        | Action.Chunk write -> Mode.chunk write
+        | Action.Parse angstrom -> Mode.parser angstrom
       in
-      let (add, finalize), zipped_length =
+      let storage_method, zipped_length =
         match entry.methd with
-        | Stored -> stored_fns flush, entry.descriptor.uncompressed_size
-        | Deflated -> deflated_fns flush, entry.descriptor.compressed_size
+        | Stored -> Storage.stored flush, entry.descriptor.uncompressed_size
+        | Deflated -> Storage.deflated flush, entry.descriptor.compressed_size
       in
       let file_reader =
         if entry.descriptor.compressed_size = 0 || entry.descriptor.uncompressed_size = 0
         then bounded_file_reader
         else fixed_size_reader zipped_length
       in
-      file_reader add finalize >>| complete
+      file_reader storage_method >>| complete
     in
     begin
       match entry.trailing_descriptor_present with
@@ -268,10 +305,9 @@ let parser cb =
   in
   file_parser
 
-let mutex = Lwt_mutex.create ()
-
 let stream_files input_channel cb =
   let stream, bounded = Lwt_stream.create_bounded 1 in
+  let mutex = Lwt_mutex.create () in
   let processed =
     Lwt.finalize
       (fun () ->

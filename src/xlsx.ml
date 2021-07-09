@@ -76,7 +76,7 @@ let parse_sheet ~sheet_number push =
     push (Some { sheet_number; row_number; data = el.children });
     None
   in
-  Parse (parser ~filter_map [ "worksheet"; "sheetData"; "row" ])
+  Action.Parse (parser ~filter_map [ "worksheet"; "sheetData"; "row" ])
 
 let process_file ?only_sheet ic push finalize =
   let sst_p, sst_w = Lwt.wait () in
@@ -106,7 +106,7 @@ let process_file ?only_sheet ic push finalize =
             >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
             |> Option.filter ~f:(fun i -> Option.value_map only_sheet ~default:true ~f:(Int.( = ) i))
             >>| (fun sheet_number -> parse_sheet ~sheet_number push)
-            |> Option.value ~default:Skip)
+            |> Option.value ~default:Action.Skip)
     in
     let%lwt () =
       Lwt.finalize
@@ -115,15 +115,16 @@ let process_file ?only_sheet ic push finalize =
             (fun (entry, data) ->
               let open Zip in
               match data with
-              | Skipped
-               |As_string _ ->
+              | Data.Skip
+               |Data.String _
+               |Data.Chunk ->
                 ()
-              | Parsed (Ok xml) -> (
+              | Data.Parse (Ok xml) -> (
                 match entry.filename with
                 | "xl/sharedStrings.xml" -> Lwt.wakeup_later sst_w (SST xml)
                 | _ -> ()
               )
-              | Parsed (Error msg) -> failwithf "XLSX Parsing error for %s: %s" entry.filename msg ())
+              | Data.Parse (Error msg) -> failwithf "XLSX Parsing error for %s: %s" entry.filename msg ())
             zip_stream)
         (fun () ->
           begin
