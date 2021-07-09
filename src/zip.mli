@@ -27,7 +27,7 @@ module Action : sig
   type 'a t =
     | Skip
     | String
-    | Chunk  of (string -> unit)
+    | Chunk  of (entry * string -> unit)
     | Parse  of 'a Angstrom.t
 end
 

@@ -14,7 +14,7 @@ let chunk () =
     let queue = Queue.create () in
     Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
         let stream, processed =
-          SZXX.Zip.stream_files ic (fun _ -> Chunk (fun s -> Queue.enqueue queue (`String s)))
+          SZXX.Zip.stream_files ic (fun _ -> Chunk (fun (_entry, s) -> Queue.enqueue queue (`String s)))
         in
         let%lwt () = Lwt.join [ Lwt_stream.iter (const ()) stream; processed ] in
         Lwt.return (`Assoc [ "data", `List (List.rev (Queue.to_list queue)) ]))

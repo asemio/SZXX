@@ -35,7 +35,7 @@ module Action = struct
   type 'a t =
     | Skip
     | String
-    | Chunk  of (string -> unit)
+    | Chunk  of (entry * string -> unit)
     | Parse  of 'a Angstrom.t
 end
 
@@ -137,14 +137,14 @@ module Mode = struct
     in
     { flush; complete }
 
-  let chunk write =
+  let chunk entry write =
     let crc = ref Int32.zero in
     let bytes_processed = ref 0 in
     let process s =
       let len = String.length s in
       bytes_processed := !bytes_processed + len;
       crc := Zlib.update_crc_string !crc s 0 len;
-      write s
+      write (entry, s)
     in
     let flush = function
       | CBuffer buf -> process (Buffer.contents buf)
@@ -274,7 +274,7 @@ let parser cb =
         match cb entry with
         | Action.Skip -> Mode.skip ()
         | Action.String -> Mode.string size
-        | Action.Chunk write -> Mode.chunk write
+        | Action.Chunk write -> Mode.chunk entry write
         | Action.Parse angstrom -> Mode.parser angstrom
       in
       let storage_method, zipped_length =
