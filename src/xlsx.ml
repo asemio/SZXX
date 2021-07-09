@@ -63,7 +63,7 @@ let parse_sheet ~sheet_number push =
           then begin
             (* Insert blank rows *)
             for row_number = next to pred i do
-              push (Some { sheet_number; row_number; data = [||] })
+              push { sheet_number; row_number; data = [||] }
             done;
             num := i;
             i
@@ -73,7 +73,7 @@ let parse_sheet ~sheet_number push =
         | _ -> next
       )
     in
-    push (Some { sheet_number; row_number; data = el.children });
+    push { sheet_number; row_number; data = el.children };
     None
   in
   Action.Parse (parser ~filter_map [ "worksheet"; "sheetData"; "row" ])
@@ -192,36 +192,9 @@ let extract_row cell_of_string ({ data; sheet_number; row_number } as row) =
   )
 
 let stream_rows ?only_sheet cell_of_string input_channel =
-  let mutex = Lwt_mutex.create () in
-  let queue = Queue.create () in
-  let push = Queue.enqueue queue in
-  let mvar = Lwt_mvar.create_empty () in
-  let rec flush () =
-    match Queue.dequeue queue with
-    | Some row ->
-      let%lwt () = Lwt_mvar.put mvar row in
-      flush ()
-    | None -> Lwt.return_unit
-  in
-  let stream = Lwt_stream.from (fun () -> Lwt_mvar.take mvar) in
-  let ic =
-    let size = Lwt_io.default_buffer_size () in
-    let buffer = Bytes.create size in
-    Lwt_io.make ~buffer:(Lwt_bytes.create size) ~mode:Input (fun bytes offset len ->
-        Lwt_mutex.with_lock mutex (fun () ->
-            let%lwt () = flush () in
-            let%lwt written = Lwt_io.read_into input_channel buffer offset len in
-            Lwt_bytes.blit_from_bytes buffer offset bytes offset written;
-            Lwt.return written))
-  in
-  let finalize () =
-    push None;
-    let%lwt () = Lwt_mutex.with_lock mutex flush in
-    let%lwt () = Lwt_io.close input_channel in
-    Lwt_io.close ic
-  in
+  let Expert.{ controlled_ic; push; finalize; stream } = Expert.backpressure input_channel in
 
-  let sst_p, processed_p = process_file ?only_sheet ic push finalize in
+  let sst_p, processed_p = process_file ?only_sheet controlled_ic push finalize in
   let parsed_stream = Lwt_stream.map (fun row -> extract_row cell_of_string row) stream in
   parsed_stream, sst_p, processed_p
 
@@ -243,7 +216,7 @@ let stream_rows_buffer ?only_sheet cell_of_string input_channel =
     push None;
     Lwt_io.close input_channel
   in
-  let sst_p, processed_p = process_file ?only_sheet input_channel push finalize in
+  let sst_p, processed_p = process_file ?only_sheet input_channel (fun x -> push (Some x)) finalize in
   let parsed_stream =
     Lwt_stream.map_s
       (fun row ->

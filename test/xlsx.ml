@@ -47,6 +47,37 @@ let xlsx filename () =
 
   Lwt.return_unit
 
+let stream_rows filename () =
+  let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
+  let json_path = "../../../test/files/streamed.json" in
+  let%lwt against =
+    Lwt_io.with_file ~flags ~mode:Input json_path (fun ic ->
+        let%lwt contents = Lwt_io.read ic in
+        Lwt.return (Yojson.Safe.from_string contents))
+  in
+  let%lwt parsed =
+    Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
+        let open SZXX.Xlsx in
+        let stream, sst, processed = stream_rows yojson_readers ic in
+        let%lwt sst = sst in
+        let%lwt json_list =
+          Lwt_stream.map
+            (fun status ->
+              let row = await_delayed yojson_readers sst status in
+              `List (Array.to_list row.data))
+            stream
+          |> Lwt_stream.to_list
+        in
+        let%lwt () = processed in
+        Lwt.return (`Assoc [ "data", `List json_list ]))
+  in
+  (* let%lwt () =
+       Lwt_io.with_file ~flags:[ O_WRONLY; O_NONBLOCK; O_TRUNC ] ~mode:Output json_path (fun oc ->
+           Lwt_io.write oc (Yojson.Safe.to_string parsed))
+     in *)
+  Json_diff.check parsed against;
+  Lwt.return_unit
+
 let () =
   Lwt_main.run
   @@ Alcotest_lwt.run "SZXX XLSX"
@@ -56,5 +87,6 @@ let () =
              "simple.xlsx", `Quick, xlsx "simple";
              "financial.xlsx", `Quick, xlsx "financial";
              "Readme example", `Quick, readme_example "financial";
+             "Unbuffed stream", `Quick, stream_rows "financial";
            ] );
        ]
