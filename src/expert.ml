@@ -30,10 +30,13 @@ let backpressure input_channel =
             Lwt_bytes.blit_from_bytes buffer offset bytes offset written;
             Lwt.return written))
   in
-  let finalize () =
-    push None;
-    let%lwt () = Lwt_mutex.with_lock mutex flush in
-    let%lwt () = Lwt_io.close input_channel in
-    Lwt_io.close ic
+  let finalized =
+    lazy
+      ( push None;
+        let%lwt () = Lwt_mutex.with_lock mutex flush in
+        let%lwt () = Lwt_io.close input_channel in
+        Lwt_io.close ic
+      )
   in
+  let finalize () = force finalized in
   { controlled_ic = ic; stream; push = (fun x -> push (Some x)); finalize }
