@@ -1,6 +1,3 @@
-(* Inspired by Xavier Leroy's https://github.com/xavierleroy/camlzip/blob/75917e4c41983b730f4ae21ae841de63132b42a2/zip.ml *)
-(* Original copyright notice: https://github.com/xavierleroy/camlzip/blob/75917e4c41983b730f4ae21ae841de63132b42a2/zip.ml#L1-L12 *)
-
 open! Core_kernel
 open Angstrom
 
@@ -28,8 +25,8 @@ type entry = {
 [@@deriving sexp_of]
 
 type chunk =
-  | CBuffer of Buffer.t
-  | CBytes  of (bytes * int)
+  | CBigbuffer of Bigbuffer.t
+  | CBigstring of (Bigstring.t * int)
 
 module Action = struct
   type 'a t =
@@ -60,44 +57,46 @@ module Storage = struct
   }
 
   let deflated flush =
-    let zs = Zlib.inflate_init false in
-    let buf = Buffer.create 1024 in
-    let inbuf = Bytes.create 1024 in
-    let outbuf = Bytes.create 1024 in
-    let rec do_uncompress inpos inavail =
-      let finished, used_in, used_out = Zlib.inflate zs inbuf inpos inavail outbuf 0 1024 Z_SYNC_FLUSH in
-      if used_out > 0 then flush (CBytes (outbuf, used_out));
-      if (not finished) && used_in > 0 then do_uncompress (inpos + used_in) (inavail - used_in)
+    let w = De.make_window ~bits:10 in
+    let inbs_pos = ref 0 in
+    let inbs = De.bigstring_create 1024 in
+    let outbs = De.bigstring_create 1024 in
+    let decoder = De.Inf.decoder `Manual ~o:outbs ~w in
+    let rec do_uncompress () =
+      match De.Inf.decode decoder with
+      | `Await -> false
+      | `End ->
+        let len = Bigstring.length outbs - De.Inf.dst_rem decoder in
+        if len > 0 then flush (CBigstring (outbs, len));
+        true
+      | `Flush ->
+        let len = Bigstring.length outbs - De.Inf.dst_rem decoder in
+        flush (CBigstring (outbs, len));
+        De.Inf.flush decoder;
+        do_uncompress ()
+      | `Malformed err -> failwith err
     in
     let uncompress () =
-      let len = Buffer.length buf in
-      if Int.(len = 0) then () else Buffer.blit ~src:buf ~src_pos:0 ~dst:inbuf ~dst_pos:0 ~len;
-      do_uncompress 0 len;
-      Buffer.clear buf
+      De.Inf.src decoder inbs 0 !inbs_pos;
+      inbs_pos := 0;
+      do_uncompress ()
     in
     let add c =
-      Buffer.add_char buf c;
-      if Int.(Buffer.length buf = 1024) then uncompress ()
+      Bigstring.set inbs !inbs_pos c;
+      incr inbs_pos;
+      if Int.(!inbs_pos = 1024) then ignore (uncompress ())
     in
-    let finalize () =
-      uncompress ();
-      (* Gotcha: if there is no header, inflate requires an extra "dummy" byte
-         after the compressed stream in order to complete decompression
-         and return finished = true. *)
-      let _finished, _, used_out = Zlib.inflate zs inbuf 0 1 outbuf 0 1024 Z_SYNC_FLUSH in
-      if used_out > 0 then flush (CBytes (outbuf, used_out));
-      Zlib.inflate_end zs
-    in
+    let finalize () = if not (uncompress ()) then ignore (uncompress ()) in
     { add; finalize }
 
   let stored flush =
-    let buf = Buffer.create 1024 in
+    let buf = Bigbuffer.create 1024 in
     let add c =
-      Buffer.add_char buf c;
-      if Int.(Buffer.length buf = 1024)
+      Bigbuffer.add_char buf c;
+      if Bigbuffer.length buf = 1024
       then begin
-        flush (CBuffer buf);
-        Buffer.clear buf
+        flush (CBigbuffer buf);
+        Bigbuffer.clear buf
       end
     in
     { add; finalize = (fun () -> ()) }
@@ -106,71 +105,72 @@ end
 module Mode = struct
   type 'a t = {
     flush: chunk -> unit;
-    complete: unit -> 'a Data.t * int * int32;
+    complete: unit -> 'a Data.t * int * Optint.t;
   }
 
   let skip () =
-    let crc = ref Int32.zero in
+    let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
     let flush = function
-      | CBuffer buf ->
-        let len = Buffer.length buf in
+      | CBigbuffer buf ->
+        let len = Bigbuffer.length buf in
         bytes_processed := !bytes_processed + len;
-        crc := Zlib.update_crc_string !crc (Buffer.contents buf) 0 len
-      | CBytes (bytes, len) ->
+        crc := Checkseum.Crc32.digest_bigstring (Bigbuffer.volatile_contents buf) 0 len !crc
+      | CBigstring (bs, len) ->
         bytes_processed := !bytes_processed + len;
-        crc := Zlib.update_crc !crc bytes 0 len
+        crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc
     in
     let complete () = Data.Skip, !bytes_processed, !crc in
     { flush; complete }
 
   let string size =
-    let res = Buffer.create size in
+    let res = Bigbuffer.create size in
     let flush = function
-      | CBuffer buf -> Buffer.add_buffer res buf
-      | CBytes (bytes, len) -> Buffer.add_subbytes res bytes ~pos:0 ~len
+      | CBigbuffer buf -> Bigbuffer.add_buffer res buf
+      | CBigstring (bs, len) -> Bigbuffer.add_bigstring res (Bigstring.sub_shared bs ~pos:0 ~len)
     in
     let complete () =
-      let str = Buffer.contents res in
+      let str = Bigbuffer.contents res in
       let len = String.length str in
-      Data.String str, len, Zlib.update_crc_string Int32.zero str 0 len
+      Data.String str, len, Checkseum.Crc32.digest_string str 0 len Optint.zero
     in
     { flush; complete }
 
   let chunk entry write =
-    let crc = ref Int32.zero in
+    let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
     let process s =
       let len = String.length s in
       bytes_processed := !bytes_processed + len;
-      crc := Zlib.update_crc_string !crc s 0 len;
+      crc := Checkseum.Crc32.digest_string s 0 len !crc;
       write (entry, s)
     in
     let flush = function
-      | CBuffer buf -> process (Buffer.contents buf)
-      | CBytes (bytes, len) -> process (Bytes.To_string.sub bytes ~pos:0 ~len)
+      | CBigbuffer buf -> process (Bigbuffer.contents buf)
+      | CBigstring (bs, len) -> process (Bigstring.to_string bs ~pos:0 ~len)
     in
     let complete () = Data.Chunk, !bytes_processed, !crc in
     { flush; complete }
 
   let parser angstrom =
-    let crc = ref Int32.zero in
+    let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
     let open Buffered in
     let state = ref (parse angstrom) in
-    let process s =
-      let len = String.length s in
+    let process ~len bs =
       bytes_processed := !bytes_processed + len;
-      crc := Zlib.update_crc_string !crc s 0 len;
+      crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc;
       match !state with
       | Done _
        |Fail _ ->
         ()
-      | Partial feed -> state := feed (`String s)
+      | Partial feed -> state := feed (`Bigstring (Bigstring.sub_shared bs ~pos:0 ~len))
     in
     let flush = function
-      | CBuffer buf -> process (Buffer.contents buf)
-      | CBytes (bytes, len) -> process (Bytes.To_string.sub bytes ~pos:0 ~len)
+      | CBigbuffer buf ->
+        let len = Bigbuffer.length buf in
+        process ~len (Bigbuffer.volatile_contents buf)
+      | CBigstring (bs, len) -> process ~len bs
     in
     let complete () =
       let final_state =
@@ -298,8 +298,8 @@ let parser cb =
     end
     >>| function
     | (_data, size, _crc), entry when entry.descriptor.uncompressed_size <> size ->
-      failwithf "%s: Size mismatch" entry.filename ()
-    | (_data, _size, crc), entry when Int32.(entry.descriptor.crc <> crc) ->
+      failwithf "%s: Size mismatch: %d <> %d" entry.filename entry.descriptor.uncompressed_size size ()
+    | (_data, _size, crc), entry when Int32.(entry.descriptor.crc <> Optint.to_int32 crc) ->
       failwithf "%s: CRC mismatch" entry.filename ()
     | (data, _size, _crc), entry -> entry, data
   in

@@ -37,13 +37,9 @@ let print_rows_as_json xlsx_path =
 
 It's a convenient way to expose this sort of functionality. Unfortunately it results in having to return a promise to pass back errors that killed the stream half way through. A future version might improve on this.
 
-#### I see it uses [Camlzip](https://github.com/xavierleroy/camlzip), are you sure it's not buffering the whole zip file?
-
-It only uses Camlzip for its zlib bindings. The next version of SZXX will allow the user to choose between zlib and [Decompress](https://github.com/mirage/decompress).
-
 #### Does this work in the browser?
 
-Not yet, due to the zlib bindings. It will soon support the [Decompress](https://github.com/mirage/decompress) library in pure OCaml. At that point, yes it will compile to JavaScript under js_of_ocaml.
+Yes, with js_of_ocaml.
 
 #### Is it fast?
 
