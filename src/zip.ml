@@ -24,9 +24,7 @@ type entry = {
 }
 [@@deriving sexp_of]
 
-type chunk =
-  | CBigbuffer of Bigbuffer.t
-  | CBigstring of (Bigstring.t * int)
+type chunk = Bigstring.t * int
 
 module Action = struct
   type 'a t =
@@ -59,19 +57,19 @@ module Storage = struct
   let deflated flush =
     let w = De.make_window ~bits:10 in
     let inbs_pos = ref 0 in
-    let inbs = De.bigstring_create 1024 in
-    let outbs = De.bigstring_create 1024 in
+    let inbs = Bigstring.create 1024 in
+    let outbs = Bigstring.create 1024 in
     let decoder = De.Inf.decoder `Manual ~o:outbs ~w in
     let rec do_uncompress () =
       match De.Inf.decode decoder with
       | `Await -> false
       | `End ->
         let len = Bigstring.length outbs - De.Inf.dst_rem decoder in
-        if len > 0 then flush (CBigstring (outbs, len));
+        if len > 0 then flush (outbs, len);
         true
       | `Flush ->
         let len = Bigstring.length outbs - De.Inf.dst_rem decoder in
-        flush (CBigstring (outbs, len));
+        flush (outbs, len);
         De.Inf.flush decoder;
         do_uncompress ()
       | `Malformed err -> failwith err
@@ -90,16 +88,22 @@ module Storage = struct
     { add; finalize }
 
   let stored flush =
-    let buf = Bigbuffer.create 1024 in
+    let bs = Bigstring.create 1024 in
+    let pos = ref 0 in
     let add c =
-      Bigbuffer.add_char buf c;
-      if Bigbuffer.length buf = 1024
+      Bigstring.set bs !pos c;
+      incr pos;
+      if !pos = 1024
       then begin
-        flush (CBigbuffer buf);
-        Bigbuffer.clear buf
+        flush (bs, 1024);
+        pos := 0
       end
     in
-    { add; finalize = (fun () -> ()) }
+    let finalize () =
+      let len = !pos in
+      if len > 0 then flush (bs, len)
+    in
+    { add; finalize }
 end
 
 module Mode = struct
@@ -111,24 +115,16 @@ module Mode = struct
   let skip () =
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
-    let flush = function
-      | CBigbuffer buf ->
-        let len = Bigbuffer.length buf in
-        bytes_processed := !bytes_processed + len;
-        crc := Checkseum.Crc32.digest_bigstring (Bigbuffer.volatile_contents buf) 0 len !crc
-      | CBigstring (bs, len) ->
-        bytes_processed := !bytes_processed + len;
-        crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc
+    let flush (bs, len) =
+      bytes_processed := !bytes_processed + len;
+      crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc
     in
     let complete () = Data.Skip, !bytes_processed, !crc in
     { flush; complete }
 
   let string size =
     let res = Bigbuffer.create size in
-    let flush = function
-      | CBigbuffer buf -> Bigbuffer.add_buffer res buf
-      | CBigstring (bs, len) -> Bigbuffer.add_bigstring res (Bigstring.sub_shared bs ~pos:0 ~len)
-    in
+    let flush (bs, len) = Bigbuffer.add_bigstring res (Bigstring.sub_shared bs ~pos:0 ~len) in
     let complete () =
       let str = Bigbuffer.contents res in
       let len = String.length str in
@@ -145,10 +141,7 @@ module Mode = struct
       crc := Checkseum.Crc32.digest_string s 0 len !crc;
       write (entry, s)
     in
-    let flush = function
-      | CBigbuffer buf -> process (Bigbuffer.contents buf)
-      | CBigstring (bs, len) -> process (Bigstring.to_string bs ~pos:0 ~len)
-    in
+    let flush (bs, len) = process (Bigstring.to_string bs ~pos:0 ~len) in
     let complete () = Data.Chunk, !bytes_processed, !crc in
     { flush; complete }
 
@@ -157,7 +150,7 @@ module Mode = struct
     let bytes_processed = ref 0 in
     let open Buffered in
     let state = ref (parse angstrom) in
-    let process ~len bs =
+    let flush (bs, len) =
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc;
       match !state with
@@ -165,12 +158,6 @@ module Mode = struct
        |Fail _ ->
         ()
       | Partial feed -> state := feed (`Bigstring (Bigstring.sub_shared bs ~pos:0 ~len))
-    in
-    let flush = function
-      | CBigbuffer buf ->
-        let len = Bigbuffer.length buf in
-        process ~len (Bigbuffer.volatile_contents buf)
-      | CBigstring (bs, len) -> process ~len bs
     in
     let complete () =
       let final_state =
