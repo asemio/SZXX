@@ -1,5 +1,4 @@
 open! Core_kernel
-open Angstrom
 
 type methd =
   | Stored
@@ -46,7 +45,7 @@ let double x y = x, y
 
 let triple x y z = x, y, z
 
-let maybe p = option None (p >>| Option.return)
+let maybe p = Angstrom.(option None (p >>| Option.return))
 
 module Storage = struct
   type t = {
@@ -148,7 +147,7 @@ module Mode = struct
   let parser angstrom =
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
-    let open Buffered in
+    let open Angstrom.Buffered in
     let state = ref (parse angstrom) in
     let flush (bs, len) =
       bytes_processed := !bytes_processed + len;
@@ -173,6 +172,7 @@ module Mode = struct
 end
 
 let parser cb =
+  let open Angstrom in
   let header_parser = string "PK\003\004" in
   let descriptor_parser =
     lift3
@@ -254,60 +254,87 @@ let parser cb =
       ( lift2 double LE.any_uint16 (* filename length *) LE.any_uint16 (* extra length *)
       >>= fun (len1, len2) -> lift2 double (take len1) (take len2) )
   in
-  let file_parser =
-    entry_parser >>= fun entry ->
-    let reader ?(size = 4096) () =
-      let Mode.{ flush; complete } =
-        match cb entry with
-        | Action.Skip -> Mode.skip ()
-        | Action.String -> Mode.string size
-        | Action.Chunk write -> Mode.chunk entry write
-        | Action.Parse angstrom -> Mode.parser angstrom
-      in
-      let storage_method, zipped_length =
-        match entry.methd with
-        | Stored -> Storage.stored flush, entry.descriptor.uncompressed_size
-        | Deflated -> Storage.deflated flush, entry.descriptor.compressed_size
-      in
-      let file_reader =
-        if entry.descriptor.compressed_size = 0 || entry.descriptor.uncompressed_size = 0
-        then bounded_file_reader
-        else fixed_size_reader zipped_length
-      in
-      file_reader storage_method >>| complete
+  entry_parser >>= fun entry ->
+  let reader ?(size = 4096) () =
+    let Mode.{ flush; complete } =
+      match cb entry with
+      | Action.Skip -> Mode.skip ()
+      | Action.String -> Mode.string size
+      | Action.Chunk write -> Mode.chunk entry write
+      | Action.Parse angstrom -> Mode.parser angstrom
     in
-    begin
-      match entry.trailing_descriptor_present with
-      | false -> lift2 double (reader ~size:entry.descriptor.uncompressed_size ()) (return entry)
-      | true ->
-        lift2 double (reader ())
-          (maybe header_parser *> descriptor_parser >>| fun descriptor -> { entry with descriptor })
-    end
-    >>| function
-    | (_data, size, _crc), entry when entry.descriptor.uncompressed_size <> size ->
-      failwithf "%s: Size mismatch: %d <> %d" entry.filename entry.descriptor.uncompressed_size size ()
-    | (_data, _size, crc), entry when Int32.(entry.descriptor.crc <> Optint.to_int32 crc) ->
-      failwithf "%s: CRC mismatch" entry.filename ()
-    | (data, _size, _crc), entry -> entry, data
+    let storage_method, zipped_length =
+      match entry.methd with
+      | Stored -> Storage.stored flush, entry.descriptor.uncompressed_size
+      | Deflated -> Storage.deflated flush, entry.descriptor.compressed_size
+    in
+    let file_reader =
+      if entry.descriptor.compressed_size = 0 || entry.descriptor.uncompressed_size = 0
+      then bounded_file_reader
+      else fixed_size_reader zipped_length
+    in
+    file_reader storage_method >>| complete
   in
-  file_parser
+  begin
+    match entry.trailing_descriptor_present with
+    | false -> lift2 double (reader ~size:entry.descriptor.uncompressed_size ()) (return entry)
+    | true ->
+      lift2 double (reader ())
+        (maybe header_parser *> descriptor_parser >>| fun descriptor -> { entry with descriptor })
+  end
+  >>| function
+  | (_data, size, _crc), entry when entry.descriptor.uncompressed_size <> size ->
+    failwithf "%s: Size mismatch: %d <> %d" entry.filename entry.descriptor.uncompressed_size size ()
+  | (_data, _size, crc), entry when Int32.(entry.descriptor.crc <> Optint.to_int32 crc) ->
+    failwithf "%s: CRC mismatch" entry.filename ()
+  | (data, _size, _crc), entry -> entry, data
 
-let stream_files input_channel cb =
+type 'a slice = {
+  buf: 'a;
+  pos: int;
+  len: int;
+}
+
+type feed =
+  | String    of (unit -> string option Lwt.t)
+  | Bigstring of (unit -> Bigstring.t slice option Lwt.t)
+
+let stream_files ~feed:read cb =
+  let read =
+    let open Lwt.Infix in
+    match read with
+    | String f -> (fun () -> f () >|= Option.map ~f:(fun s -> `String s))
+    | Bigstring f ->
+      fun () ->
+        f () >|= Option.map ~f:(fun { buf; pos; len } -> `Bigstring (Bigstring.sub_shared buf ~pos ~len))
+  in
   let stream, bounded = Lwt_stream.create_bounded 1 in
   let mutex = Lwt_mutex.create () in
-  let processed =
-    Lwt.finalize
-      (fun () ->
-        let%lwt _unconsumed, result =
-          Angstrom_lwt_unix.parse_many (parser cb)
-            (fun pair -> Lwt_mutex.with_lock mutex (fun () -> bounded#push pair))
-            input_channel
-        in
-        match result with
-        | Ok () -> Lwt.return_unit
-        | Error err -> failwithf "Syntax Error: %s" err ())
-      (fun () ->
-        if not (Lwt_stream.is_closed stream) then bounded#close;
-        if not (Lwt_io.is_closed input_channel) then Lwt_io.close input_channel else Lwt.return_unit)
+  let open Angstrom.Buffered in
+  let rec loop = function
+    | Fail (_, [], err) -> failwith err
+    | Fail (_, marks, err) -> failwithf "%s: %s" (String.concat ~sep:" > " marks) err ()
+    | Done ({ buf; off = pos; len }, pair) -> (
+      let%lwt () = Lwt_mutex.with_lock mutex (fun () -> bounded#push pair) in
+      match parse (parser cb) with
+      | Partial feed -> loop (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len)))
+      | state -> loop state
+    )
+    | Partial feed -> (
+      match%lwt read () with
+      | None -> (
+        match feed `Eof with
+        | Done (_, pair) -> Lwt_mutex.with_lock mutex (fun () -> bounded#push pair)
+        | _ -> Lwt.return_unit
+      )
+      | Some chunk -> loop (feed chunk)
+    )
   in
-  stream, processed
+  let p =
+    Lwt.finalize
+      (fun () -> loop (parse (parser cb)))
+      (fun () ->
+        bounded#close;
+        Lwt.return_unit)
+  in
+  stream, p

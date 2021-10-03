@@ -4,11 +4,9 @@
   (libraries
     core_kernel
     angstrom
-    angstrom-lwt-unix
     checkseum.ocaml
     decompress.de
     lwt
-    lwt.unix
     lwt_ppx
   )
   (preprocess (pps

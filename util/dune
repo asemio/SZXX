@@ -2,6 +2,7 @@
   (name cli)
   (libraries
     SZXX
+    lwt.unix
   )
   (preprocess (pps
     lwt_ppx

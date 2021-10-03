@@ -80,8 +80,8 @@ val column_to_index : string -> int
 *)
 val stream_rows :
   ?only_sheet:int ->
+  feed:Zip.feed ->
   'a cell_of_string ->
-  Lwt_io.input_channel ->
   'a status row Lwt_stream.t * sst Lwt.t * unit Lwt.t
 
 (**
@@ -98,4 +98,4 @@ val await_delayed : 'a cell_of_string -> sst -> 'a status row -> 'a row
    As the name implies, it will buffer any cells referencing the SST that are located before the SST.
 *)
 val stream_rows_buffer :
-  ?only_sheet:int -> 'a cell_of_string -> Lwt_io.input_channel -> 'a row Lwt_stream.t * unit Lwt.t
+  ?only_sheet:int -> feed:Zip.feed -> 'a cell_of_string -> 'a row Lwt_stream.t * unit Lwt.t

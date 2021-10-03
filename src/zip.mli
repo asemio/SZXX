@@ -39,12 +39,22 @@ module Data : sig
     | Parse  of ('a, string) result
 end
 
+type 'a slice = {
+  buf: 'a;
+  pos: int;
+  len: int;
+}
+
+type feed =
+  | String    of (unit -> string option Lwt.t)
+  | Bigstring of (unit -> Bigstring.t slice option Lwt.t)
+
 (**
-   Stream rows from an [Lwt_io.input_channel].
+   Stream files.
 
-   [SZXX.Zip.stream_files ic callback]
+   [SZXX.Zip.stream_files ~read callback]
 
-   [ic]: The channel to read from
+   [read]: Produces data for the parser. Return [None] to indicate EOF.
 
    [callback]: function called on every file found within the zip archive.
    Returning [Action.Skip] will skip over the compressed bytes of this file without attempting to uncompress them.
@@ -57,5 +67,4 @@ end
    [unit promise]: A promise resolved once the entire zip archive has been processed.
    It is important to bind to/await this promise in order to capture any errors encountered while processing the file.
 *)
-val stream_files :
-  Lwt_io.input_channel -> (entry -> 'a Action.t) -> (entry * 'a Data.t) Lwt_stream.t * unit Lwt.t
+val stream_files : feed:feed -> (entry -> 'a Action.t) -> (entry * 'a Data.t) Lwt_stream.t * unit Lwt.t

@@ -78,11 +78,11 @@ let parse_sheet ~sheet_number push =
   in
   Action.Parse (parser ~filter_map [ "worksheet"; "sheetData"; "row" ])
 
-let process_file ?only_sheet ic push finalize =
+let process_file ?only_sheet ~feed push finalize =
   let sst_p, sst_w = Lwt.wait () in
   let processed_p =
     let zip_stream, zip_processed =
-      stream_files ic (fun entry ->
+      stream_files ~feed (fun entry ->
           match entry.filename with
           | "xl/workbook.xml" -> Parse (parser [])
           | "xl/sharedStrings.xml" ->
@@ -191,10 +191,15 @@ let extract_row cell_of_string ({ data; sheet_number; row_number } as row) =
     { row with data = new_data }
   )
 
-let stream_rows ?only_sheet cell_of_string input_channel =
-  let Expert.{ controlled_ic; push; finalize; stream } = Expert.backpressure input_channel in
+let stream_rows ?only_sheet ~feed cell_of_string =
+  (* let Expert.{ controlled_ic; push; finalize; stream } = Expert.backpressure input_channel in *)
+  let stream, push = Lwt_stream.create () in
+  let finalize () =
+    push None;
+    Lwt.return_unit
+  in
 
-  let sst_p, processed_p = process_file ?only_sheet controlled_ic push finalize in
+  let sst_p, processed_p = process_file ?only_sheet ~feed (fun x -> push (Some x)) finalize in
   let parsed_stream = Lwt_stream.map (fun row -> extract_row cell_of_string row) stream in
   parsed_stream, sst_p, processed_p
 
@@ -210,13 +215,13 @@ let await_delayed cell_of_string (SST sst) (row : 'a status row) =
   in
   { row with data }
 
-let stream_rows_buffer ?only_sheet cell_of_string input_channel =
+let stream_rows_buffer ?only_sheet ~feed cell_of_string =
   let stream, push = Lwt_stream.create () in
   let finalize () =
     push None;
-    Lwt_io.close input_channel
+    Lwt.return_unit
   in
-  let sst_p, processed_p = process_file ?only_sheet input_channel (fun x -> push (Some x)) finalize in
+  let sst_p, processed_p = process_file ?only_sheet ~feed (fun x -> push (Some x)) finalize in
   let parsed_stream =
     Lwt_stream.map_s
       (fun row ->

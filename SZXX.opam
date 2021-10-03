@@ -19,7 +19,6 @@ depends: [
   "dune" {>= "1.9.0"}
 
   "angstrom" {>= "0.14.1"}
-  "angstrom-lwt-unix" {>= "0.14.1"}
   "core_kernel" {>= "v0.13.0"}
   "decompress"
   "lwt" {>= "5.0.0"}

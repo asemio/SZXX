@@ -1,6 +1,7 @@
 let flags = Unix.[ O_RDONLY; O_NONBLOCK ]
 
 open! Core_kernel
+open Lwt.Infix
 
 let chunk () =
   let xlsx_path = "../../../test/files/financial.xlsx" in
@@ -13,8 +14,16 @@ let chunk () =
   let%lwt parsed =
     let queue = Queue.create () in
     Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
+        let len = Lwt_io.buffer_size ic in
+        let buf = Bigstring.create len in
+        let feed () =
+          Lwt_io.read_into_bigstring ic buf 0 len >|= function
+          | 0 -> None
+          | len -> Some SZXX.Zip.{ buf; pos = 0; len }
+        in
         let stream, processed =
-          SZXX.Zip.stream_files ic (fun _ -> Chunk (fun (_entry, s) -> Queue.enqueue queue (`String s)))
+          SZXX.Zip.stream_files ~feed:(Bigstring feed) (fun _ ->
+              Chunk (fun (_entry, s) -> Queue.enqueue queue (`String s)))
         in
         let%lwt () = Lwt.join [ Lwt_stream.iter (const ()) stream; processed ] in
         Lwt.return (`Assoc [ "data", `List (List.rev (Queue.to_list queue)) ]))

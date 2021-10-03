@@ -14,9 +14,20 @@ let string_readers : string Xlsx.cell_of_string =
     null = "";
   }
 
+let feed_bigstring ic =
+  let open Lwt.Infix in
+  let open SZXX.Zip in
+  let len = Lwt_io.buffer_size ic in
+  let buf = Bigstring.create len in
+  Bigstring
+    (fun () ->
+      Lwt_io.read_into_bigstring ic buf 0 len >|= function
+      | 0 -> None
+      | len -> Some { buf; pos = 0; len })
+
 let count xlsx_path =
   Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-      let stream, _sst_p, processed = Xlsx.stream_rows string_readers ic in
+      let stream, _sst_p, processed = Xlsx.stream_rows ~feed:(feed_bigstring ic) string_readers in
       let t0 = Time_now.nanoseconds_since_unix_epoch () in
 
       let%lwt n = Lwt_stream.fold (fun _x acc -> acc + 1) stream 0 in
@@ -33,7 +44,7 @@ let extract xlsx_path =
   Lwt_io.with_file ~flags:flags_overwrite ~mode:Output (sprintf "%s.sst.xml" xlsx_path) (fun oc ->
       Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
           let files, files_p =
-            Zip.stream_files ic (function
+            Zip.stream_files ~feed:(feed_bigstring ic) (function
               | { filename = "xl/sharedStrings.xml"; _ } -> Zip.Action.String
               | _ -> Zip.Action.Skip)
           in

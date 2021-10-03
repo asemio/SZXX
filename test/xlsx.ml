@@ -1,6 +1,7 @@
 let flags = Unix.[ O_RDONLY; O_NONBLOCK ]
 
 open! Core_kernel
+open Lwt.Infix
 
 let extractors =
   SZXX.Xlsx.
@@ -12,12 +13,31 @@ let extractors =
       null = `Null;
     }
 
+let feed_string ic =
+  let open SZXX.Zip in
+  let count = Lwt_io.buffer_size ic in
+  String
+    (fun () ->
+      Lwt_io.read ~count ic >|= function
+      | "" -> None
+      | chunk -> Some chunk)
+
+let feed_bigstring ic =
+  let open SZXX.Zip in
+  let len = Lwt_io.buffer_size ic in
+  let buf = Bigstring.create len in
+  Bigstring
+    (fun () ->
+      Lwt_io.read_into_bigstring ic buf 0 len >|= function
+      | 0 -> None
+      | len -> Some { buf; pos = 0; len })
+
 let readme_example filename () =
   let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
   Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
       let open SZXX.Xlsx in
       (* yojson_readers is an easy way to quickly inspect a file *)
-      let stream, processed = stream_rows_buffer yojson_readers ic in
+      let stream, processed = stream_rows_buffer ~feed:(feed_string ic) yojson_readers in
       let%lwt () =
         Lwt_stream.iter
           (fun row -> `List (Array.to_list row.data) |> Yojson.Basic.pretty_to_string |> print_endline)
@@ -37,7 +57,7 @@ let xlsx filename () =
   let%lwt parsed =
     Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
         let open SZXX.Xlsx in
-        let stream, processed = stream_rows_buffer extractors ic in
+        let stream, processed = stream_rows_buffer ~feed:(feed_bigstring ic) extractors in
         let%lwt json = Lwt_stream.fold (fun row acc -> `List (Array.to_list row.data) :: acc) stream [] in
         let%lwt () = processed in
         Lwt.return (`Assoc [ "data", `List (List.rev json) ]))
@@ -58,7 +78,7 @@ let stream_rows filename () =
   let%lwt parsed =
     Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
         let open SZXX.Xlsx in
-        let stream, sst, processed = stream_rows yojson_readers ic in
+        let stream, sst, processed = stream_rows ~feed:(feed_bigstring ic) yojson_readers in
         let%lwt sst = sst in
         let%lwt json_list =
           Lwt_stream.map
