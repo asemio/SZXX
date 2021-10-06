@@ -2,19 +2,92 @@ open! Core_kernel
 
 type attr_list = (string * string) list [@@deriving sexp_of]
 
-type element = {
-  tag: string;
-  attrs: attr_list;
-  text: string;
-  children: element array;
-}
-[@@deriving sexp_of]
+(** Convenience function to access attributes by name *)
+val get_attr : attr_list -> string -> string option
 
-type doc = {
-  decl_attrs: attr_list option;
-  top: element;
-}
-[@@deriving sexp_of]
+module DOM : sig
+  type element = {
+    tag: string;
+    attrs: attr_list;
+    text: string;
+    children: element array;
+  }
+  [@@deriving sexp_of]
+
+  type doc = {
+    decl_attrs: attr_list option;
+    top: element;
+  }
+  [@@deriving sexp_of]
+
+  (** [el |> dot "row"] returns the first immediate [<row>] child of element [el] *)
+  val dot : string -> element -> element option
+
+  (** [el |> at "3"] returns the nth (0-based indexing) immediate child of element [el]. The first argument is a string. *)
+  val at : string -> element -> element option
+
+  (**
+   [get el [dot "abc"; dot "def"]] is equivalent to [el |> dot "abc" |> Option.bind ~f:(dot "def")]
+   Convenience function to chain multiple [dot] and [at] calls to access nested nodes.
+*)
+  val get : element -> (element -> element option) list -> element option
+end
+
+module SAX : sig
+  type element_open = {
+    tag: string;
+    attrs: attr_list;
+    preserve_space: bool Lazy.t;
+  }
+  [@@deriving sexp_of]
+
+  type node =
+    | Prologue      of attr_list
+    | Element_open  of element_open
+    | Element_close of string
+    | Text          of string
+    | Cdata         of string
+  [@@deriving sexp_of]
+
+  module To_DOM : sig
+    type partial = {
+      tag: string;
+      attrs: attr_list;
+      preserve_space: bool Lazy.t;
+      buf: Buffer.t;
+      children: DOM.element Queue.t;
+    }
+    [@@deriving sexp_of]
+
+    type state = {
+      decl_attrs: attr_list option;
+      stack: partial list;
+      top: DOM.element option;
+    }
+    [@@deriving sexp_of]
+
+    val init : state
+
+    val cb : state -> node -> state
+  end
+
+  module Stream : sig
+    type partial = {
+      tag: string;
+      attrs: attr_list;
+      preserve_space: bool Lazy.t;
+      buf: Buffer.t;
+      children: DOM.element Queue.t;
+    }
+    [@@deriving sexp_of]
+
+    type state
+
+    val init : state
+
+    val cb : filter_path:string -> on_match:(DOM.element -> unit) -> state -> node -> state
+  end
+end
 
 (**
    Creates an IO-agnostic [Angstrom.t] parser.
@@ -35,22 +108,7 @@ type doc = {
    For example, here's the [path] of the rows in an XLSX worksheet: [["worksheet"; "sheetData"; "row"]].
    In that case, the top level element is [<worksheet>], which contains [<sheetData>], which in turn contains many [<row>] elements.
 *)
-val parser : ?filter_map:(element -> element option) -> string list -> doc Angstrom.t
-
-(** [el |> dot "row"] returns the first immediate [<row>] child of element [el] *)
-val dot : string -> element -> element option
-
-(** [el |> at "3"] returns the nth (0-based indexing) immediate child of element [el]. The first argument is a string. *)
-val at : string -> element -> element option
-
-(**
-   [get el [dot "abc"; dot "def"]] is equivalent to [el |> dot "abc" |> Option.bind ~f:(dot "def")]
-   Convenience function to chain multiple [dot] and [at] calls to access nested nodes.
-*)
-val get : element -> (element -> element option) list -> element option
-
-(** Convenience function to access node attributes by name *)
-val get_attr : element -> string -> string option
+val parser : init:'a -> cb:('a -> SAX.node -> 'a) -> 'a Angstrom.t
 
 (**
    Limited but efficient function to unescapable XML escape sequences.

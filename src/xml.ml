@@ -1,6 +1,181 @@
 open! Core_kernel
 open Angstrom
 
+type attr_list = (string * string) list [@@deriving sexp_of]
+
+let get_attr attrs name = List.find_map attrs ~f:(fun (x, y) -> Option.some_if String.(x = name) y)
+
+module DOM = struct
+  type element = {
+    tag: string;
+    attrs: attr_list;
+    text: string;
+    children: element array;
+  }
+  [@@deriving sexp_of]
+
+  type doc = {
+    decl_attrs: attr_list option;
+    top: element;
+  }
+  [@@deriving sexp_of]
+
+  let dot tag node = Array.find node.children ~f:(fun x -> String.(x.tag = tag))
+
+  let at i node = Option.try_with (fun () -> Int.of_string i |> Array.get node.children)
+
+  let get node (steps : (element -> element option) list) =
+    let rec loop node = function
+      | [] -> node
+      | step :: rest -> (loop [@tailcall]) (Option.bind node ~f:step) rest
+    in
+    loop (Some node) steps
+end
+
+module SAX = struct
+  type element_open = {
+    tag: string;
+    attrs: attr_list;
+    preserve_space: bool Lazy.t;
+  }
+  [@@deriving sexp_of]
+
+  type node =
+    | Prologue      of attr_list
+    | Element_open  of element_open
+    | Element_close of string
+    | Text          of string
+    | Cdata         of string
+  [@@deriving sexp_of]
+
+  module To_DOM = struct
+    type partial = {
+      tag: string;
+      attrs: attr_list;
+      preserve_space: bool Lazy.t;
+      buf: Buffer.t;
+      children: DOM.element Queue.t;
+    }
+    [@@deriving sexp_of]
+
+    type state = {
+      decl_attrs: attr_list option;
+      stack: partial list;
+      top: DOM.element option;
+    }
+    [@@deriving sexp_of]
+
+    let init = { decl_attrs = None; stack = []; top = None }
+
+    let partial_to_element { tag; attrs; buf; children; _ } =
+      DOM.{ tag; attrs; text = Buffer.contents buf; children = Queue.to_array children }
+
+    let cb acc (node : node) =
+      match node, acc with
+      | Prologue _, { decl_attrs = Some _; _ } -> failwith "A prologue already exists"
+      | Prologue attrs, { decl_attrs = None; _ } -> { acc with decl_attrs = Some attrs }
+      | Element_open { tag; attrs; preserve_space }, _ ->
+        let partial =
+          { tag; attrs; preserve_space; buf = Buffer.create 16; children = Queue.create ~capacity:4 () }
+        in
+        { acc with stack = partial :: acc.stack }
+      | Text s, { stack = []; top = None; _ } ->
+        failwithf "Invalid document. Text not contained within an element: %s" s ()
+      | Cdata s, { stack = []; top = None; _ } ->
+        failwithf "Invalid document. CDATA not contained within an element: %s" s ()
+      | Text _, { stack = []; top = Some _; _ }
+       |Cdata _, { stack = []; top = Some _; _ } ->
+        acc
+      | Text s, { stack = { buf; preserve_space; _ } :: _; _ }
+       |Cdata s, { stack = { buf; preserve_space; _ } :: _; _ } ->
+        let preserve = force preserve_space in
+        if Buffer.length buf > 0 && not (preserve && String.is_prefix s ~prefix:" ")
+        then Buffer.add_char buf ' ';
+        Buffer.add_string buf (if preserve then s else String.strip s);
+        acc
+      | Element_close tag, { stack = current :: (parent :: _ as rest); _ }
+        when String.( = ) tag current.tag ->
+        Queue.enqueue parent.children (partial_to_element current);
+        { acc with stack = rest }
+      | Element_close tag, { stack = [ current ]; top = None; _ } when String.( = ) tag current.tag ->
+        { acc with stack = []; top = Some (partial_to_element current) }
+      | Element_close tag, { stack = current :: _ :: _; _ } ->
+        failwithf "Invalid document. Closing element '%s' before element '%s'" tag current.tag ()
+      | Element_close tag, _ ->
+        failwithf "Invalid document. Closing tag without matching opening tag: %s" tag ()
+  end
+
+  module Stream = struct
+    type partial = {
+      tag: string;
+      attrs: attr_list;
+      preserve_space: bool Lazy.t;
+      buf: Buffer.t;
+      children: DOM.element Queue.t;
+    }
+    [@@deriving sexp_of]
+
+    type state = {
+      decl_attrs: attr_list option;
+      stack: partial list;
+      path: string;
+      top: DOM.element option;
+    }
+    [@@deriving sexp_of]
+
+    let init = { decl_attrs = None; stack = []; path = ""; top = None }
+
+    let partial_to_element { tag; attrs; buf; children; _ } =
+      DOM.{ tag; attrs; text = Buffer.contents buf; children = Queue.to_array children }
+
+    let cb ~filter_path ~on_match acc (node : node) =
+      match node, acc with
+      | Prologue _, { decl_attrs = Some _; _ } -> failwith "A prologue already exists"
+      | Prologue attrs, { decl_attrs = None; _ } -> { acc with decl_attrs = Some attrs }
+      | Element_open { tag; attrs; preserve_space }, _ ->
+        let partial =
+          { tag; attrs; preserve_space; buf = Buffer.create 16; children = Queue.create ~capacity:4 () }
+        in
+        { acc with stack = partial :: acc.stack; path = sprintf "%s %s" acc.path tag }
+      | Text s, { stack = []; top = None; _ } ->
+        failwithf "Invalid document. Text not contained within an element: %s" s ()
+      | Cdata s, { stack = []; top = None; _ } ->
+        failwithf "Invalid document. CDATA not contained within an element: %s" s ()
+      | Text s, { stack = { buf; preserve_space; _ } :: _; path; _ }
+       |Cdata s, { stack = { buf; preserve_space; _ } :: _; path; _ }
+        when String.is_prefix path ~prefix:filter_path ->
+        let preserve = force preserve_space in
+        if Buffer.length buf > 0 && not (preserve && String.is_prefix s ~prefix:" ")
+        then Buffer.add_char buf ' ';
+        Buffer.add_string buf (if preserve then s else String.strip s);
+        acc
+      | Text _, _
+       |Cdata _, _ ->
+        acc
+      | Element_close tag, { stack = current :: (parent :: _ as rest); path; _ }
+        when String.( = ) tag current.tag ->
+        let len_path = String.length path in
+        let len_tag = String.length tag in
+        let len_filter_path = String.length filter_path in
+        (match String.is_prefix path ~prefix:filter_path, len_path = len_filter_path with
+        | true, false -> Queue.enqueue parent.children (partial_to_element current)
+        | true, true -> on_match (partial_to_element current)
+        | false, _ -> ());
+        let new_path =
+          match len_path - (len_tag + 1) with
+          | 0 -> ""
+          | stop -> String.slice path 0 stop
+        in
+        { acc with stack = rest; path = new_path }
+      | Element_close tag, { stack = [ current ]; top = None; _ } when String.( = ) tag current.tag ->
+        { acc with stack = []; top = Some (partial_to_element current) }
+      | Element_close tag, { stack = current :: _ :: _; _ } ->
+        failwithf "Invalid document. Closing element '%s' before element '%s'" tag current.tag ()
+      | Element_close tag, _ ->
+        failwithf "Invalid document. Closing tag without matching opening tag: %s" tag ()
+  end
+end
+
 let escape_table = function
 | "amp" -> "&"
 | "lt" -> "<"
@@ -87,8 +262,6 @@ let is_ws = function
   true
 | _ -> false
 
-let maybe p = option None (p >>| Option.return)
-
 let drop p = p *> return ()
 
 let double x y = x, y
@@ -110,41 +283,9 @@ let comment = string "<!--" *> skip_until_string "-->"
 
 let blank = drop (sep_by comment ws)
 
-type attr_list = (string * string) list [@@deriving sexp_of]
-
-type element = {
-  tag: string;
-  attrs: attr_list;
-  text: string;
-  children: element array;
-}
-[@@deriving sexp_of]
-
-type content =
-  | Text    of string
-  | Element of element
-  | Skip
-
-type doc = {
-  decl_attrs: attr_list option;
-  top: element;
-}
-[@@deriving sexp_of]
-
-let dot tag node = Array.find node.children ~f:(fun x -> String.(x.tag = tag))
-
-let at i node = Option.try_with (fun () -> Int.of_string i |> Array.get node.children)
-
-let get node (steps : (element -> element option) list) =
-  let rec loop node = function
-    | [] -> node
-    | step :: rest -> (loop [@tailcall]) (Option.bind node ~f:step) rest
-  in
-  loop (Some node) steps
-
-let get_attr { attrs; _ } name = List.find_map attrs ~f:(fun (x, y) -> Option.some_if String.(x = name) y)
-
-let parser =
+let parser ~init ~(cb : 'a -> SAX.node -> 'a) =
+  let box = ref init in
+  let cb node = box := cb !box node in
   let xml_string =
     let dq_string = escapable_string_parser ~separator:'"' in
     let sq_string = escapable_string_parser ~separator:'\'' in
@@ -152,7 +293,6 @@ let parser =
   in
   let token = take_while1 is_token in
   let attr = lift2 double (token <* ws <* char '=') (ws *> xml_string) in
-  let decl_parser = string "<?xml " *> many (blank *> attr) <* blank <* string "?>" in
   let doctype_parser =
     let entity =
       string "[<!ENTITY" *> ws *> skip_many (ws *> choice [ token; xml_string ]) <* ws <* string ">]"
@@ -161,19 +301,28 @@ let parser =
     <* ws
     <* char '>'
   in
-  let cdata =
-    string "<![CDATA["
-    *>
+  let prologue_parser =
+    lift4
+      (fun _ attrs _ _ -> cb (Prologue attrs))
+      (string "<?xml ")
+      (many (blank *> attr))
+      blank (string "?>")
+  in
+  let cdata_parser =
     let buf = Buffer.create 20 in
+    blank
+    *> string "<![CDATA["
+    *>
     let rec loop n ll =
       any_char >>= fun c ->
       match c, n with
       | ']', 0 -> (loop [@tailcall]) 1 (']' :: ll)
       | ']', 1 -> (loop [@tailcall]) 2 (']' :: ll)
       | '>', 2 ->
-        let result = Buffer.contents buf in
+        let s = Buffer.contents buf in
         Buffer.clear buf;
-        return result
+        cb (Text s);
+        return ()
       | c, 0 ->
         Buffer.add_char buf c;
         (loop [@tailcall]) 0 ll
@@ -183,72 +332,27 @@ let parser =
     in
     loop 0 []
   in
-  let element_parser ?filter_map parent_path =
-    let box = ref parent_path in
-    fix (fun element_parser ->
-        lift2 double (char '<' *> ws *> token) (many (ws *> attr) <* ws) >>= fun (tag, attrs) ->
-        let path, matching =
-          match !box with
-          | head :: ([] as tail) when String.(head = tag) -> tail, true
-          | head :: tail when String.(head = tag) -> tail, false
-          | _ -> [], false
-        in
-        let buf = Buffer.create 16 in
-        let queue = Queue.create ~capacity:1 () in
+  let element_open_parser =
+    lift3
+      (fun tag attrs self_closing ->
         let preserve_space =
           lazy
             (List.mem attrs ("xml:space", "preserve")
                ~equal:String.((fun (x1, y1) (x2, y2) -> x1 = x2 && y1 = y2)))
         in
-        let restore = !box in
-        let nested_choice =
-          choice
-            [
-              (take_while1 is_text >>| fun x -> Text x);
-              cdata >>| (fun x -> Text x) <* blank;
-              (commit >>| fun () -> box := path) *> element_parser <* blank;
-            ]
-          >>| function
-          | Skip -> ()
-          | Text s ->
-            if Buffer.length buf > 0 then Buffer.add_char buf ' ';
-            Buffer.add_string buf (if force preserve_space then s else String.strip s)
-          | Element el -> Queue.enqueue queue el
-        in
-        let nested =
-          let right = lift4 (fun _ _ _ _ -> ()) ws (string tag) ws (char '>') in
-          lift4 (fun _ _ _ _ -> box := restore) (char '>') (skip_many nested_choice) (string "</") right
-        in
-        choice
-          [
-            (* Self-terminating *)
-            (string "/>" >>| fun _ -> Element { tag; attrs; text = ""; children = [||] });
-            (* Nested *)
-            ( nested *> commit >>| fun () ->
-              let el = { tag; attrs; text = Buffer.contents buf; children = Queue.to_array queue } in
-              Buffer.reset buf;
-              Queue.clear queue;
-              match matching, filter_map with
-              | true, Some f -> (
-                match f el with
-                | Some mapped -> Element mapped
-                | None -> Skip
-              )
-              | _ -> Element el );
-          ])
+        cb (Element_open { tag; attrs; preserve_space });
+        if self_closing then cb (Element_close tag))
+      (blank *> char '<' *> ws *> token)
+      (many (ws *> attr) <* ws)
+      (option false (char '/' *> return true) <* char '>')
   in
-  fun ?filter_map path ->
-    lift2
-      (fun decl_attrs content ->
-        let top =
-          match
-            List.find_map content ~f:(function
-              | Element x -> Some x
-              | _ -> None)
-          with
-          | Some x -> x
-          | None -> failwithf "XML document must have a top level element" ()
-        in
-        { decl_attrs; top })
-      (blank *> maybe decl_parser)
-      (blank *> maybe doctype_parser *> blank *> sep_by blank (element_parser ?filter_map path) <* blank)
+  let element_close_parser =
+    lift4 (fun _ _ tag _ -> cb (Element_close tag)) (blank *> string "</") ws token (ws <* char '>')
+  in
+  let text_parser = skip_many (ws <* comment) *> take_while1 is_text >>| fun s -> cb (Text s) in
+  let node_parser = choice [ cdata_parser; element_close_parser; element_open_parser; text_parser ] in
+  lift4
+    (fun () () () () -> !box)
+    (blank *> option () prologue_parser)
+    (blank *> option () doctype_parser)
+    (skip_many node_parser) blank

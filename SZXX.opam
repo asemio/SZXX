@@ -25,6 +25,8 @@ depends: [
   "lwt_ppx"
 
   "alcotest-lwt" { with-test }
+  "ppx_jane" { with-test }
   "yojson" { with-test }
+  "ppx_deriving_yojson" { >= "3.5.2" & with-test }
 ]
 build: ["dune" "build" "-p" name "-j" jobs]

@@ -1,6 +1,4 @@
 open! Core_kernel
-open Zip
-open Xml
 
 type location = {
   sheet_number: int;
@@ -35,7 +33,7 @@ type 'a row = {
 }
 [@@deriving sexp_of]
 
-type sst = SST of Xml.doc
+type sst = SST of string array
 
 let origin = Date.add_days (Date.create_exn ~y:1900 ~m:(Month.of_int_exn 1) ~d:1) (-2)
 
@@ -50,11 +48,12 @@ let parse_datetime ~zone f =
 
 let parse_sheet ~sheet_number push =
   let num = ref 0 in
-  let filter_map el =
+  let filter_path = " worksheet sheetData row" in
+  let on_match (el : Xml.DOM.element) =
     incr num;
     let next = !num in
     let row_number =
-      match get_attr el "r" with
+      match Xml.get_attr el.attrs "r" with
       | None -> next
       | Some s -> (
         try
@@ -73,21 +72,21 @@ let parse_sheet ~sheet_number push =
         | _ -> next
       )
     in
-    push { sheet_number; row_number; data = el.children };
-    None
+    push { sheet_number; row_number; data = el.children }
   in
-  Action.Parse (parser ~filter_map [ "worksheet"; "sheetData"; "row" ])
+  Zip.Action.Parse (Xml.parser ~init:Xml.SAX.Stream.init ~cb:(Xml.SAX.Stream.cb ~filter_path ~on_match))
 
 let process_file ?only_sheet ~feed push finalize =
   let sst_p, sst_w = Lwt.wait () in
+  let sst_queue = Queue.create () in
   let processed_p =
     let zip_stream, zip_processed =
-      stream_files ~feed (fun entry ->
+      Zip.stream_files ~feed (fun entry ->
           match entry.filename with
-          | "xl/workbook.xml" -> Parse (parser [])
+          | "xl/workbook.xml" -> Skip
           | "xl/sharedStrings.xml" ->
-            let path = [ "sst"; "si" ] in
-            let filter_map el =
+            let open Xml.DOM in
+            let on_match el =
               let text =
                 begin
                   match el |> dot "t" with
@@ -96,9 +95,10 @@ let process_file ?only_sheet ~feed push finalize =
                 end
                 |> Option.value_map ~default:"" ~f:(fun { text; _ } -> text)
               in
-              Some { el with text; children = [||] }
+              Queue.enqueue sst_queue text
             in
-            Parse (parser ~filter_map path)
+            let filter_path = " sst si" in
+            Parse (Xml.parser ~init:Xml.SAX.Stream.init ~cb:(Xml.SAX.Stream.cb ~filter_path ~on_match))
           | filename ->
             let open Option.Monad_infix in
             String.chop_prefix ~prefix:"xl/worksheets/sheet" filename
@@ -106,7 +106,7 @@ let process_file ?only_sheet ~feed push finalize =
             >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
             |> Option.filter ~f:(fun i -> Option.value_map only_sheet ~default:true ~f:(Int.( = ) i))
             >>| (fun sheet_number -> parse_sheet ~sheet_number push)
-            |> Option.value ~default:Action.Skip)
+            |> Option.value ~default:Zip.Action.Skip)
     in
     let%lwt () =
       Lwt.finalize
@@ -119,9 +119,9 @@ let process_file ?only_sheet ~feed push finalize =
                |Data.String _
                |Data.Chunk ->
                 ()
-              | Data.Parse (Ok xml) -> (
+              | Data.Parse (Ok _) -> (
                 match entry.filename with
-                | "xl/sharedStrings.xml" -> Lwt.wakeup_later sst_w (SST xml)
+                | "xl/sharedStrings.xml" -> Lwt.wakeup_later sst_w (SST (Queue.to_array sst_queue))
                 | _ -> ()
               )
               | Data.Parse (Error msg) -> failwithf "XLSX Parsing error for %s: %s" entry.filename msg ())
@@ -132,9 +132,7 @@ let process_file ?only_sheet ~feed push finalize =
             | Return _
              |Fail _ ->
               ()
-            | Sleep ->
-              Lwt.wakeup_later sst_w
-                (SST { decl_attrs = None; top = { tag = "sst"; attrs = []; text = ""; children = [||] } })
+            | Sleep -> Lwt.wakeup_later sst_w (SST [||])
           end;
           Lwt.return_unit)
     in
@@ -142,13 +140,14 @@ let process_file ?only_sheet ~feed push finalize =
   in
   sst_p, processed_p
 
-let extract ~null location extractor = function
+let extract ~null location extractor : Xml.DOM.element option -> 'a status = function
 | None -> Available null
 | Some { text; _ } -> Available (extractor location text)
 
 let extract_cell { string; error; boolean; number; null } location el =
   let reader = extract ~null location in
-  match get_attr el "t" with
+  let open Xml.DOM in
+  match Xml.get_attr el.attrs "t" with
   | None
    |Some "n" -> (
     try el |> dot "v" |> reader number with
@@ -173,19 +172,20 @@ let column_to_index col =
   |> pred
 
 let extract_row cell_of_string ({ data; sheet_number; row_number } as row) =
+  let open Xml.DOM in
   let num_cells = Array.length data in
   if num_cells = 0
   then { row with data = [||] }
   else (
     let num_cols =
       Array.last data
-      |> (fun el -> get_attr el "r")
+      |> (fun el -> Xml.get_attr el.attrs "r")
       |> Option.value_map ~default:0 ~f:(fun r -> column_to_index r + 1)
       |> max num_cells
     in
     let new_data = Array.create ~len:num_cols (Available cell_of_string.null) in
     Array.iteri data ~f:(fun i el ->
-        let col_index = get_attr el "r" |> Option.value_map ~default:i ~f:column_to_index in
+        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:column_to_index in
         let v = extract_cell cell_of_string { col_index; sheet_number; row_number } el in
         new_data.(col_index) <- v);
     { row with data = new_data }
@@ -203,16 +203,16 @@ let stream_rows ?only_sheet ~feed cell_of_string =
   parsed_stream, sst_p, processed_p
 
 let resolve_sst_index (SST sst) ~sst_index =
-  sst.top |> at sst_index |> Option.map ~f:(fun { text; _ } -> text)
+  Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst)
 
 let await_delayed cell_of_string (SST sst) (row : 'a status row) =
   let data =
     Array.map row.data ~f:(function
       | Available x -> x
       | Delayed { location; sst_index } -> (
-        match sst.top |> at sst_index with
+        Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst) |> function
         | None -> cell_of_string.null
-        | Some { text; _ } -> cell_of_string.string location text
+        | Some text -> cell_of_string.string location text
       ))
   in
   { row with data }

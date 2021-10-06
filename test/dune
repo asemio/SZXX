@@ -12,6 +12,8 @@
   )
   (preprocess (pps
     lwt_ppx
+    ppx_deriving_yojson
+    ppx_jane
   ))
   (ocamlopt_flags -Oclassic)
 )

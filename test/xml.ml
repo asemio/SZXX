@@ -18,8 +18,8 @@ comment -->
     <c><v>FOO</v></c>
     <c><c><v>BAR</v></c></c>
     < dimension ref = "A1:A38" />
-    <t> hello  world <x/>  x </t>
-    <t xml:space="preserve"> hello!  world <x/>  x </t>
+    <t> hello  world <x/>  y </t>
+    <t xml:space="preserve"> hello!  world <x/>  z </t>
     </worksheet>
     |s}
 
@@ -95,7 +95,7 @@ let data1 =
       {
         "tag": "t",
         "attrs": [],
-        "text": "hello  world x",
+        "text": "hello  world y",
         "children": [
           { "tag": "x", "attrs": [], "text": "", "children": [] }
         ]
@@ -103,7 +103,7 @@ let data1 =
       {
         "tag": "t",
         "attrs": [ [ "xml:space", "preserve" ] ],
-        "text": " hello!  world  x ",
+        "text": " hello!  world   z ",
         "children": [
           { "tag": "x", "attrs": [], "text": "", "children": [] }
         ]
@@ -181,38 +181,86 @@ let data2 =
 }
 |json}
 
-let yojson_of_attr_list (ll : SZXX.Xml.attr_list) : Yojson.Safe.t =
-  `List (List.map ll ~f:(fun (x, y) -> `List [ `String x; `String y ]))
+let data3 =
+  Yojson.Safe.from_string
+    {json|
+{
+  "data": [
+    {
+      "tag": "t",
+      "attrs": [ [ "xml:space", "preserve" ] ],
+      "text": "hello",
+      "children": []
+    },
+    {
+      "tag": "t",
+      "attrs": [ [ "xml:space", "preserve" ] ],
+      "text": "world",
+      "children": []
+    },
+    {
+      "tag": "t",
+      "attrs": [ [ "xml:space", "preserve" ] ],
+      "text": "ok bye",
+      "children": []
+    }
+  ]
+}
+|json}
 
-let rec yojson_of_element (el : SZXX.Xml.element) =
-  `Assoc
-    [
-      "tag", `String el.tag;
-      "attrs", yojson_of_attr_list el.attrs;
-      "text", `String el.text;
-      ( "children",
-        `List (Array.fold_right el.children ~init:[] ~f:(fun x acc -> yojson_of_element x :: acc)) );
-    ]
+type element = SZXX.Xml.DOM.element = {
+  tag: string;
+  attrs: (string * string) list;
+  text: string;
+  children: element array;
+}
+[@@deriving sexp_of, to_yojson]
 
-let yojson_of_doc (doc : SZXX.Xml.doc) : Yojson.Safe.t =
-  `Assoc
-    [
-      "decl_attrs", Option.value_map doc.decl_attrs ~default:`Null ~f:yojson_of_attr_list;
-      "top", yojson_of_element doc.top;
-    ]
+type doc = SZXX.Xml.DOM.doc = {
+  decl_attrs: (string * string) list option;
+  top: element;
+}
+[@@deriving sexp_of, to_yojson]
 
-let xml test data () =
+type buffer = Buffer.t
+
+let sexp_of_buffer buf = Sexp.List [ Atom "Buffer"; Atom (Buffer.contents buf) ]
+
+let xml_to_dom test data () =
   match
     Angstrom.parse_string ~consume:Angstrom.Consume.All
-      (SZXX.Xml.parser [ "worksheet"; "sheetData"; "row"; "c" ])
+      (SZXX.Xml.parser ~init:SZXX.Xml.SAX.To_DOM.init ~cb:SZXX.Xml.SAX.To_DOM.cb)
       test
   with
-  | Ok parsed ->
-    Json_diff.check (yojson_of_doc parsed) data;
+  | Ok { decl_attrs; stack = []; top = Some top; _ } ->
+    let doc = { decl_attrs; top } in
+    Json_diff.check (doc_to_yojson doc) data;
+    Lwt.return_unit
+  | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.To_DOM.state}" state ()
+  | Error msg -> failwith msg
+
+let xml_stream test data filter_path () =
+  let queue = Queue.create () in
+  let on_match x = Queue.enqueue queue x in
+  match
+    Angstrom.parse_string ~consume:Angstrom.Consume.All
+      (SZXX.Xml.parser ~init:SZXX.Xml.SAX.Stream.init ~cb:(SZXX.Xml.SAX.Stream.cb ~filter_path ~on_match))
+      test
+  with
+  | Ok _ ->
+    let streamed = `Assoc [ "data", [%to_yojson: element array] (Queue.to_array queue) ] in
+    Json_diff.check streamed data;
     Lwt.return_unit
   | Error msg -> failwith msg
 
 let () =
   Lwt_main.run
   @@ Alcotest_lwt.run "SZXX XML"
-       [ "XML", [ "test1", `Quick, xml test1 data1; "test2", `Quick, xml test2 data2 ] ]
+       [
+         ( "XML",
+           [
+             "To DOM 1", `Quick, xml_to_dom test1 data1;
+             "To DOM 2", `Quick, xml_to_dom test2 data2;
+             "Stream 2", `Quick, xml_stream test2 data3 " sst si t";
+           ] );
+       ]
