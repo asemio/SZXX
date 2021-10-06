@@ -317,8 +317,8 @@ let stream_files ~feed:read cb =
     | Done ({ buf; off = pos; len }, pair) -> (
       let%lwt () = Lwt_mutex.with_lock mutex (fun () -> bounded#push pair) in
       match parse (parser cb) with
-      | Partial feed -> loop (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len)))
-      | state -> loop state
+      | Partial feed -> (loop [@tailcall]) (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len)))
+      | state -> (loop [@tailcall]) state
     )
     | Partial feed -> (
       match%lwt read () with
@@ -327,7 +327,7 @@ let stream_files ~feed:read cb =
         | Done (_, pair) -> Lwt_mutex.with_lock mutex (fun () -> bounded#push pair)
         | _ -> Lwt.return_unit
       )
-      | Some chunk -> loop (feed chunk)
+      | Some chunk -> (loop [@tailcall]) (feed chunk)
     )
   in
   let p =

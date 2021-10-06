@@ -41,20 +41,20 @@ let escapable_string_parser ~separator =
   let rec loop escaping ll =
     any_char >>= fun x ->
     match x, escaping with
-    | '&', false -> loop true ll
+    | '&', false -> (loop [@tailcall]) true ll
     | ';', true ->
       let code = String.of_char_list ll |> String.rev |> escape_table in
       Buffer.add_string buf code;
-      loop false []
+      (loop [@tailcall]) false []
     | c, _ when is_separator c ->
       List.fold_right ll ~init:() ~f:(fun c () -> Buffer.add_char buf c);
       let result = Buffer.contents buf in
       Buffer.clear buf;
       return result
-    | c, true -> loop true (c :: ll)
+    | c, true -> (loop [@tailcall]) true (c :: ll)
     | c, false ->
       Buffer.add_char buf c;
-      loop false ll
+      (loop [@tailcall]) false ll
   in
   loop false []
 
@@ -100,7 +100,7 @@ let skip_until_string terminate =
     skip_while (Char.( <> ) first) >>= fun () ->
     peek_string len >>= function
     | x when String.(x = terminate) -> string terminate
-    | _ -> loop ()
+    | _ -> (loop [@tailcall]) ()
   in
   loop ()
 
@@ -138,7 +138,7 @@ let at i node = Option.try_with (fun () -> Int.of_string i |> Array.get node.chi
 let get node (steps : (element -> element option) list) =
   let rec loop node = function
     | [] -> node
-    | step :: rest -> loop (Option.bind node ~f:step) rest
+    | step :: rest -> (loop [@tailcall]) (Option.bind node ~f:step) rest
   in
   loop (Some node) steps
 
@@ -168,88 +168,87 @@ let parser =
     let rec loop n ll =
       any_char >>= fun c ->
       match c, n with
-      | ']', 0 -> loop 1 (']' :: ll)
-      | ']', 1 -> loop 2 (']' :: ll)
+      | ']', 0 -> (loop [@tailcall]) 1 (']' :: ll)
+      | ']', 1 -> (loop [@tailcall]) 2 (']' :: ll)
       | '>', 2 ->
         let result = Buffer.contents buf in
         Buffer.clear buf;
         return result
       | c, 0 ->
         Buffer.add_char buf c;
-        loop 0 ll
+        (loop [@tailcall]) 0 ll
       | c, _ ->
         List.fold_right (c :: ll) ~init:() ~f:(fun x () -> Buffer.add_char buf x);
-        loop 0 []
+        (loop [@tailcall]) 0 []
     in
     loop 0 []
   in
-  let rec element_parser ?filter_map parent_path =
-    lift2 double (char '<' *> ws *> token) (many (ws *> attr) <* ws) >>= fun (tag, attrs) ->
-    let path, matching =
-      match parent_path with
-      | head :: ([] as tail) when String.(head = tag) -> tail, true
-      | head :: tail when String.(head = tag) -> tail, false
-      | _ -> [], false
-    in
-    let buf = Buffer.create 16 in
-    let queue = Queue.create ~capacity:1 () in
-    let preserve_space =
-      List.mem attrs ("xml:space", "preserve")
-        ~equal:String.((fun (x1, y1) (x2, y2) -> x1 = x2 && y1 = y2))
-    in
-    let nested =
-      choice
-        [
-          (take_while1 is_text >>| fun x -> Text x);
-          cdata >>| (fun x -> Text x) <* blank;
-          commit >>= (fun () -> element_parser ?filter_map path) <* blank;
-        ]
-      >>| (function
-            | Skip -> ()
-            | Text s ->
-              if Buffer.length buf > 0 then Buffer.add_char buf ' ';
-              Buffer.add_string buf (if preserve_space then s else String.strip s)
-            | Element el -> Queue.enqueue queue el)
-      <* blank
-    in
-    choice
-      [
-        (* Self-terminating *)
-        (string "/>" >>| fun _ -> Element { tag; attrs; text = ""; children = [||] });
-        (* Nested *)
-        ( ( char '>' *> skip_many nested <* string "</" *> ws *> string tag *> ws *> char '>' >>= fun () ->
-            commit )
-        >>| fun () ->
-          let el = { tag; attrs; text = Buffer.contents buf; children = Queue.to_array queue } in
-          Buffer.reset buf;
-          Queue.clear queue;
-          match matching, filter_map with
-          | true, Some f -> (
-            match f el with
-            | Some mapped -> Element mapped
-            | None -> Skip
-          )
-          | _ -> Element el );
-      ]
+  let element_parser ?filter_map parent_path =
+    let box = ref parent_path in
+    fix (fun element_parser ->
+        lift2 double (char '<' *> ws *> token) (many (ws *> attr) <* ws) >>= fun (tag, attrs) ->
+        let path, matching =
+          match !box with
+          | head :: ([] as tail) when String.(head = tag) -> tail, true
+          | head :: tail when String.(head = tag) -> tail, false
+          | _ -> [], false
+        in
+        let buf = Buffer.create 16 in
+        let queue = Queue.create ~capacity:1 () in
+        let preserve_space =
+          lazy
+            (List.mem attrs ("xml:space", "preserve")
+               ~equal:String.((fun (x1, y1) (x2, y2) -> x1 = x2 && y1 = y2)))
+        in
+        let restore = !box in
+        let nested_choice =
+          choice
+            [
+              (take_while1 is_text >>| fun x -> Text x);
+              cdata >>| (fun x -> Text x) <* blank;
+              (commit >>| fun () -> box := path) *> element_parser <* blank;
+            ]
+          >>| function
+          | Skip -> ()
+          | Text s ->
+            if Buffer.length buf > 0 then Buffer.add_char buf ' ';
+            Buffer.add_string buf (if force preserve_space then s else String.strip s)
+          | Element el -> Queue.enqueue queue el
+        in
+        let nested =
+          let right = lift4 (fun _ _ _ _ -> ()) ws (string tag) ws (char '>') in
+          lift4 (fun _ _ _ _ -> box := restore) (char '>') (skip_many nested_choice) (string "</") right
+        in
+        choice
+          [
+            (* Self-terminating *)
+            (string "/>" >>| fun _ -> Element { tag; attrs; text = ""; children = [||] });
+            (* Nested *)
+            ( nested *> commit >>| fun () ->
+              let el = { tag; attrs; text = Buffer.contents buf; children = Queue.to_array queue } in
+              Buffer.reset buf;
+              Queue.clear queue;
+              match matching, filter_map with
+              | true, Some f -> (
+                match f el with
+                | Some mapped -> Element mapped
+                | None -> Skip
+              )
+              | _ -> Element el );
+          ])
   in
   fun ?filter_map path ->
-    lift2 double
+    lift2
+      (fun decl_attrs content ->
+        let top =
+          match
+            List.find_map content ~f:(function
+              | Element x -> Some x
+              | _ -> None)
+          with
+          | Some x -> x
+          | None -> failwithf "XML document must have a top level element" ()
+        in
+        { decl_attrs; top })
       (blank *> maybe decl_parser)
       (blank *> maybe doctype_parser *> blank *> sep_by blank (element_parser ?filter_map path) <* blank)
-    >>= fun (decl_attrs, content) ->
-    take_while (fun _ -> true) >>| function
-    | "" ->
-      let top =
-        match
-          List.find_map content ~f:(function
-            | Element x -> Some x
-            | _ -> None)
-        with
-        | Some x -> x
-        | None -> failwithf "XML document must have a top level element" ()
-      in
-      { decl_attrs; top }
-    | unparsed ->
-      failwithf "Not all input could be parsed. Remainder: %s%s" (String.slice unparsed 0 100)
-        (if String.length unparsed > 100 then " ..." else "")
-        ()

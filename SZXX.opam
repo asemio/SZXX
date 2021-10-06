@@ -15,16 +15,16 @@ dev-repo: "git://github.com/asemio/SZXX"
 doc: "https://github.com/asemio/SZXX"
 bug-reports: "https://github.com/asemio/SZXX/issues"
 depends: [
-  "ocaml" {>= "4.08.1"}
-  "dune" {>= "1.9.0"}
+  "ocaml" { >= "4.08.1" }
+  "dune" { >= "1.9.0" }
 
-  "angstrom" {>= "0.14.1"}
-  "core_kernel" {>= "v0.13.0"}
+  "angstrom" { >= "0.15.0" }
+  "core_kernel" { >= "v0.13.0" }
   "decompress"
-  "lwt" {>= "5.0.0"}
+  "lwt" { >= "5.0.0" }
   "lwt_ppx"
 
-  "alcotest-lwt" {with-test}
-  "yojson" {with-test}
+  "alcotest-lwt" { with-test }
+  "yojson" { with-test }
 ]
 build: ["dune" "build" "-p" name "-j" jobs]

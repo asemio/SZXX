@@ -3,9 +3,9 @@ open Zip
 open Xml
 
 type location = {
-  col_index: int;
   sheet_number: int;
   row_number: int;
+  col_index: int;
 }
 [@@deriving sexp_of]
 
@@ -192,7 +192,6 @@ let extract_row cell_of_string ({ data; sheet_number; row_number } as row) =
   )
 
 let stream_rows ?only_sheet ~feed cell_of_string =
-  (* let Expert.{ controlled_ic; push; finalize; stream } = Expert.backpressure input_channel in *)
   let stream, push = Lwt_stream.create () in
   let finalize () =
     push None;
@@ -202,6 +201,9 @@ let stream_rows ?only_sheet ~feed cell_of_string =
   let sst_p, processed_p = process_file ?only_sheet ~feed (fun x -> push (Some x)) finalize in
   let parsed_stream = Lwt_stream.map (fun row -> extract_row cell_of_string row) stream in
   parsed_stream, sst_p, processed_p
+
+let resolve_sst_index (SST sst) ~sst_index =
+  sst.top |> at sst_index |> Option.map ~f:(fun { text; _ } -> text)
 
 let await_delayed cell_of_string (SST sst) (row : 'a status row) =
   let data =
@@ -225,8 +227,7 @@ let stream_rows_buffer ?only_sheet ~feed cell_of_string =
   let parsed_stream =
     Lwt_stream.map_s
       (fun row ->
-        let%lwt sst = sst_p in
-        extract_row cell_of_string row |> await_delayed cell_of_string sst |> Lwt.return)
+        sst_p |> Lwt.map (fun sst -> extract_row cell_of_string row |> await_delayed cell_of_string sst))
       stream
   in
   parsed_stream, processed_p

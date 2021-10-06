@@ -1,9 +1,9 @@
 open! Core_kernel
 
 type location = {
-  col_index: int;
   sheet_number: int;
   row_number: int;
+  col_index: int;
 }
 [@@deriving sexp_of]
 
@@ -92,6 +92,11 @@ val stream_rows :
    then await the [sst Lwt.t], and finally call [Lwt_stream.map (await_delayed ... ) stream].
 *)
 val await_delayed : 'a cell_of_string -> sst -> 'a status row -> 'a row
+
+(**
+   Resolve a single reference into the Shared Strings Table.
+*)
+val resolve_sst_index : sst -> sst_index:string -> string option
 
 (**
    Convenience function around [stream_rows] and [await_delayed].
