@@ -3,7 +3,7 @@ let flags = Unix.[ O_RDONLY; O_NONBLOCK ]
 open! Core_kernel
 open Lwt.Infix
 
-let chunk () =
+let fold () =
   let xlsx_path = "../../../test/files/financial.xlsx" in
   let json_path = "../../../test/files/chunks.json" in
   let%lwt against =
@@ -23,7 +23,7 @@ let chunk () =
         in
         let stream, processed =
           SZXX.Zip.stream_files ~feed:(Bigstring feed) (fun _ ->
-              Chunk (fun (_entry, s) -> Queue.enqueue queue (`String s)))
+              Fold_string { init = (); f = (fun _entry s () -> Queue.enqueue queue (`String s)) })
         in
         let%lwt () = Lwt.join [ Lwt_stream.iter (const ()) stream; processed ] in
         Lwt.return (`Assoc [ "data", `List (List.rev (Queue.to_list queue)) ]))
@@ -36,4 +36,4 @@ let chunk () =
      in *)
   Lwt.return_unit
 
-let () = Lwt_main.run @@ Alcotest_lwt.run "SZXX ZIP" [ "ZIP", [ "financial.xlsx", `Quick, chunk ] ]
+let () = Lwt_main.run @@ Alcotest_lwt.run "SZXX ZIP" [ "ZIP", [ "financial.xlsx", `Quick, fold ] ]

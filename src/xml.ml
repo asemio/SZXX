@@ -46,6 +46,8 @@ module SAX = struct
     | Element_close of string
     | Text          of string
     | Cdata         of string
+    | Nothing
+    | Many          of node list
   [@@deriving sexp_of]
 
   module To_DOM = struct
@@ -70,39 +72,43 @@ module SAX = struct
     let partial_to_element { tag; attrs; buf; children; _ } =
       DOM.{ tag; attrs; text = Buffer.contents buf; children = Queue.to_array children }
 
-    let cb acc (node : node) =
+    let rec folder acc (node : node) =
       match node, acc with
-      | Prologue _, { decl_attrs = Some _; _ } -> failwith "A prologue already exists"
-      | Prologue attrs, { decl_attrs = None; _ } -> { acc with decl_attrs = Some attrs }
-      | Element_open { tag; attrs; preserve_space }, _ ->
+      | _, Error _ -> acc
+      | Nothing, Ok _ -> acc
+      | Many ll, Ok acc -> List.fold_result ll ~init:acc ~f:(fun acc x -> folder (Ok acc) x)
+      | Prologue _, Ok { decl_attrs = Some _; _ } -> Error "A prologue already exists"
+      | Prologue attrs, Ok ({ decl_attrs = None; _ } as acc) -> Ok { acc with decl_attrs = Some attrs }
+      | Element_open { tag; attrs; preserve_space }, Ok acc ->
         let partial =
           { tag; attrs; preserve_space; buf = Buffer.create 16; children = Queue.create ~capacity:4 () }
         in
-        { acc with stack = partial :: acc.stack }
-      | Text s, { stack = []; top = None; _ } ->
-        failwithf "Invalid document. Text not contained within an element: %s" s ()
-      | Cdata s, { stack = []; top = None; _ } ->
-        failwithf "Invalid document. CDATA not contained within an element: %s" s ()
-      | Text _, { stack = []; top = Some _; _ }
-       |Cdata _, { stack = []; top = Some _; _ } ->
+        Ok { acc with stack = partial :: acc.stack }
+      | Text s, Ok { stack = []; top = None; _ } ->
+        Error (sprintf "Invalid document. Text not contained within an element: \"%s\"" s)
+      | Cdata s, Ok { stack = []; top = None; _ } ->
+        Error (sprintf "Invalid document. CDATA not contained within an element: \"%s\"" s)
+      | Text _, Ok { stack = []; top = Some _; _ }
+       |Cdata _, Ok { stack = []; top = Some _; _ } ->
         acc
-      | Text s, { stack = { buf; preserve_space; _ } :: _; _ }
-       |Cdata s, { stack = { buf; preserve_space; _ } :: _; _ } ->
+      | Text s, Ok { stack = { buf; preserve_space; _ } :: _; _ }
+       |Cdata s, Ok { stack = { buf; preserve_space; _ } :: _; _ } ->
         let preserve = force preserve_space in
         if Buffer.length buf > 0 && not (preserve && String.is_prefix s ~prefix:" ")
         then Buffer.add_char buf ' ';
         Buffer.add_string buf (if preserve then s else String.strip s);
         acc
-      | Element_close tag, { stack = current :: (parent :: _ as rest); _ }
+      | Element_close tag, Ok ({ stack = current :: (parent :: _ as rest); _ } as acc)
         when String.( = ) tag current.tag ->
         Queue.enqueue parent.children (partial_to_element current);
-        { acc with stack = rest }
-      | Element_close tag, { stack = [ current ]; top = None; _ } when String.( = ) tag current.tag ->
-        { acc with stack = []; top = Some (partial_to_element current) }
-      | Element_close tag, { stack = current :: _ :: _; _ } ->
-        failwithf "Invalid document. Closing element '%s' before element '%s'" tag current.tag ()
-      | Element_close tag, _ ->
-        failwithf "Invalid document. Closing tag without matching opening tag: %s" tag ()
+        Ok { acc with stack = rest }
+      | Element_close tag, Ok ({ stack = [ current ]; top = None; _ } as acc)
+        when String.( = ) tag current.tag ->
+        Ok { acc with stack = []; top = Some (partial_to_element current) }
+      | Element_close tag, Ok { stack = current :: _ :: _; _ } ->
+        Error (sprintf "Invalid document. Closing element \"%s\" before element \"%s\"" tag current.tag)
+      | Element_close tag, Ok _ ->
+        Error (sprintf "Invalid document. Closing tag without matching opening tag: %s" tag)
   end
 
   module Stream = struct
@@ -118,61 +124,70 @@ module SAX = struct
     type state = {
       decl_attrs: attr_list option;
       stack: partial list;
-      path: string;
+      path_stack: string list;
       top: DOM.element option;
     }
     [@@deriving sexp_of]
 
-    let init = { decl_attrs = None; stack = []; path = ""; top = None }
+    let init = { decl_attrs = None; stack = []; path_stack = [ "" ]; top = None }
 
     let partial_to_element { tag; attrs; buf; children; _ } =
       DOM.{ tag; attrs; text = Buffer.contents buf; children = Queue.to_array children }
 
-    let cb ~filter_path ~on_match acc (node : node) =
+    let rec folder ~filter_path ~on_match acc (node : node) =
       match node, acc with
-      | Prologue _, { decl_attrs = Some _; _ } -> failwith "A prologue already exists"
-      | Prologue attrs, { decl_attrs = None; _ } -> { acc with decl_attrs = Some attrs }
-      | Element_open { tag; attrs; preserve_space }, _ ->
+      | _, Error _ -> acc
+      | Nothing, Ok _ -> acc
+      | Many ll, Ok acc ->
+        List.fold_result ll ~init:acc ~f:(fun acc x -> folder ~filter_path ~on_match (Ok acc) x)
+      | Prologue _, Ok { decl_attrs = Some _; _ } -> Error "A prologue already exists"
+      | Prologue attrs, Ok ({ decl_attrs = None; _ } as acc) -> Ok { acc with decl_attrs = Some attrs }
+      | Element_open { tag; attrs; preserve_space }, Ok ({ path_stack = path :: _; _ } as acc) ->
         let partial =
           { tag; attrs; preserve_space; buf = Buffer.create 16; children = Queue.create ~capacity:4 () }
         in
-        { acc with stack = partial :: acc.stack; path = sprintf "%s %s" acc.path tag }
-      | Text s, { stack = []; top = None; _ } ->
-        failwithf "Invalid document. Text not contained within an element: %s" s ()
-      | Cdata s, { stack = []; top = None; _ } ->
-        failwithf "Invalid document. CDATA not contained within an element: %s" s ()
-      | Text s, { stack = { buf; preserve_space; _ } :: _; path; _ }
-       |Cdata s, { stack = { buf; preserve_space; _ } :: _; path; _ }
+        Ok
+          {
+            acc with
+            stack = partial :: acc.stack;
+            path_stack = sprintf "%s %s" path tag :: acc.path_stack;
+          }
+      | Element_open _, Ok { path_stack = []; _ } ->
+        Error "Impossible case. Path stack cannot be empty. Please report this bug."
+      | Text s, Ok { stack = []; top = None; _ } ->
+        Error (sprintf "Invalid document. Text not contained within an element: %s" s)
+      | Cdata s, Ok { stack = []; top = None; _ } ->
+        Error (sprintf "Invalid document. CDATA not contained within an element: %s" s)
+      | Text s, Ok { stack = { buf; preserve_space; _ } :: _; path_stack = path :: _; _ }
+       |Cdata s, Ok { stack = { buf; preserve_space; _ } :: _; path_stack = path :: _; _ }
         when String.is_prefix path ~prefix:filter_path ->
         let preserve = force preserve_space in
         if Buffer.length buf > 0 && not (preserve && String.is_prefix s ~prefix:" ")
         then Buffer.add_char buf ' ';
         Buffer.add_string buf (if preserve then s else String.strip s);
         acc
-      | Text _, _
-       |Cdata _, _ ->
+      | Text _, Ok _
+       |Cdata _, Ok _ ->
         acc
-      | Element_close tag, { stack = current :: (parent :: _ as rest); path; _ }
+      | ( Element_close tag,
+          Ok ({ stack = current :: (parent :: _ as rest); path_stack = path :: path_rest; _ } as acc) )
         when String.( = ) tag current.tag ->
-        let len_path = String.length path in
-        let len_tag = String.length tag in
-        let len_filter_path = String.length filter_path in
-        (match String.is_prefix path ~prefix:filter_path, len_path = len_filter_path with
-        | true, false -> Queue.enqueue parent.children (partial_to_element current)
-        | true, true -> on_match (partial_to_element current)
-        | false, _ -> ());
-        let new_path =
-          match len_path - (len_tag + 1) with
-          | 0 -> ""
-          | stop -> String.slice path 0 stop
-        in
-        { acc with stack = rest; path = new_path }
-      | Element_close tag, { stack = [ current ]; top = None; _ } when String.( = ) tag current.tag ->
-        { acc with stack = []; top = Some (partial_to_element current) }
-      | Element_close tag, { stack = current :: _ :: _; _ } ->
-        failwithf "Invalid document. Closing element '%s' before element '%s'" tag current.tag ()
-      | Element_close tag, _ ->
-        failwithf "Invalid document. Closing tag without matching opening tag: %s" tag ()
+        (match String.is_prefix path ~prefix:filter_path with
+        | true when String.length path = String.length filter_path ->
+          (* Exactly filter_path *)
+          on_match (partial_to_element current)
+        | true ->
+          (* Children of filter_path *)
+          Queue.enqueue parent.children (partial_to_element current)
+        | false -> ());
+        Ok { acc with stack = rest; path_stack = path_rest }
+      | Element_close tag, Ok ({ stack = [ current ]; top = None; _ } as acc)
+        when String.( = ) tag current.tag ->
+        Ok { acc with stack = []; top = Some (partial_to_element current) }
+      | Element_close tag, Ok { stack = current :: _ :: _; _ } ->
+        Error (sprintf "Invalid document. Closing element '%s' before element '%s'" tag current.tag)
+      | Element_close tag, Ok _ ->
+        Error (sprintf "Invalid document. Closing tag without matching opening tag: %s" tag)
   end
 end
 
@@ -212,7 +227,7 @@ let escapable_string_parser ~separator =
   char separator
   *>
   let is_separator = Char.( = ) separator in
-  let buf = Buffer.create 20 in
+  let buf = Buffer.create 1024 in
   let rec loop escaping ll =
     any_char >>= fun x ->
     match x, escaping with
@@ -224,7 +239,7 @@ let escapable_string_parser ~separator =
     | c, _ when is_separator c ->
       List.fold_right ll ~init:() ~f:(fun c () -> Buffer.add_char buf c);
       let result = Buffer.contents buf in
-      Buffer.clear buf;
+      if String.length result > 1024 then Buffer.reset buf else Buffer.clear buf;
       return result
     | c, true -> (loop [@tailcall]) true (c :: ll)
     | c, false ->
@@ -262,7 +277,7 @@ let is_ws = function
   true
 | _ -> false
 
-let drop p = p *> return ()
+let drop p = p >>| const ()
 
 let double x y = x, y
 
@@ -272,7 +287,7 @@ let skip_until_string terminate =
   let rec loop () =
     skip_while (Char.( <> ) first) >>= fun () ->
     peek_string len >>= function
-    | x when String.(x = terminate) -> string terminate
+    | x when String.(x = terminate) -> advance len
     | _ -> (loop [@tailcall]) ()
   in
   loop ()
@@ -281,48 +296,55 @@ let ws = skip_while is_ws
 
 let comment = string "<!--" *> skip_until_string "-->"
 
-let blank = drop (sep_by comment ws)
+let blank = skip_many (ws *> comment) *> ws
 
-let parser ~init ~(cb : 'a -> SAX.node -> 'a) =
-  let box = ref init in
-  let cb node = box := cb !box node in
-  let xml_string =
+let token_parser = take_while1 is_token
+
+let attr_parser ~xml_string_parser =
+  lift2 double (lift3 (fun x _ _ -> x) token_parser ws (char '=')) (ws *> xml_string_parser)
+
+let doctype_parser ~xml_string_parser =
+  let entity =
+    string "[<!ENTITY" *> ws *> skip_many (ws *> choice [ token_parser; xml_string_parser ])
+    <* ws
+    <* string ">]"
+  in
+  blank
+  *> string "<!DOCTYPE"
+  *> ws
+  *> skip_many (ws *> choice [ drop token_parser; drop xml_string_parser; entity ])
+  <* ws
+  <* char '>'
+  >>| const SAX.Nothing
+
+let prologue_parser ~xml_string_parser =
+  lift4
+    (fun _ attrs _ _ -> SAX.Prologue attrs)
+    (blank *> string "<?xml ")
+    (many (blank *> attr_parser ~xml_string_parser))
+    blank (string "?>")
+
+let parser =
+  let xml_string_parser =
     let dq_string = escapable_string_parser ~separator:'"' in
     let sq_string = escapable_string_parser ~separator:'\'' in
     dq_string <|> sq_string
   in
-  let token = take_while1 is_token in
-  let attr = lift2 double (token <* ws <* char '=') (ws *> xml_string) in
-  let doctype_parser =
-    let entity =
-      string "[<!ENTITY" *> ws *> skip_many (ws *> choice [ token; xml_string ]) <* ws <* string ">]"
-    in
-    string "<!DOCTYPE" *> ws *> skip_many (ws *> choice [ drop token; drop xml_string; entity ])
-    <* ws
-    <* char '>'
-  in
-  let prologue_parser =
-    lift4
-      (fun _ attrs _ _ -> cb (Prologue attrs))
-      (string "<?xml ")
-      (many (blank *> attr))
-      blank (string "?>")
-  in
   let cdata_parser =
     let buf = Buffer.create 20 in
-    blank
-    *> string "<![CDATA["
-    *>
     let rec loop n ll =
       any_char >>= fun c ->
       match c, n with
       | ']', 0 -> (loop [@tailcall]) 1 (']' :: ll)
       | ']', 1 -> (loop [@tailcall]) 2 (']' :: ll)
       | '>', 2 ->
-        let s = Buffer.contents buf in
-        Buffer.clear buf;
-        cb (Text s);
-        return ()
+        if Buffer.length buf > 0
+        then begin
+          let s = Buffer.contents buf in
+          Buffer.clear buf;
+          return (SAX.Text s)
+        end
+        else return SAX.Nothing
       | c, 0 ->
         Buffer.add_char buf c;
         (loop [@tailcall]) 0 ll
@@ -330,7 +352,7 @@ let parser ~init ~(cb : 'a -> SAX.node -> 'a) =
         List.fold_right (c :: ll) ~init:() ~f:(fun x () -> Buffer.add_char buf x);
         (loop [@tailcall]) 0 []
     in
-    loop 0 []
+    blank *> string "<![CDATA[" *> loop 0 []
   in
   let element_open_parser =
     lift3
@@ -340,19 +362,26 @@ let parser ~init ~(cb : 'a -> SAX.node -> 'a) =
             (List.mem attrs ("xml:space", "preserve")
                ~equal:String.((fun (x1, y1) (x2, y2) -> x1 = x2 && y1 = y2)))
         in
-        cb (Element_open { tag; attrs; preserve_space });
-        if self_closing then cb (Element_close tag))
-      (blank *> char '<' *> ws *> token)
-      (many (ws *> attr) <* ws)
-      (option false (char '/' *> return true) <* char '>')
+        let eopen = SAX.Element_open { tag; attrs; preserve_space } in
+        if self_closing then SAX.Many [ eopen; Element_close tag ] else eopen)
+      (lift4 (fun _ _ _ x -> x) blank (char '<') ws token_parser)
+      (many (ws *> attr_parser ~xml_string_parser) <* ws)
+      (option false (char '/' >>| const true) <* char '>')
   in
   let element_close_parser =
-    lift4 (fun _ _ tag _ -> cb (Element_close tag)) (blank *> string "</") ws token (ws <* char '>')
+    lift4 (fun _ _ tag _ -> SAX.Element_close tag) (blank *> string "</") ws token_parser (ws <* char '>')
   in
-  let text_parser = skip_many (ws <* comment) *> take_while1 is_text >>| fun s -> cb (Text s) in
-  let node_parser = choice [ cdata_parser; element_close_parser; element_open_parser; text_parser ] in
-  lift4
-    (fun () () () () -> !box)
-    (blank *> option () prologue_parser)
-    (blank *> option () doctype_parser)
-    (skip_many node_parser) blank
+  let text_parser =
+    skip_many (ws <* comment) *> take_while1 is_text >>| function
+    | "" -> SAX.Nothing
+    | s -> SAX.Text s
+  in
+  choice
+    [
+      prologue_parser ~xml_string_parser;
+      doctype_parser ~xml_string_parser;
+      cdata_parser;
+      element_close_parser;
+      element_open_parser;
+      text_parser;
+    ]

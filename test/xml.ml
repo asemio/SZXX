@@ -115,7 +115,9 @@ let data1 =
 
 let test2 =
   {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="3" uniqueCount="3"><si><t xml:space="preserve">hello</t></si><si><t xml:space="preserve">world</t></si><si><t xml:space="preserve">ok bye</t></si></sst>|s}
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="3" uniqueCount="3"><si><t xml:space="preserve">hello</t></si><si><t xml:space="preserve">world</t></si><si><t xml:space="preserve">ok bye</t></si></sst>
+
+|s}
 
 let data2 =
   Yojson.Safe.from_string
@@ -227,27 +229,30 @@ type buffer = Buffer.t
 let sexp_of_buffer buf = Sexp.List [ Atom "Buffer"; Atom (Buffer.contents buf) ]
 
 let xml_to_dom test data () =
-  match
-    Angstrom.parse_string ~consume:Angstrom.Consume.All
-      (SZXX.Xml.parser ~init:SZXX.Xml.SAX.To_DOM.init ~cb:SZXX.Xml.SAX.To_DOM.cb)
-      test
-  with
-  | Ok { decl_attrs; stack = []; top = Some top; _ } ->
-    let doc = { decl_attrs; top } in
+  match Angstrom.parse_string ~consume:Angstrom.Consume.All (Angstrom.many SZXX.Xml.parser) test with
+  | Ok nodes ->
+    let doc =
+      match
+        List.fold_result nodes ~init:SZXX.Xml.SAX.To_DOM.init ~f:(fun acc x ->
+            SZXX.Xml.SAX.To_DOM.folder (Ok acc) x)
+      with
+      | Ok { decl_attrs; stack = []; top = Some top; _ } -> { decl_attrs; top }
+      | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.To_DOM.state}" state ()
+      | Error msg -> failwith msg
+    in
     Json_diff.check (doc_to_yojson doc) data;
     Lwt.return_unit
-  | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.To_DOM.state}" state ()
   | Error msg -> failwith msg
 
 let xml_stream test data filter_path () =
   let queue = Queue.create () in
   let on_match x = Queue.enqueue queue x in
-  match
-    Angstrom.parse_string ~consume:Angstrom.Consume.All
-      (SZXX.Xml.parser ~init:SZXX.Xml.SAX.Stream.init ~cb:(SZXX.Xml.SAX.Stream.cb ~filter_path ~on_match))
-      test
-  with
-  | Ok _ ->
+  match Angstrom.parse_string ~consume:Angstrom.Consume.All (Angstrom.many SZXX.Xml.parser) test with
+  | Ok nodes ->
+    let _state =
+      List.fold_result nodes ~init:SZXX.Xml.SAX.Stream.init ~f:(fun acc x ->
+          SZXX.Xml.SAX.Stream.folder ~filter_path ~on_match (Ok acc) x)
+    in
     let streamed = `Assoc [ "data", [%to_yojson: element array] (Queue.to_array queue) ] in
     Json_diff.check streamed data;
     Lwt.return_unit

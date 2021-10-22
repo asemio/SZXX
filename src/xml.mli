@@ -47,6 +47,8 @@ module SAX : sig
     | Element_close of string
     | Text          of string
     | Cdata         of string
+    | Nothing
+    | Many          of node list
   [@@deriving sexp_of]
 
   module To_DOM : sig
@@ -68,7 +70,7 @@ module SAX : sig
 
     val init : state
 
-    val cb : state -> node -> state
+    val folder : (state, string) result -> node -> (state, string) result
   end
 
   module Stream : sig
@@ -81,11 +83,22 @@ module SAX : sig
     }
     [@@deriving sexp_of]
 
-    type state
+    type state = {
+      decl_attrs: attr_list option;
+      stack: partial list;
+      path_stack: string list;
+      top: DOM.element option;
+    }
+    [@@deriving sexp_of]
 
     val init : state
 
-    val cb : filter_path:string -> on_match:(DOM.element -> unit) -> state -> node -> state
+    val folder :
+      filter_path:string ->
+      on_match:(DOM.element -> unit) ->
+      (state, string) result ->
+      node ->
+      (state, string) result
   end
 end
 
@@ -108,7 +121,7 @@ end
    For example, here's the [path] of the rows in an XLSX worksheet: [["worksheet"; "sheetData"; "row"]].
    In that case, the top level element is [<worksheet>], which contains [<sheetData>], which in turn contains many [<row>] elements.
 *)
-val parser : init:'a -> cb:('a -> SAX.node -> 'a) -> 'a Angstrom.t
+val parser : SAX.node Angstrom.t
 
 (**
    Limited but efficient function to unescapable XML escape sequences.

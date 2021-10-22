@@ -58,8 +58,9 @@ let xlsx filename () =
     Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
         let open SZXX.Xlsx in
         let stream, processed = stream_rows_buffer ~feed:(feed_bigstring ic) extractors in
-        let%lwt json = Lwt_stream.fold (fun row acc -> `List (Array.to_list row.data) :: acc) stream [] in
+        let json_p = Lwt_stream.fold (fun row acc -> `List (Array.to_list row.data) :: acc) stream [] in
         let%lwt () = processed in
+        let%lwt json = json_p in
         Lwt.return (`Assoc [ "data", `List (List.rev json) ]))
   in
 
@@ -80,7 +81,7 @@ let stream_rows filename () =
         let open SZXX.Xlsx in
         let stream, sst, processed = stream_rows ~feed:(feed_bigstring ic) yojson_readers in
         let%lwt sst = sst in
-        let%lwt json_list =
+        let json_list_p =
           Lwt_stream.map
             (fun status ->
               let row = await_delayed yojson_readers sst status in
@@ -89,6 +90,7 @@ let stream_rows filename () =
           |> Lwt_stream.to_list
         in
         let%lwt () = processed in
+        let%lwt json_list = json_list_p in
         Lwt.return (`Assoc [ "data", `List json_list ]))
   in
   (* let%lwt () =

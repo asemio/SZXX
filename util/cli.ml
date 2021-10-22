@@ -14,6 +14,16 @@ let string_readers : string Xlsx.cell_of_string =
     null = "";
   }
 
+let feed_string ic =
+  let open Lwt.Infix in
+  let open SZXX.Zip in
+  let count = Lwt_io.buffer_size ic in
+  String
+    (fun () ->
+      Lwt_io.read ~count ic >|= function
+      | "" -> None
+      | chunk -> Some chunk)
+
 let feed_bigstring ic =
   let open Lwt.Infix in
   let open SZXX.Zip in
@@ -40,6 +50,19 @@ let count xlsx_path =
       let%lwt () = processed in
       Lwt.return_unit)
 
+let length xlsx_path =
+  Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
+      let stream, p = Zip.stream_files ~feed:(feed_bigstring ic) (const Zip.Action.String) in
+      let%lwt () =
+        Lwt_stream.iter
+          (function
+            | ({ filename; _ } : Zip.entry), Zip.Data.String raw ->
+              print_endline (sprintf "%s: %d" filename (String.length raw))
+            | _ -> failwith "Expected Zip.Data.String")
+          stream
+      in
+      p)
+
 let extract xlsx_path =
   Lwt_io.with_file ~flags:flags_overwrite ~mode:Output (sprintf "%s.sst.xml" xlsx_path) (fun oc ->
       Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
@@ -61,4 +84,5 @@ let () =
   Sys.argv |> function
   | [| _; "extract"; file |] -> Lwt_main.run (extract file)
   | [| _; "count"; file |] -> Lwt_main.run (count file)
+  | [| _; "length"; file |] -> Lwt_main.run (length file)
   | _ -> failwith "Invalid arguments"

@@ -29,23 +29,29 @@ module Action = struct
   type 'a t =
     | Skip
     | String
-    | Chunk  of (entry * string -> unit)
-    | Parse  of 'a Angstrom.t
+    | Fold_string    of {
+        init: 'a;
+        f: entry -> string -> 'a -> 'a;
+      }
+    | Fold_bigstring of {
+        init: 'a;
+        f: entry -> Bigstring.t -> len:int -> 'a -> 'a;
+      }
+    | Parse          of 'a Angstrom.t
 end
 
 module Data = struct
   type 'a t =
     | Skip
-    | String of string
-    | Chunk
-    | Parse  of ('a, string) result
+    | String         of string
+    | Fold_string    of 'a
+    | Fold_bigstring of 'a
+    | Parse          of ('a, string) result
 end
 
 let double x y = x, y
 
 let triple x y z = x, y, z
-
-let maybe p = Angstrom.(option None (p >>| Option.return))
 
 module Storage = struct
   type t = {
@@ -81,7 +87,7 @@ module Storage = struct
     let add c =
       Bigstring.set inbs !inbs_pos c;
       incr inbs_pos;
-      if Int.(!inbs_pos = 1024) then ignore (uncompress ())
+      if !inbs_pos = 1024 then ignore (uncompress ())
     in
     let finalize () = if not (uncompress ()) then ignore (uncompress ()) in
     { add; finalize }
@@ -131,20 +137,32 @@ module Mode = struct
     in
     { flush; complete }
 
-  let chunk entry write =
+  let fold_string ~init ~f entry =
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
-    let process s =
-      let len = String.length s in
+    let acc = ref init in
+    let flush (bs, len) =
+      let s = Bigstring.to_string bs ~pos:0 ~len in
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_string s 0 len !crc;
-      write (entry, s)
+      acc := f entry s !acc
     in
-    let flush (bs, len) = process (Bigstring.to_string bs ~pos:0 ~len) in
-    let complete () = Data.Chunk, !bytes_processed, !crc in
+    let complete () = Data.Fold_string !acc, !bytes_processed, !crc in
     { flush; complete }
 
-  let parser angstrom =
+  let fold_bigstring ~init ~f entry =
+    let crc = ref Optint.zero in
+    let bytes_processed = ref 0 in
+    let acc = ref init in
+    let flush (bs, len) =
+      bytes_processed := !bytes_processed + len;
+      crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc;
+      acc := f entry bs ~len !acc
+    in
+    let complete () = Data.Fold_bigstring !acc, !bytes_processed, !crc in
+    { flush; complete }
+
+  let parse angstrom =
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
     let open Angstrom.Buffered in
@@ -173,31 +191,28 @@ end
 
 let parser cb =
   let open Angstrom in
-  let header_parser = string "PK\003\004" in
+  let header_parser = string "PK\003\004" >>| const () in
   let descriptor_parser =
     lift3
       (fun crc compressed_size uncompressed_size -> { crc; compressed_size; uncompressed_size })
-      LE.any_int32 (* crc *)
-      (LE.any_int32 >>| Int32.to_int_exn) (* compressed_size *)
-      (LE.any_int32 >>| Int32.to_int_exn)
-    (* uncompressed_size *)
+      LE.any_int32 (LE.any_int32 >>| Int32.to_int_exn) (LE.any_int32 >>| Int32.to_int_exn)
   in
   let bounded_file_reader Storage.{ add; finalize } =
     let rec loop n ll =
       any_char >>= fun c ->
       match c, n with
-      | 'P', 0 -> loop 1 ('P' :: ll)
-      | 'K', 1 -> loop 2 ('K' :: ll)
-      | '\007', 2 -> loop 3 ('\007' :: ll)
+      | 'P', 0 -> (loop [@tailcall]) 1 ('P' :: ll)
+      | 'K', 1 -> (loop [@tailcall]) 2 ('K' :: ll)
+      | '\007', 2 -> (loop [@tailcall]) 3 ('\007' :: ll)
       | '\008', 3 ->
         finalize ();
         return ()
       | c, 0 ->
         add c;
-        loop 0 ll
+        (loop [@tailcall]) 0 ll
       | c, _ ->
         List.fold_right (c :: ll) ~init:() ~f:(fun x () -> add x);
-        loop 0 []
+        (loop [@tailcall]) 0 []
     in
     loop 0 []
   in
@@ -209,7 +224,7 @@ let parser cb =
       | n ->
         any_char >>= fun c ->
         add c;
-        loop (pred n)
+        (loop [@tailcall]) (pred n)
     in
     loop size
   in
@@ -229,11 +244,11 @@ let parser cb =
       (let rec loop n =
          any_char >>= fun c ->
          match c, n with
-         | 'P', 0 -> loop 1
-         | 'K', 1 -> loop 2
-         | '\003', 2 -> loop 3
+         | 'P', 0 -> (loop [@tailcall]) 1
+         | 'K', 1 -> (loop [@tailcall]) 2
+         | '\003', 2 -> (loop [@tailcall]) 3
          | '\004', 3 -> return ()
-         | _ -> loop 0
+         | _ -> (loop [@tailcall]) 0
        in
        loop 0)
       (lift3 triple
@@ -254,14 +269,15 @@ let parser cb =
       ( lift2 double LE.any_uint16 (* filename length *) LE.any_uint16 (* extra length *)
       >>= fun (len1, len2) -> lift2 double (take len1) (take len2) )
   in
-  entry_parser >>= fun entry ->
+  lift2 const entry_parser commit >>= fun entry ->
   let reader ?(size = 4096) () =
     let Mode.{ flush; complete } =
       match cb entry with
       | Action.Skip -> Mode.skip ()
       | Action.String -> Mode.string size
-      | Action.Chunk write -> Mode.chunk entry write
-      | Action.Parse angstrom -> Mode.parser angstrom
+      | Action.Fold_string { init; f } -> Mode.fold_string ~init ~f entry
+      | Action.Fold_bigstring { init; f } -> Mode.fold_bigstring ~init ~f entry
+      | Action.Parse angstrom -> Mode.parse angstrom
     in
     let storage_method, zipped_length =
       match entry.methd with
@@ -275,19 +291,24 @@ let parser cb =
     in
     file_reader storage_method >>| complete
   in
-  begin
+  let file =
     match entry.trailing_descriptor_present with
-    | false -> lift2 double (reader ~size:entry.descriptor.uncompressed_size ()) (return entry)
+    | false -> reader ~size:entry.descriptor.uncompressed_size () >>| fun x -> x, entry
     | true ->
-      lift2 double (reader ())
-        (maybe header_parser *> descriptor_parser >>| fun descriptor -> { entry with descriptor })
-  end
-  >>| function
-  | (_data, size, _crc), entry when entry.descriptor.uncompressed_size <> size ->
-    failwithf "%s: Size mismatch: %d <> %d" entry.filename entry.descriptor.uncompressed_size size ()
-  | (_data, _size, crc), entry when Int32.(entry.descriptor.crc <> Optint.to_int32 crc) ->
-    failwithf "%s: CRC mismatch" entry.filename ()
-  | (data, _size, _crc), entry -> entry, data
+      lift3
+        (fun data_size_crc () descriptor -> data_size_crc, { entry with descriptor })
+        (reader ()) (option () header_parser) descriptor_parser
+  in
+  lift2
+    (fun data () ->
+      match data with
+      | (_data, size, _crc), entry when entry.descriptor.uncompressed_size <> size ->
+        failwithf "%s: Size mismatch: %d but expected %d" entry.filename size
+          entry.descriptor.uncompressed_size ()
+      | (_data, _size, crc), entry when Int32.(entry.descriptor.crc <> Optint.to_int32 crc) ->
+        failwithf "%s: CRC mismatch" entry.filename ()
+      | (data, _size, _crc), entry -> entry, data)
+    file commit
 
 type 'a slice = {
   buf: 'a;
