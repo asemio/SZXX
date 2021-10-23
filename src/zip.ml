@@ -53,61 +53,46 @@ let double x y = x, y
 
 let triple x y z = x, y, z
 
+let slice_size = 1024
+
+let slice_bits = 10
+
 module Storage = struct
   type t = {
-    add: char -> unit;
+    add: Bigstring.t -> int -> unit;
     finalize: unit -> unit;
   }
 
   let deflated flush =
-    let w = De.make_window ~bits:10 in
-    let inbs_pos = ref 0 in
-    let inbs = Bigstring.create 1024 in
-    let outbs = Bigstring.create 1024 in
+    let finished = ref true in
+    let w = De.make_window ~bits:slice_bits in
+    let outbs = Bigstring.create slice_size in
     let decoder = De.Inf.decoder `Manual ~o:outbs ~w in
     let rec do_uncompress () =
       match De.Inf.decode decoder with
       | `Await -> false
       | `End ->
-        let len = Bigstring.length outbs - De.Inf.dst_rem decoder in
+        let len = slice_size - De.Inf.dst_rem decoder in
         if len > 0 then flush (outbs, len);
         true
       | `Flush ->
-        let len = Bigstring.length outbs - De.Inf.dst_rem decoder in
+        let len = slice_size - De.Inf.dst_rem decoder in
         flush (outbs, len);
         De.Inf.flush decoder;
         do_uncompress ()
       | `Malformed err -> failwith err
     in
-    let uncompress () =
-      De.Inf.src decoder inbs 0 !inbs_pos;
-      inbs_pos := 0;
+    let uncompress bs len =
+      De.Inf.src decoder bs 0 len;
       do_uncompress ()
     in
-    let add c =
-      Bigstring.set inbs !inbs_pos c;
-      incr inbs_pos;
-      if !inbs_pos = 1024 then ignore (uncompress ())
-    in
-    let finalize () = if not (uncompress ()) then ignore (uncompress ()) in
+    let add bs len = finished := uncompress bs len in
+    let finalize () = if not !finished then ignore (uncompress outbs 0) in
     { add; finalize }
 
   let stored flush =
-    let bs = Bigstring.create 1024 in
-    let pos = ref 0 in
-    let add c =
-      Bigstring.set bs !pos c;
-      incr pos;
-      if !pos = 1024
-      then begin
-        flush (bs, 1024);
-        pos := 0
-      end
-    in
-    let finalize () =
-      let len = !pos in
-      if len > 0 then flush (bs, len)
-    in
+    let add bs len = flush (bs, len) in
+    let finalize () = () in
     { add; finalize }
 end
 
@@ -198,33 +183,59 @@ let parser cb =
       LE.any_int32 (LE.any_int32 >>| Int32.to_int_exn) (LE.any_int32 >>| Int32.to_int_exn)
   in
   let bounded_file_reader Storage.{ add; finalize } =
-    let rec loop n ll =
-      any_char >>= fun c ->
-      match c, n with
-      | 'P', 0 -> (loop [@tailcall]) 1 ('P' :: ll)
-      | 'K', 1 -> (loop [@tailcall]) 2 ('K' :: ll)
-      | '\007', 2 -> (loop [@tailcall]) 3 ('\007' :: ll)
-      | '\008', 3 ->
-        finalize ();
-        return ()
-      | c, 0 ->
-        add c;
-        (loop [@tailcall]) 0 ll
-      | c, _ ->
-        List.fold_right (c :: ll) ~init:() ~f:(fun x () -> add x);
-        (loop [@tailcall]) 0 []
+    let buf = Bigbuffer.create slice_size in
+    let add_char c =
+      Bigbuffer.add_char buf c;
+      let len = Bigbuffer.length buf in
+      if len = slice_size
+      then begin
+        add (Bigbuffer.volatile_contents buf) len;
+        Bigbuffer.clear buf
+      end
     in
-    loop 0 []
+    scan_state 0 (fun n c ->
+        match n, c with
+        | 0, 'P' -> Some 1
+        | 1, 'K' -> Some 2
+        | 2, '\007' -> Some 3
+        | 3, '\008' ->
+          let len = Bigbuffer.length buf in
+          if len > 0 then add (Bigbuffer.volatile_contents buf) len;
+          finalize ();
+          None
+        | 0, c ->
+          add_char c;
+          Some 0
+        | 1, c ->
+          add_char 'P';
+          add_char c;
+          Some 0
+        | 2, c ->
+          add_char 'P';
+          add_char 'K';
+          add_char c;
+          Some 0
+        | _, c ->
+          add_char 'P';
+          add_char 'K';
+          add_char '\007';
+          add_char c;
+          Some 0)
+    >>= fun _ -> advance 1
   in
   let fixed_size_reader size Storage.{ add; finalize } =
     let rec loop = function
+      | n when n > slice_size ->
+        take_bigstring slice_size >>= fun bs ->
+        add bs slice_size;
+        (loop [@tailcall]) (n - slice_size)
       | 0 ->
         finalize ();
         return ()
       | n ->
-        any_char >>= fun c ->
-        add c;
-        (loop [@tailcall]) (pred n)
+        take_bigstring n >>= fun bs ->
+        add bs n;
+        (loop [@tailcall]) 0
     in
     loop size
   in
