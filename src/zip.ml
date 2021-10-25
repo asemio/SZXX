@@ -23,8 +23,6 @@ type entry = {
 }
 [@@deriving sexp_of]
 
-type chunk = Bigstring.t * int
-
 module Action = struct
   type 'a t =
     | Skip
@@ -73,11 +71,11 @@ module Storage = struct
       | `Await -> false
       | `End ->
         let len = slice_size - De.Inf.dst_rem decoder in
-        if len > 0 then flush (outbs, len);
+        if len > 0 then flush outbs len;
         true
       | `Flush ->
         let len = slice_size - De.Inf.dst_rem decoder in
-        flush (outbs, len);
+        flush outbs len;
         De.Inf.flush decoder;
         do_uncompress ()
       | `Malformed err -> failwith err
@@ -91,21 +89,21 @@ module Storage = struct
     { add; finalize }
 
   let stored flush =
-    let add bs len = flush (bs, len) in
+    let add bs len = flush bs len in
     let finalize () = () in
     { add; finalize }
 end
 
 module Mode = struct
   type 'a t = {
-    flush: chunk -> unit;
+    flush: Bigstring.t -> int -> unit;
     complete: unit -> 'a Data.t * int * Optint.t;
   }
 
   let skip () =
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
-    let flush (bs, len) =
+    let flush bs len =
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc
     in
@@ -114,7 +112,7 @@ module Mode = struct
 
   let string size =
     let res = Bigbuffer.create size in
-    let flush (bs, len) = Bigbuffer.add_bigstring res (Bigstring.sub_shared bs ~pos:0 ~len) in
+    let flush bs len = Bigbuffer.add_bigstring res (Bigstring.sub_shared bs ~pos:0 ~len) in
     let complete () =
       let str = Bigbuffer.contents res in
       let len = String.length str in
@@ -126,7 +124,7 @@ module Mode = struct
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
     let acc = ref init in
-    let flush (bs, len) =
+    let flush bs len =
       let s = Bigstring.to_string bs ~pos:0 ~len in
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_string s 0 len !crc;
@@ -139,7 +137,7 @@ module Mode = struct
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
     let acc = ref init in
-    let flush (bs, len) =
+    let flush bs len =
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc;
       acc := f entry bs ~len !acc
@@ -152,7 +150,7 @@ module Mode = struct
     let bytes_processed = ref 0 in
     let open Angstrom.Buffered in
     let state = ref (parse angstrom) in
-    let flush (bs, len) =
+    let flush bs len =
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc;
       match !state with
@@ -176,52 +174,33 @@ end
 
 let parser cb =
   let open Angstrom in
-  let header_parser = string "PK\003\004" >>| const () in
+  let header_parser = string "PK\003\004" in
   let descriptor_parser =
     lift3
       (fun crc compressed_size uncompressed_size -> { crc; compressed_size; uncompressed_size })
       LE.any_int32 (LE.any_int32 >>| Int32.to_int_exn) (LE.any_int32 >>| Int32.to_int_exn)
   in
   let bounded_file_reader Storage.{ add; finalize } =
-    let buf = Bigbuffer.create slice_size in
-    let add_char c =
-      Bigbuffer.add_char buf c;
-      let len = Bigbuffer.length buf in
-      if len = slice_size
-      then begin
-        add (Bigbuffer.volatile_contents buf) len;
-        Bigbuffer.clear buf
-      end
+    let pattern = "PK\007\008" in
+    let first = pattern.[0] in
+    let bs = Bigstring.create 1 in
+    let rec loop () =
+      option "" (string pattern) >>= function
+      | "" ->
+        lift2
+          (fun c src ->
+            let src_len = Bigstring.length src in
+            Bigstring.set bs 0 c;
+            add bs 1;
+            if src_len > 0 then add src src_len)
+          any_char
+          (take_bigstring_while (Char.( <> ) first))
+        >>= fun () -> (loop [@tailcall]) ()
+      | _ ->
+        finalize ();
+        return ()
     in
-    scan_state 0 (fun n c ->
-        match n, c with
-        | 0, 'P' -> Some 1
-        | 1, 'K' -> Some 2
-        | 2, '\007' -> Some 3
-        | 3, '\008' ->
-          let len = Bigbuffer.length buf in
-          if len > 0 then add (Bigbuffer.volatile_contents buf) len;
-          finalize ();
-          None
-        | 0, c ->
-          add_char c;
-          Some 0
-        | 1, c ->
-          add_char 'P';
-          add_char c;
-          Some 0
-        | 2, c ->
-          add_char 'P';
-          add_char 'K';
-          add_char c;
-          Some 0
-        | _, c ->
-          add_char 'P';
-          add_char 'K';
-          add_char '\007';
-          add_char c;
-          Some 0)
-    >>= fun _ -> advance 1
+    loop ()
   in
   let fixed_size_reader size Storage.{ add; finalize } =
     let rec loop = function
@@ -252,16 +231,12 @@ let parser cb =
           filename;
           extra;
         })
-      (let rec loop n =
-         any_char >>= fun c ->
-         match c, n with
-         | 'P', 0 -> (loop [@tailcall]) 1
-         | 'K', 1 -> (loop [@tailcall]) 2
-         | '\003', 2 -> (loop [@tailcall]) 3
-         | '\004', 3 -> return ()
-         | _ -> (loop [@tailcall]) 0
+      (let rec loop () =
+         option "" (string "PK\003\004") >>= function
+         | "" -> advance 1 *> skip_while (Char.( <> ) 'P') >>= fun () -> (loop [@tailcall]) ()
+         | _ -> return ()
        in
-       loop 0)
+       loop ())
       (lift3 triple
          (LE.any_uint16 (* version_needed *) >>| function
           | 20 -> 20
@@ -307,19 +282,17 @@ let parser cb =
     | false -> reader ~size:entry.descriptor.uncompressed_size () >>| fun x -> x, entry
     | true ->
       lift3
-        (fun data_size_crc () descriptor -> data_size_crc, { entry with descriptor })
-        (reader ()) (option () header_parser) descriptor_parser
+        (fun data_size_crc _header descriptor -> data_size_crc, { entry with descriptor })
+        (reader ()) (option "" header_parser) descriptor_parser
   in
-  lift2
-    (fun data () ->
-      match data with
-      | (_data, size, _crc), entry when entry.descriptor.uncompressed_size <> size ->
-        failwithf "%s: Size mismatch: %d but expected %d" entry.filename size
-          entry.descriptor.uncompressed_size ()
-      | (_data, _size, crc), entry when Int32.(entry.descriptor.crc <> Optint.to_int32 crc) ->
-        failwithf "%s: CRC mismatch" entry.filename ()
-      | (data, _size, _crc), entry -> entry, data)
-    file commit
+  file >>| fun data ->
+  match data with
+  | (_data, size, _crc), entry when entry.descriptor.uncompressed_size <> size ->
+    failwithf "%s: Size mismatch: %d but expected %d" entry.filename size
+      entry.descriptor.uncompressed_size ()
+  | (_data, _size, crc), entry when Int32.(entry.descriptor.crc <> Optint.to_int32 crc) ->
+    failwithf "%s: CRC mismatch" entry.filename ()
+  | (data, _size, _crc), entry -> entry, data
 
 type 'a slice = {
   buf: 'a;

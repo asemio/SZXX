@@ -261,17 +261,16 @@ let make_string_parser ~separator = char separator *> take_till (Char.( = ) sepa
 let skip_until_pattern ~pattern =
   let rec loop () =
     option "" (string pattern) >>= function
-    | "" ->
-      lift2 const (advance 1) (skip_while (Char.( <> ) pattern.[0])) >>= fun () -> (loop [@tailcall]) ()
+    | "" -> advance 1 *> skip_while (Char.( <> ) pattern.[0]) >>= fun () -> (loop [@tailcall]) ()
     | _ -> return ()
   in
   loop ()
 
-let take_until_pattern ~start_pattern ~end_pattern =
+let take_until_pattern ~pattern =
   let text_buffer = Buffer.create 32 in
-  let first = end_pattern.[0] in
+  let first = pattern.[0] in
   let rec loop () =
-    option "" (string end_pattern) >>= function
+    option "" (string pattern) >>= function
     | "" ->
       lift2
         (fun c s ->
@@ -285,7 +284,7 @@ let take_until_pattern ~start_pattern ~end_pattern =
       if Buffer.length text_buffer > 1024 then Buffer.reset text_buffer else Buffer.clear text_buffer;
       return s
   in
-  string start_pattern *> loop ()
+  loop ()
 
 let ws = skip_while is_ws
 
@@ -308,21 +307,17 @@ let parser =
       <* ws
       <* string ">]"
     in
-    string "<!DOCTYPE" *> skip_many (blank *> choice [ drop token_parser; drop xml_string_parser; entity ])
-    <* blank
-    <* char '>'
+    string "<!DOCTYPE"
+    *> (skip_many (blank *> choice [ drop token_parser; drop xml_string_parser; entity ])
+       <* blank
+       <* char '>'
+       )
     >>| const SAX.Nothing
   in
   let prologue_parser =
-    lift4
-      (fun _ attrs _ _ -> SAX.Prologue attrs)
-      (string "<?xml ")
-      (many (ws *> attr_parser))
-      ws (string "?>")
+    string "<?xml " *> (many (ws *> attr_parser) >>| fun attrs -> SAX.Prologue attrs) <* ws <* string "?>"
   in
-  let cdata_parser =
-    take_until_pattern ~start_pattern:"<![CDATA[" ~end_pattern:"]]>" >>| fun s -> SAX.Cdata s
-  in
+  let cdata_parser = string "<![CDATA[" *> take_until_pattern ~pattern:"]]>" >>| fun s -> SAX.Cdata s in
   let element_open_parser =
     lift3
       (fun tag attrs self_closing ->
