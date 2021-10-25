@@ -7,7 +7,7 @@ type location = {
 }
 [@@deriving sexp_of]
 
-type 'a cell_of_string = {
+type 'a cell_parser = {
   string: location -> string -> 'a;
   error: location -> string -> 'a;
   boolean: location -> string -> 'a;
@@ -33,7 +33,13 @@ type 'a row = {
 }
 [@@deriving sexp_of]
 
-type sst = SST of string array
+type sstq =
+  | SSTQ          of string Queue.t
+  | SSTQ_unparsed of Xml.DOM.element Queue.t
+
+type sst =
+  | SST          of string array
+  | SST_unparsed of Xml.DOM.element array
 
 let origin = Date.add_days (Date.create_exn ~y:1900 ~m:(Month.of_int_exn 1) ~d:1) (-2)
 
@@ -98,31 +104,35 @@ let parse_sheet ~sheet_number push =
   in
   fold_angstrom ~filter_path ~on_match
 
-let process_file_sst sst_queue =
+let parse_sst_el el =
   let open Xml.DOM in
-  let on_match el =
-    let text =
-      begin
-        match el |> dot "t" with
-        | Some _ as x -> x
-        | None -> get el [ dot "r"; dot "t" ]
-      end
-      |> Option.value_map ~default:"" ~f:(fun { text; _ } -> text)
-    in
-    Queue.enqueue sst_queue text
-  in
-  let filter_path = " sst si" in
-  fold_angstrom ~filter_path ~on_match
+  (match el |> dot "t" with
+  | Some _ as x -> x
+  | None -> get el [ dot "r"; dot "t" ])
+  |> Option.value_map ~default:"" ~f:(fun { text; _ } -> text)
 
-let process_file ?only_sheet ~feed push finalize =
+let process_file ?only_sheet ~feed push finalize mode =
   let sst_p, sst_w = Lwt.wait () in
-  let sst_queue = Queue.create () in
+  let sst_ref = ref None in
   let processed_p =
     let zip_stream, zip_processed =
       Zip.stream_files ~feed (fun entry ->
           match entry.filename with
           | "xl/workbook.xml" -> Skip
-          | "xl/sharedStrings.xml" -> process_file_sst sst_queue
+          | "xl/sharedStrings.xml" -> (
+            let filter_path = " sst si" in
+            match mode with
+            | `Parsed ->
+              let q = Queue.create () in
+              sst_ref := Some (SSTQ q);
+              let on_match el = Queue.enqueue q (parse_sst_el el) in
+              fold_angstrom ~filter_path ~on_match
+            | `Unparsed ->
+              let q = Queue.create () in
+              sst_ref := Some (SSTQ_unparsed q);
+              let on_match el = Queue.enqueue q el in
+              fold_angstrom ~filter_path ~on_match
+          )
           | filename ->
             let open Option.Monad_infix in
             String.chop_prefix ~prefix:"xl/worksheets/sheet" filename
@@ -148,7 +158,14 @@ let process_file ?only_sheet ~feed push finalize =
                 failwithf "XLSX Parsing error for %s: %s" entry.filename msg ()
               | Data.Fold_bigstring (_, Ok _) -> (
                 match entry.filename with
-                | "xl/sharedStrings.xml" -> Lwt.wakeup_later sst_w (SST (Queue.to_array sst_queue))
+                | "xl/sharedStrings.xml" ->
+                  let sst =
+                    match !sst_ref with
+                    | None -> SST [||]
+                    | Some (SSTQ q) -> SST (Queue.to_array q)
+                    | Some (SSTQ_unparsed q) -> SST_unparsed (Queue.to_array q)
+                  in
+                  Lwt.wakeup_later sst_w sst
                 | _ -> ()
               ))
             zip_stream)
@@ -184,34 +201,64 @@ let extract_cell { string; error; boolean; number; null } location el =
   | Some "b" -> el |> dot "v" |> reader boolean
   | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
 
-let column_to_index col =
-  String.fold_until col ~init:0 ~finish:Fn.id ~f:(fun acc -> function
-    | 'A' .. 'Z' as c -> Continue ((acc * 26) + Char.to_int c - 64)
-    | '0' .. '9' when acc > 0 -> Stop acc
-    | _ -> failwithf "Invalid XLSX column name %s" col ())
-  |> pred
+let col_cache = String.Table.create ()
 
-let extract_row cell_of_string ({ data; sheet_number; row_number } as row) =
+let column_to_index s =
+  let key =
+    String.take_while s ~f:(function
+      | 'A' .. 'Z' -> true
+      | _ -> false)
+  in
+  String.Table.find_or_add col_cache key ~default:(fun () ->
+      String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1)
+
+let parse_row cell_parser ({ data; sheet_number; row_number } as row) =
   let open Xml.DOM in
   let num_cells = Array.length data in
-  if num_cells = 0
-  then { row with data = [||] }
-  else (
+  match num_cells with
+  | 0 -> { row with data = [||] }
+  | num_cells ->
     let num_cols =
       Array.last data
       |> (fun el -> Xml.get_attr el.attrs "r")
-      |> Option.value_map ~default:0 ~f:(fun r -> column_to_index r + 1)
-      |> max num_cells
+      |> Option.value_map ~default:num_cells ~f:(fun r -> max num_cells (column_to_index r + 1))
     in
-    let new_data = Array.create ~len:num_cols (Available cell_of_string.null) in
+    let new_data = Array.create ~len:num_cols (Available cell_parser.null) in
     Array.iteri data ~f:(fun i el ->
         let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:column_to_index in
-        let v = extract_cell cell_of_string { col_index; sheet_number; row_number } el in
+        let v = extract_cell cell_parser { col_index; sheet_number; row_number } el in
         new_data.(col_index) <- v);
     { row with data = new_data }
-  )
 
-let stream_rows ?only_sheet ~feed cell_of_string =
+let resolve_sst_index sst ~sst_index =
+  match sst with
+  | SST sst -> Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst)
+  | SST_unparsed sst ->
+    Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst |> parse_sst_el)
+
+let await_delayed cell_parser sst (row : 'a status row) =
+  let data =
+    match sst with
+    | SST sst ->
+      Array.map row.data ~f:(function
+        | Available x -> x
+        | Delayed { location; sst_index } -> (
+          Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst) |> function
+          | None -> cell_parser.null
+          | Some text -> cell_parser.string location text
+        ))
+    | SST_unparsed sst ->
+      Array.map row.data ~f:(function
+        | Available x -> x
+        | Delayed { location; sst_index } -> (
+          Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst) |> function
+          | None -> cell_parser.null
+          | Some text -> cell_parser.string location (parse_sst_el text)
+        ))
+  in
+  { row with data }
+
+let stream_rows ?only_sheet ~feed cell_parser =
   let stream, push = Lwt_stream.create () in
   let finalize () =
     push None;
@@ -219,41 +266,36 @@ let stream_rows ?only_sheet ~feed cell_of_string =
   in
 
   let sst_p, processed_p =
-    process_file ?only_sheet ~feed (fun x -> push (Some (extract_row cell_of_string x))) finalize
+    process_file ?only_sheet ~feed (fun x -> push (Some (parse_row cell_parser x))) finalize `Parsed
   in
   stream, sst_p, processed_p
 
-let resolve_sst_index (SST sst) ~sst_index =
-  Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst)
-
-let await_delayed cell_of_string (SST sst) (row : 'a status row) =
-  let data =
-    Array.map row.data ~f:(function
-      | Available x -> x
-      | Delayed { location; sst_index } -> (
-        Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst) |> function
-        | None -> cell_of_string.null
-        | Some text -> cell_of_string.string location text
-      ))
-  in
-  { row with data }
-
-let stream_rows_buffer ?only_sheet ~feed cell_of_string =
+let stream_rows_unparsed ?only_sheet ~feed () =
   let stream, push = Lwt_stream.create () in
   let finalize () =
     push None;
     Lwt.return_unit
   in
-  let sst_p, processed_p = process_file ?only_sheet ~feed (fun x -> push (Some x)) finalize in
+
+  let sst_p, processed_p = process_file ?only_sheet ~feed (fun x -> push (Some x)) finalize `Unparsed in
+  stream, sst_p, processed_p
+
+let stream_rows_buffer ?only_sheet ~feed cell_parser =
+  let stream, push = Lwt_stream.create () in
+  let finalize () =
+    push None;
+    Lwt.return_unit
+  in
+  let sst_p, processed_p = process_file ?only_sheet ~feed (fun x -> push (Some x)) finalize `Parsed in
   let parsed_stream =
     Lwt_stream.map_s
       (fun row ->
-        sst_p |> Lwt.map (fun sst -> extract_row cell_of_string row |> await_delayed cell_of_string sst))
+        sst_p |> Lwt.map (fun sst -> parse_row cell_parser row |> await_delayed cell_parser sst))
       stream
   in
   parsed_stream, processed_p
 
-let yojson_readers : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_of_string =
+let yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser =
   {
     string = (fun _location s -> `String s);
     error = (fun _location s -> `String (sprintf "#ERROR# %s" s));

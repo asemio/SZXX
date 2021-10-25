@@ -223,31 +223,6 @@ let unescape s =
   in
   if Buffer.length buf = String.length s then s else Buffer.contents buf
 
-let escapable_string_parser ~separator =
-  char separator
-  *>
-  let is_separator = Char.( = ) separator in
-  let buf = Buffer.create 1024 in
-  let rec loop escaping ll =
-    any_char >>= fun x ->
-    match x, escaping with
-    | '&', false -> (loop [@tailcall]) true ll
-    | ';', true ->
-      let code = String.of_char_list ll |> String.rev |> escape_table in
-      Buffer.add_string buf code;
-      (loop [@tailcall]) false []
-    | c, _ when is_separator c ->
-      List.fold_right ll ~init:() ~f:(fun c () -> Buffer.add_char buf c);
-      let result = Buffer.contents buf in
-      if String.length result > 1024 then Buffer.reset buf else Buffer.clear buf;
-      return result
-    | c, true -> (loop [@tailcall]) true (c :: ll)
-    | c, false ->
-      Buffer.add_char buf c;
-      (loop [@tailcall]) false ll
-  in
-  loop false []
-
 let is_token = function
 | '"'
  |'\''
@@ -281,78 +256,72 @@ let drop p = p >>| const ()
 
 let double x y = x, y
 
-let skip_until_string terminate =
-  let first = terminate.[0] in
-  let len = String.length terminate in
+let make_string_parser ~separator = char separator *> take_till (Char.( = ) separator) <* char separator
+
+let skip_until_pattern ~pattern =
   let rec loop () =
-    skip_while (Char.( <> ) first) >>= fun () ->
-    peek_string len >>= function
-    | x when String.(x = terminate) -> advance len
-    | _ -> (loop [@tailcall]) ()
+    option "" (string pattern) >>= function
+    | "" ->
+      lift2 const (advance 1) (skip_while (Char.( <> ) pattern.[0])) >>= fun () -> (loop [@tailcall]) ()
+    | _ -> return ()
   in
   loop ()
 
+let take_until_pattern ~start_pattern ~end_pattern =
+  let text_buffer = Buffer.create 32 in
+  let first = end_pattern.[0] in
+  let rec loop () =
+    option "" (string end_pattern) >>= function
+    | "" ->
+      lift2
+        (fun c s ->
+          Buffer.add_char text_buffer c;
+          Buffer.add_string text_buffer s)
+        any_char
+        (take_while (Char.( <> ) first))
+      >>= fun () -> (loop [@tailcall]) ()
+    | _ ->
+      let s = Buffer.contents text_buffer in
+      if Buffer.length text_buffer > 1024 then Buffer.reset text_buffer else Buffer.clear text_buffer;
+      return s
+  in
+  string start_pattern *> loop ()
+
 let ws = skip_while is_ws
 
-let comment = string "<!--" *> skip_until_string "-->"
+let comment = string "<!--" *> skip_until_pattern ~pattern:"-->"
 
 let blank = skip_many (ws *> comment) *> ws
 
 let token_parser = take_while1 is_token
 
-let attr_parser ~xml_string_parser =
-  lift2 double (lift3 (fun x _ _ -> x) token_parser ws (char '=')) (ws *> xml_string_parser)
-
-let doctype_parser ~xml_string_parser =
-  let entity =
-    string "[<!ENTITY" *> ws *> skip_many (ws *> choice [ token_parser; xml_string_parser ])
-    <* ws
-    <* string ">]"
-  in
-  blank
-  *> string "<!DOCTYPE"
-  *> ws
-  *> skip_many (ws *> choice [ drop token_parser; drop xml_string_parser; entity ])
-  <* ws
-  <* char '>'
-  >>| const SAX.Nothing
-
-let prologue_parser ~xml_string_parser =
-  lift4
-    (fun _ attrs _ _ -> SAX.Prologue attrs)
-    (blank *> string "<?xml ")
-    (many (blank *> attr_parser ~xml_string_parser))
-    blank (string "?>")
-
 let parser =
   let xml_string_parser =
-    let dq_string = escapable_string_parser ~separator:'"' in
-    let sq_string = escapable_string_parser ~separator:'\'' in
+    let dq_string = make_string_parser ~separator:'"' in
+    let sq_string = make_string_parser ~separator:'\'' in
     dq_string <|> sq_string
   in
-  let cdata_parser =
-    let buf = Buffer.create 20 in
-    let rec loop n ll =
-      any_char >>= fun c ->
-      match c, n with
-      | ']', 0 -> (loop [@tailcall]) 1 (']' :: ll)
-      | ']', 1 -> (loop [@tailcall]) 2 (']' :: ll)
-      | '>', 2 ->
-        if Buffer.length buf > 0
-        then begin
-          let s = Buffer.contents buf in
-          Buffer.clear buf;
-          return (SAX.Text s)
-        end
-        else return SAX.Nothing
-      | c, 0 ->
-        Buffer.add_char buf c;
-        (loop [@tailcall]) 0 ll
-      | c, _ ->
-        List.fold_right (c :: ll) ~init:() ~f:(fun x () -> Buffer.add_char buf x);
-        (loop [@tailcall]) 0 []
+  let attr_parser = lift2 double (token_parser <* ws <* char '=') (ws *> xml_string_parser) in
+  let doctype_parser =
+    let entity =
+      string "[<!ENTITY" *> ws *> skip_many (ws *> (token_parser <|> xml_string_parser))
+      <* ws
+      <* string ">]"
     in
-    blank *> string "<![CDATA[" *> loop 0 []
+    string "<!DOCTYPE" *> skip_many (blank *> choice [ drop token_parser; drop xml_string_parser; entity ])
+    <* blank
+    <* char '>'
+    >>| const SAX.Nothing
+  in
+  let prologue_parser =
+    lift4
+      (fun _ attrs _ _ -> SAX.Prologue attrs)
+      (string "<?xml ")
+      (many (ws *> attr_parser))
+      ws (string "?>")
+  in
+  let cdata_parser =
+    take_until_pattern ~start_pattern:"<![CDATA[" ~end_pattern:"]]>" >>| fun s -> SAX.Cdata s
   in
   let element_open_parser =
     lift3
@@ -364,24 +333,30 @@ let parser =
         in
         let eopen = SAX.Element_open { tag; attrs; preserve_space } in
         if self_closing then SAX.Many [ eopen; Element_close tag ] else eopen)
-      (lift4 (fun _ _ _ x -> x) blank (char '<') ws token_parser)
-      (many (ws *> attr_parser ~xml_string_parser) <* ws)
+      (char '<' *> ws *> token_parser)
+      (many (ws *> attr_parser) <* ws)
       (option false (char '/' >>| const true) <* char '>')
   in
   let element_close_parser =
-    lift4 (fun _ _ tag _ -> SAX.Element_close tag) (blank *> string "</") ws token_parser (ws <* char '>')
+    string "</" *> ws *> (token_parser >>| fun s -> SAX.Element_close s) <* (ws <* char '>')
   in
-  let text_parser =
-    skip_many (ws <* comment) *> take_while1 is_text >>| function
-    | "" -> SAX.Nothing
-    | s -> SAX.Text s
+  let text_parser = take_while1 is_text >>| fun s -> SAX.Text s in
+  let fast_path =
+    peek_string 2 >>= function
+    | "</" -> element_close_parser
+    | "<!" -> cdata_parser <|> doctype_parser
+    | "<?" -> prologue_parser
+    | s -> (
+      match s.[0] with
+      | '<' -> element_open_parser
+      | c when is_token c -> text_parser
+      | _ -> fail "Lookahead impossible"
+    )
   in
-  choice
-    [
-      prologue_parser ~xml_string_parser;
-      doctype_parser ~xml_string_parser;
-      cdata_parser;
-      element_close_parser;
-      element_open_parser;
-      text_parser;
-    ]
+  let slow_path =
+    let node =
+      choice [ element_close_parser; element_open_parser; cdata_parser; prologue_parser; doctype_parser ]
+    in
+    skip_many (ws *> comment) *> (ws *> node <|> text_parser)
+  in
+  fast_path <|> slow_path

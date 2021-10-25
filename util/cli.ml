@@ -5,7 +5,7 @@ let flags_overwrite = Unix.[ O_WRONLY; O_NONBLOCK; O_CREAT; O_TRUNC ]
 open! Core_kernel
 open SZXX
 
-let string_readers : string Xlsx.cell_of_string =
+let string_readers : string Xlsx.cell_parser =
   {
     string = (fun _location s -> s);
     error = (fun _location s -> s);
@@ -37,8 +37,8 @@ let feed_bigstring ic =
 
 let count xlsx_path =
   Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-      let stream, _sst_p, processed = Xlsx.stream_rows ~feed:(feed_bigstring ic) string_readers in
       let t0 = Time_now.nanoseconds_since_unix_epoch () in
+      let stream, _sst_p, processed = Xlsx.stream_rows_unparsed ~feed:(feed_bigstring ic) () in
 
       let%lwt n = Lwt_stream.fold (fun _x acc -> acc + 1) stream 0 in
       let t1 = Time_now.nanoseconds_since_unix_epoch () in

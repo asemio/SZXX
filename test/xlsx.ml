@@ -37,7 +37,7 @@ let readme_example filename () =
   Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
       let open SZXX.Xlsx in
       (* yojson_readers is an easy way to quickly inspect a file *)
-      let stream, processed = stream_rows_buffer ~feed:(feed_string ic) yojson_readers in
+      let stream, processed = stream_rows_buffer ~feed:(feed_string ic) yojson_cell_parser in
       let%lwt () =
         Lwt_stream.iter
           (fun row -> `List (Array.to_list row.data) |> Yojson.Basic.pretty_to_string |> print_endline)
@@ -79,12 +79,12 @@ let stream_rows filename () =
   let%lwt parsed =
     Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
         let open SZXX.Xlsx in
-        let stream, sst, processed = stream_rows ~feed:(feed_bigstring ic) yojson_readers in
+        let stream, sst, processed = stream_rows ~feed:(feed_bigstring ic) yojson_cell_parser in
         let%lwt sst = sst in
         let json_list_p =
           Lwt_stream.map
             (fun status ->
-              let row = await_delayed yojson_readers sst status in
+              let row = await_delayed yojson_cell_parser sst status in
               `List (Array.to_list row.data))
             stream
           |> Lwt_stream.to_list

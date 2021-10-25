@@ -7,7 +7,7 @@ type location = {
 }
 [@@deriving sexp_of]
 
-type 'a cell_of_string = {
+type 'a cell_parser = {
   string: location -> string -> 'a;
   error: location -> string -> 'a;
   boolean: location -> string -> 'a;
@@ -36,7 +36,7 @@ type 'a row = {
 type sst
 
 (** Convenience reader to read rows as JSON *)
-val yojson_readers : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_of_string
+val yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser
 
 (** XLSX dates are stored as floats. Converts from a [float] to a [Date.t] *)
 val parse_date : float -> Date.t
@@ -81,8 +81,13 @@ val column_to_index : string -> int
 val stream_rows :
   ?only_sheet:int ->
   feed:Zip.feed ->
-  'a cell_of_string ->
+  'a cell_parser ->
   'a status row Lwt_stream.t * sst Lwt.t * unit Lwt.t
+
+val parse_row : 'a cell_parser -> Xml.DOM.element row -> 'a status row
+
+val stream_rows_unparsed :
+  ?only_sheet:int -> feed:Zip.feed -> unit -> Xml.DOM.element row Lwt_stream.t * sst Lwt.t * unit Lwt.t
 
 (**
    Unwraps a single row, resolving SST references.
@@ -91,7 +96,7 @@ val stream_rows :
    discarding uninteresting rows in order to buffer as few rows as possible,
    then await the [sst Lwt.t], and finally call [Lwt_stream.map (await_delayed ... ) stream].
 *)
-val await_delayed : 'a cell_of_string -> sst -> 'a status row -> 'a row
+val await_delayed : 'a cell_parser -> sst -> 'a status row -> 'a row
 
 (**
    Resolve a single reference into the Shared Strings Table.
@@ -103,4 +108,4 @@ val resolve_sst_index : sst -> sst_index:string -> string option
    As the name implies, it will buffer any cells referencing the SST that are located before the SST.
 *)
 val stream_rows_buffer :
-  ?only_sheet:int -> feed:Zip.feed -> 'a cell_of_string -> 'a row Lwt_stream.t * unit Lwt.t
+  ?only_sheet:int -> feed:Zip.feed -> 'a cell_parser -> 'a row Lwt_stream.t * unit Lwt.t
