@@ -14,11 +14,9 @@ let extractors =
     }
 
 let feed_string ic =
-  let open SZXX.Zip in
-  let count = Lwt_io.buffer_size ic in
-  String
+  SZXX.Zip.String
     (fun () ->
-      Lwt_io.read ~count ic >|= function
+      Lwt_io.read ~count:4096 ic >|= function
       | "" -> None
       | chunk -> Some chunk)
 
@@ -32,19 +30,53 @@ let feed_bigstring ic =
       | 0 -> None
       | len -> Some { buf; pos = 0; len })
 
-let readme_example filename () =
+let readme_example1 filename () =
   let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
   Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
       let open SZXX.Xlsx in
-      (* yojson_readers is an easy way to quickly inspect a file *)
-      let stream, processed = stream_rows_buffer ~feed:(feed_string ic) yojson_cell_parser in
-      let%lwt () =
+      let open Lwt.Syntax in
+      (* yojson_cell_parser is an easy way to quickly inspect a file by mapping XLSX's data types to JSON *)
+      let stream, success = stream_rows_buffer ~feed:(feed_string ic) yojson_cell_parser in
+      let processed =
         Lwt_stream.iter
           (fun row -> `List (Array.to_list row.data) |> Yojson.Basic.pretty_to_string |> print_endline)
           stream
       in
-      (* bind to/await the `processed` promise to catch any error that may have terminated the stream early *)
-      processed)
+      let* () = success in
+      (* bind to/await the `success` promise to catch any error that may have terminated the stream early *)
+      let* () = processed in
+      (* ... *)
+      Lwt.return_unit)
+
+let readme_example2 filename () =
+  let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
+  Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
+      let open SZXX.Xlsx in
+      let open Lwt.Syntax in
+      let stream, sst_p, success = stream_rows ~feed:(feed_string ic) yojson_cell_parser in
+      let filtered =
+        Lwt_stream.filter
+          (fun row ->
+            match row.data.(3), row.row_number with
+            | _, i when i > 1000 -> false
+            | Available (`Bool x), _ -> x
+            | Available _, _
+             |Delayed _, _ ->
+              false)
+          stream
+      in
+      let count =
+        Lwt_stream.fold_s
+          (fun row acc ->
+            let+ sst = sst_p in
+            let _fully_available_row = unwrap_status yojson_cell_parser sst row in
+            (* do something with [fully_available_row] *)
+            acc + 1)
+          filtered 0
+      in
+      let* () = success in
+      let* _count = count in
+      Lwt.return_unit)
 
 let xlsx filename () =
   let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
@@ -84,7 +116,7 @@ let stream_rows filename () =
         let json_list_p =
           Lwt_stream.map
             (fun status ->
-              let row = await_delayed yojson_cell_parser sst status in
+              let row = unwrap_status yojson_cell_parser sst status in
               `List (Array.to_list row.data))
             stream
           |> Lwt_stream.to_list
@@ -108,7 +140,8 @@ let () =
            [
              "simple.xlsx", `Quick, xlsx "simple";
              "financial.xlsx", `Quick, xlsx "financial";
-             "Readme example", `Quick, readme_example "financial";
+             "Readme example 1", `Quick, readme_example1 "financial";
+             "Readme example 2", `Quick, readme_example2 "financial";
              "Unbuffed stream", `Quick, stream_rows "financial";
            ] );
        ]

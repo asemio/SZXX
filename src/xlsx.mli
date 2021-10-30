@@ -35,18 +35,6 @@ type 'a row = {
 
 type sst
 
-(** Convenience reader to read rows as JSON *)
-val yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser
-
-(** XLSX dates are stored as floats. Converts from a [float] to a [Date.t] *)
-val parse_date : float -> Date.t
-
-(** XLSX datetimes are stored as floats. Converts from a [float] to a [Time.t] *)
-val parse_datetime : zone:Time.Zone.t -> float -> Time.t
-
-(** Converts from a cell ref such as [C7] or [AA2] to a 0-based column index *)
-val column_to_index : string -> int
-
 (**
    Stream rows from an [Lwt_io.input_channel].
    SZXX does not hold onto memory any longer than it needs to.
@@ -84,28 +72,37 @@ val stream_rows :
   'a cell_parser ->
   'a status row Lwt_stream.t * sst Lwt.t * unit Lwt.t
 
-val parse_row : 'a cell_parser -> Xml.DOM.element row -> 'a status row
+val stream_rows_buffer :
+  ?only_sheet:int -> feed:Zip.feed -> 'a cell_parser -> 'a row Lwt_stream.t * unit Lwt.t
 
 val stream_rows_unparsed :
   ?only_sheet:int -> feed:Zip.feed -> unit -> Xml.DOM.element row Lwt_stream.t * sst Lwt.t * unit Lwt.t
 
-(**
-   Unwraps a single row, resolving SST references.
+(** Convenience cell_parser to read rows as JSON *)
+val yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser
 
-   A common workflow is to filter the stream returned by [stream_rows],
+(** Convert an XML element returned by [stream_rows_unparsed] into a nicer [Xlsx.row] *)
+val parse_row : ?sst:sst -> 'a cell_parser -> Xml.DOM.element row -> 'a status row
+
+(** XLSX dates are stored as floats. Converts from a [float] to a [Date.t] *)
+val parse_date : float -> Date.t
+
+(** XLSX datetimes are stored as floats. Converts from a [float] to a [Time.t] *)
+val parse_datetime : zone:Time.Zone.t -> float -> Time.t
+
+(** Converts from a cell ref such as [D7] or [AA2] to a 0-based column index *)
+val column_to_index : string -> int
+
+(**
+   Unwraps a single row, resolving all SST references.
+
+   A common workflow is to call [Lwt_stream.filter] on the stream returned by [stream_rows],
    discarding uninteresting rows in order to buffer as few rows as possible,
-   then await the [sst Lwt.t], and finally call [Lwt_stream.map (await_delayed ... ) stream].
+   then await the [sst Lwt.t], and finally consume the stream, calling [unwrap_status] on each row to get the String data.
 *)
-val await_delayed : 'a cell_parser -> sst -> 'a status row -> 'a row
+val unwrap_status : 'a cell_parser -> sst -> 'a status row -> 'a row
 
 (**
    Resolve a single reference into the Shared Strings Table.
 *)
 val resolve_sst_index : sst -> sst_index:string -> string option
-
-(**
-   Convenience function around [stream_rows] and [await_delayed].
-   As the name implies, it will buffer any cells referencing the SST that are located before the SST.
-*)
-val stream_rows_buffer :
-  ?only_sheet:int -> feed:Zip.feed -> 'a cell_parser -> 'a row Lwt_stream.t * unit Lwt.t

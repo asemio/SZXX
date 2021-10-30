@@ -258,37 +258,9 @@ let double x y = x, y
 
 let make_string_parser ~separator = char separator *> take_till (Char.( = ) separator) <* char separator
 
-let skip_until_pattern ~pattern =
-  let rec loop () =
-    option "" (string pattern) >>= function
-    | "" -> advance 1 *> skip_while (Char.( <> ) pattern.[0]) >>= fun () -> (loop [@tailcall]) ()
-    | _ -> return ()
-  in
-  loop ()
-
-let take_until_pattern ~pattern =
-  let text_buffer = Buffer.create 32 in
-  let first = pattern.[0] in
-  let rec loop () =
-    option "" (string pattern) >>= function
-    | "" ->
-      lift2
-        (fun c s ->
-          Buffer.add_char text_buffer c;
-          Buffer.add_string text_buffer s)
-        any_char
-        (take_while (Char.( <> ) first))
-      >>= fun () -> (loop [@tailcall]) ()
-    | _ ->
-      let s = Buffer.contents text_buffer in
-      if Buffer.length text_buffer > 1024 then Buffer.reset text_buffer else Buffer.clear text_buffer;
-      return s
-  in
-  loop ()
-
 let ws = skip_while is_ws
 
-let comment = string "<!--" *> skip_until_pattern ~pattern:"-->"
+let comment = string "<!--" *> Parsing.skip_until_pattern ~pattern:"-->"
 
 let blank = skip_many (ws *> comment) *> ws
 
@@ -317,7 +289,9 @@ let parser =
   let prologue_parser =
     string "<?xml " *> (many (ws *> attr_parser) >>| fun attrs -> SAX.Prologue attrs) <* ws <* string "?>"
   in
-  let cdata_parser = string "<![CDATA[" *> take_until_pattern ~pattern:"]]>" >>| fun s -> SAX.Cdata s in
+  let cdata_parser =
+    string "<![CDATA[" *> Parsing.take_until_pattern ~pattern:"]]>" >>| fun s -> SAX.Cdata s
+  in
   let element_open_parser =
     lift3
       (fun tag attrs self_closing ->

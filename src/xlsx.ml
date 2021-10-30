@@ -177,66 +177,13 @@ let process_file ?only_sheet ~feed push finalize mode =
   in
   sst_p, processed_p
 
-let extract ~null location extractor : Xml.DOM.element option -> 'a status = function
-| None -> Available null
-| Some { text; _ } -> Available (extractor location text)
-
-let extract_cell { string; error; boolean; number; null } location el =
-  let reader = extract ~null location in
-  let open Xml.DOM in
-  match Xml.get_attr el.attrs "t" with
-  | None
-   |Some "n" -> (
-    try el |> dot "v" |> reader number with
-    | _ -> Available null
-  )
-  | Some "str" -> el |> dot "v" |> reader string
-  | Some "inlineStr" -> get el [ dot "is"; dot "t" ] |> reader string
-  | Some "s" -> (
-    match el |> dot "v" with
-    | None -> Available null
-    | Some { text = sst_index; _ } -> Delayed { location; sst_index }
-  )
-  | Some "e" -> el |> dot "v" |> reader error
-  | Some "b" -> el |> dot "v" |> reader boolean
-  | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
-
-let col_cache = String.Table.create ()
-
-let column_to_index s =
-  let key =
-    String.take_while s ~f:(function
-      | 'A' .. 'Z' -> true
-      | _ -> false)
-  in
-  String.Table.find_or_add col_cache key ~default:(fun () ->
-      String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1)
-
-let parse_row cell_parser ({ data; sheet_number; row_number } as row) =
-  let open Xml.DOM in
-  let num_cells = Array.length data in
-  match num_cells with
-  | 0 -> { row with data = [||] }
-  | num_cells ->
-    let num_cols =
-      Array.last data
-      |> (fun el -> Xml.get_attr el.attrs "r")
-      |> Option.value_map ~default:num_cells ~f:(fun r -> max num_cells (column_to_index r + 1))
-    in
-    let new_data = Array.create ~len:num_cols (Available cell_parser.null) in
-    Array.iteri data ~f:(fun i el ->
-        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:column_to_index in
-        let v = extract_cell cell_parser { col_index; sheet_number; row_number } el in
-        new_data.(col_index) <- v);
-    { row with data = new_data }
-
 let resolve_sst_index sst ~sst_index =
   match sst with
   | SST sst -> Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst)
   | SST_unparsed sst ->
     Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst |> parse_sst_el)
 
-let await_delayed cell_parser sst (row : 'a status row) =
+let unwrap_status cell_parser sst (row : 'a status row) =
   let data =
     match sst with
     | SST sst ->
@@ -258,16 +205,79 @@ let await_delayed cell_parser sst (row : 'a status row) =
   in
   { row with data }
 
+let extract ~null location extractor : Xml.DOM.element option -> 'a status = function
+| None -> Available null
+| Some { text; _ } -> Available (extractor location text)
+
+let extract_cell ~sst { string; error; boolean; number; null } location el =
+  let reader = extract ~null location in
+  let open Xml.DOM in
+  match Xml.get_attr el.attrs "t" with
+  | None
+   |Some "n" -> (
+    try el |> dot "v" |> reader number with
+    | _ -> Available null
+  )
+  | Some "str" -> el |> dot "v" |> reader string
+  | Some "inlineStr" -> get el [ dot "is"; dot "t" ] |> reader string
+  | Some "s" -> (
+    match el |> dot "v", sst with
+    | None, _ -> Available null
+    | Some { text = sst_index; _ }, None -> Delayed { location; sst_index }
+    | Some { text = sst_index; _ }, Some sst -> (
+      match resolve_sst_index sst ~sst_index with
+      | None -> Available null
+      | Some resolved -> Available (string location resolved)
+    )
+  )
+  | Some "e" -> el |> dot "v" |> reader error
+  | Some "b" -> el |> dot "v" |> reader boolean
+  | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
+
+let col_cache = String.Table.create ()
+
+let column_to_index s =
+  let key =
+    String.take_while s ~f:(function
+      | 'A' .. 'Z' -> true
+      | _ -> false)
+  in
+  String.Table.find_or_add col_cache key ~default:(fun () ->
+      String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1)
+
+let parse_row ?sst cell_parser ({ data; sheet_number; row_number } as row) =
+  let open Xml.DOM in
+  let num_cells = Array.length data in
+  let null = Available cell_parser.null in
+  match num_cells with
+  | 0 -> { row with data = [||] }
+  | num_cells ->
+    let num_cols =
+      Array.last data
+      |> (fun el -> Xml.get_attr el.attrs "r")
+      |> Option.value_map ~default:num_cells ~f:(fun r -> max num_cells (column_to_index r + 1))
+    in
+    let new_data = Array.create ~len:num_cols null in
+    Array.iteri data ~f:(fun i el ->
+        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:column_to_index in
+        let v = extract_cell ~sst cell_parser { col_index; sheet_number; row_number } el in
+        new_data.(col_index) <- v);
+    { row with data = new_data }
+
 let stream_rows ?only_sheet ~feed cell_parser =
   let stream, push = Lwt_stream.create () in
   let finalize () =
     push None;
     Lwt.return_unit
   in
+  let sst_ref = ref None in
 
   let sst_p, processed_p =
-    process_file ?only_sheet ~feed (fun x -> push (Some (parse_row cell_parser x))) finalize `Parsed
+    process_file ?only_sheet ~feed
+      (fun x -> push (Some (parse_row ?sst:!sst_ref cell_parser x)))
+      finalize `Parsed
   in
+  Lwt.on_success sst_p (fun x -> sst_ref := Some x);
   stream, sst_p, processed_p
 
 let stream_rows_unparsed ?only_sheet ~feed () =
@@ -290,14 +300,14 @@ let stream_rows_buffer ?only_sheet ~feed cell_parser =
   let parsed_stream =
     Lwt_stream.map_s
       (fun row ->
-        sst_p |> Lwt.map (fun sst -> parse_row cell_parser row |> await_delayed cell_parser sst))
+        sst_p |> Lwt.map (fun sst -> parse_row cell_parser row |> unwrap_status cell_parser sst))
       stream
   in
   parsed_stream, processed_p
 
 let yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser =
   {
-    string = (fun _location s -> `String s);
+    string = (fun _location s -> `String (Xml.unescape s));
     error = (fun _location s -> `String (sprintf "#ERROR# %s" s));
     boolean = (fun _location s -> `Bool String.(s = "1"));
     number = (fun _location s -> `Float (Float.of_string s));

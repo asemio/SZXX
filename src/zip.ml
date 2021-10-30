@@ -51,12 +51,12 @@ let double x y = x, y
 
 let triple x y z = x, y, z
 
-let slice_size = 1024
+let slice_size = Parsing.slice_size
 
 let slice_bits = 10
 
 module Storage = struct
-  type t = {
+  type t = Parsing.storage = {
     add: Bigstring.t -> int -> unit;
     finalize: unit -> unit;
   }
@@ -89,7 +89,7 @@ module Storage = struct
     { add; finalize }
 
   let stored flush =
-    let add bs len = flush bs len in
+    let add = flush in
     let finalize () = () in
     { add; finalize }
 end
@@ -180,28 +180,6 @@ let parser cb =
       (fun crc compressed_size uncompressed_size -> { crc; compressed_size; uncompressed_size })
       LE.any_int32 (LE.any_int32 >>| Int32.to_int_exn) (LE.any_int32 >>| Int32.to_int_exn)
   in
-  let bounded_file_reader Storage.{ add; finalize } =
-    let pattern = "PK\007\008" in
-    let first = pattern.[0] in
-    let bs = Bigstring.create 1 in
-    let rec loop () =
-      option "" (string pattern) >>= function
-      | "" ->
-        lift2
-          (fun c src ->
-            let src_len = Bigstring.length src in
-            Bigstring.set bs 0 c;
-            add bs 1;
-            if src_len > 0 then add src src_len)
-          any_char
-          (take_bigstring_while (Char.( <> ) first))
-        >>= fun () -> (loop [@tailcall]) ()
-      | _ ->
-        finalize ();
-        return ()
-    in
-    loop ()
-  in
   let fixed_size_reader size Storage.{ add; finalize } =
     let rec loop = function
       | n when n > slice_size ->
@@ -231,12 +209,7 @@ let parser cb =
           filename;
           extra;
         })
-      (let rec loop () =
-         option "" (string "PK\003\004") >>= function
-         | "" -> advance 1 *> skip_while (Char.( <> ) 'P') >>= fun () -> (loop [@tailcall]) ()
-         | _ -> return ()
-       in
-       loop ())
+      (Parsing.skip_until_pattern ~pattern:"PK\003\004")
       (lift3 triple
          (LE.any_uint16 (* version_needed *) >>| function
           | 20 -> 20
@@ -272,7 +245,7 @@ let parser cb =
     in
     let file_reader =
       if entry.descriptor.compressed_size = 0 || entry.descriptor.uncompressed_size = 0
-      then bounded_file_reader
+      then Parsing.bounded_file_reader ~pattern:"PK\007\008"
       else fixed_size_reader zipped_length
     in
     file_reader storage_method >>| complete
