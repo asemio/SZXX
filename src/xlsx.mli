@@ -68,6 +68,7 @@ type sst
 *)
 val stream_rows :
   ?only_sheet:int ->
+  ?skip_sst:bool ->
   feed:Zip.feed ->
   'a cell_parser ->
   'a status row Lwt_stream.t * sst Lwt.t * unit Lwt.t
@@ -76,7 +77,11 @@ val stream_rows_buffer :
   ?only_sheet:int -> feed:Zip.feed -> 'a cell_parser -> 'a row Lwt_stream.t * unit Lwt.t
 
 val stream_rows_unparsed :
-  ?only_sheet:int -> feed:Zip.feed -> unit -> Xml.DOM.element row Lwt_stream.t * sst Lwt.t * unit Lwt.t
+  ?only_sheet:int ->
+  ?skip_sst:bool ->
+  feed:Zip.feed ->
+  unit ->
+  Xml.DOM.element row Lwt_stream.t * sst Lwt.t * unit Lwt.t
 
 (** Convenience cell_parser to read rows as JSON *)
 val yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser

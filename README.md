@@ -169,4 +169,4 @@ pin-depends: [
 
 Not really. This file format seems almost designed to make streaming as difficult and inefficient as possible.
 
-Using 1 core on an older 2017 Macbook Pro, it processes a huge 107MB, 28-column x 1,048,576-row file in 170 seconds using 65MB of memory. The same file takes 80 seconds to open in LibreOffice using 2 cores and nearly 2GB of memory.
+Using 1 core on an older 2017 Macbook Pro, it processes an enormous 107MB, 28-column x 1,048,576-row file in 160 seconds using 35MB of memory. The same file takes 70 seconds to open in LibreOffice using 2 cores and 1.8GB of memory.

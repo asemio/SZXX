@@ -38,7 +38,9 @@ let feed_bigstring ic =
 let count xlsx_path =
   Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
       let t0 = Time_now.nanoseconds_since_unix_epoch () in
-      let stream, _sst_p, processed = Xlsx.stream_rows_unparsed ~feed:(feed_bigstring ic) () in
+      let stream, _sst_p, processed =
+        Xlsx.stream_rows_unparsed ~feed:(feed_bigstring ic) ~skip_sst:true ()
+      in
 
       let%lwt n = Lwt_stream.fold (fun _x acc -> acc + 1) stream 0 in
       let t1 = Time_now.nanoseconds_since_unix_epoch () in

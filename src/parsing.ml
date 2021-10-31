@@ -63,6 +63,7 @@ let take_until_pattern ~pattern =
 let bounded_file_reader ~pattern { add; finalize } =
   let len = String.length pattern in
   let buf = Bigstring.create (slice_size + len) in
+  let partial = Bytes.create len in
   let pos = ref 0 in
   let table = make_table ~pattern len in
   let flush ~src_len src =
@@ -81,14 +82,18 @@ let bounded_file_reader ~pattern { add; finalize } =
       if !pos > 0 then add buf !pos;
       pos := 0;
       finalize ();
-      return ()
+      commit
     | Shift by ->
       take by >>= fun more ->
       flush ~src_len:by window;
-      (loop [@tailcall]) (String.drop_prefix window by ^ more)
+      commit >>= fun () ->
+      let diff = len - by in
+      Bytes.From_string.unsafe_blit ~src:window ~src_pos:by ~dst:partial ~dst_pos:0 ~len:diff;
+      Bytes.From_string.unsafe_blit ~src:more ~src_pos:0 ~dst:partial ~dst_pos:diff ~len:by;
+      (loop [@tailcall]) (Bytes.unsafe_to_string ~no_mutation_while_string_reachable:partial)
     | Restart ->
       take len >>= fun more ->
       flush ~src_len:len window;
-      (loop [@tailcall]) more
+      commit >>= fun () -> (loop [@tailcall]) more
   in
   take len >>= loop

@@ -188,9 +188,9 @@ let parser cb =
         (loop [@tailcall]) (n - slice_size)
       | 0 ->
         finalize ();
-        return ()
+        commit
       | n ->
-        take_bigstring n >>= fun bs ->
+        take_bigstring n <* commit >>= fun bs ->
         add bs n;
         (loop [@tailcall]) 0
     in

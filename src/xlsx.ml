@@ -40,6 +40,7 @@ type sstq =
 type sst =
   | SST          of string array
   | SST_unparsed of Xml.DOM.element array
+  | SST_skipped
 
 let origin = Date.add_days (Date.create_exn ~y:1900 ~m:(Month.of_int_exn 1) ~d:1) (-2)
 
@@ -111,7 +112,7 @@ let parse_sst_el el =
   | None -> get el [ dot "r"; dot "t" ])
   |> Option.value_map ~default:"" ~f:(fun { text; _ } -> text)
 
-let process_file ?only_sheet ~feed push finalize mode =
+let process_file ?only_sheet ~skip_sst ~feed push finalize mode =
   let sst_p, sst_w = Lwt.wait () in
   let sst_ref = ref None in
   let processed_p =
@@ -119,6 +120,7 @@ let process_file ?only_sheet ~feed push finalize mode =
       Zip.stream_files ~feed (fun entry ->
           match entry.filename with
           | "xl/workbook.xml" -> Skip
+          | "xl/sharedStrings.xml" when skip_sst -> Skip
           | "xl/sharedStrings.xml" -> (
             let filter_path = " sst si" in
             match mode with
@@ -161,7 +163,7 @@ let process_file ?only_sheet ~feed push finalize mode =
                 | "xl/sharedStrings.xml" ->
                   let sst =
                     match !sst_ref with
-                    | None -> SST [||]
+                    | None -> SST_skipped
                     | Some (SSTQ q) -> SST (Queue.to_array q)
                     | Some (SSTQ_unparsed q) -> SST_unparsed (Queue.to_array q)
                   in
@@ -178,10 +180,14 @@ let process_file ?only_sheet ~feed push finalize mode =
   sst_p, processed_p
 
 let resolve_sst_index sst ~sst_index =
+  let index = Int.of_string sst_index in
   match sst with
-  | SST sst -> Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst)
-  | SST_unparsed sst ->
-    Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst |> parse_sst_el)
+  | SST sst when index < Array.length sst && index >= 0 -> Some sst.(index)
+  | SST_unparsed sst when index < Array.length sst && index >= 0 -> Some (sst.(index) |> parse_sst_el)
+  | SST _
+   |SST_unparsed _ ->
+    None
+  | SST_skipped -> failwith "Cannot resolve SST indexed when the SST was intentionally skipped"
 
 let unwrap_status cell_parser sst (row : 'a status row) =
   let data =
@@ -189,19 +195,20 @@ let unwrap_status cell_parser sst (row : 'a status row) =
     | SST sst ->
       Array.map row.data ~f:(function
         | Available x -> x
-        | Delayed { location; sst_index } -> (
-          Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst) |> function
-          | None -> cell_parser.null
-          | Some text -> cell_parser.string location text
-        ))
+        | Delayed { location; sst_index } ->
+          let index = Int.of_string sst_index in
+          if index < Array.length sst && index >= 0
+          then cell_parser.string location sst.(index)
+          else cell_parser.null)
     | SST_unparsed sst ->
       Array.map row.data ~f:(function
         | Available x -> x
-        | Delayed { location; sst_index } -> (
-          Option.try_with (fun () -> Int.of_string sst_index |> Array.get sst) |> function
-          | None -> cell_parser.null
-          | Some text -> cell_parser.string location (parse_sst_el text)
-        ))
+        | Delayed { location; sst_index } ->
+          let index = Int.of_string sst_index in
+          if index < Array.length sst && index >= 0
+          then cell_parser.string location (parse_sst_el sst.(index))
+          else cell_parser.null)
+    | SST_skipped -> failwith "Cannot unwrap status when the SST was intentionally skipped"
   in
   { row with data }
 
@@ -264,7 +271,7 @@ let parse_row ?sst cell_parser ({ data; sheet_number; row_number } as row) =
         new_data.(col_index) <- v);
     { row with data = new_data }
 
-let stream_rows ?only_sheet ~feed cell_parser =
+let stream_rows ?only_sheet ?(skip_sst = false) ~feed cell_parser =
   let stream, push = Lwt_stream.create () in
   let finalize () =
     push None;
@@ -273,21 +280,23 @@ let stream_rows ?only_sheet ~feed cell_parser =
   let sst_ref = ref None in
 
   let sst_p, processed_p =
-    process_file ?only_sheet ~feed
+    process_file ?only_sheet ~skip_sst ~feed
       (fun x -> push (Some (parse_row ?sst:!sst_ref cell_parser x)))
       finalize `Parsed
   in
   Lwt.on_success sst_p (fun x -> sst_ref := Some x);
   stream, sst_p, processed_p
 
-let stream_rows_unparsed ?only_sheet ~feed () =
+let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~feed () =
   let stream, push = Lwt_stream.create () in
   let finalize () =
     push None;
     Lwt.return_unit
   in
 
-  let sst_p, processed_p = process_file ?only_sheet ~feed (fun x -> push (Some x)) finalize `Unparsed in
+  let sst_p, processed_p =
+    process_file ?only_sheet ~skip_sst ~feed (fun x -> push (Some x)) finalize `Unparsed
+  in
   stream, sst_p, processed_p
 
 let stream_rows_buffer ?only_sheet ~feed cell_parser =
@@ -296,7 +305,9 @@ let stream_rows_buffer ?only_sheet ~feed cell_parser =
     push None;
     Lwt.return_unit
   in
-  let sst_p, processed_p = process_file ?only_sheet ~feed (fun x -> push (Some x)) finalize `Parsed in
+  let sst_p, processed_p =
+    process_file ?only_sheet ~skip_sst:false ~feed (fun x -> push (Some x)) finalize `Parsed
+  in
   let parsed_stream =
     Lwt_stream.map_s
       (fun row ->
