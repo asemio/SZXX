@@ -96,6 +96,10 @@ let xlsx filename () =
         Lwt.return (`Assoc [ "data", `List (List.rev json) ]))
   in
 
+  (* let%lwt () =
+       Lwt_io.with_file ~flags:[ O_WRONLY; O_NONBLOCK; O_TRUNC ] ~mode:Output json_path (fun oc ->
+           Lwt_io.write oc (Yojson.Safe.to_string parsed))
+     in *)
   Json_diff.check (parsed : Yojson.Basic.t :> Yojson.Safe.t) against;
 
   Lwt.return_unit
@@ -140,6 +144,7 @@ let () =
            [
              "simple.xlsx", `Quick, xlsx "simple";
              "financial.xlsx", `Quick, xlsx "financial";
+             "zip64.xlsx", `Quick, xlsx "zip64";
              "Readme example 1", `Quick, readme_example1 "financial";
              "Readme example 2", `Quick, readme_example2 "financial";
              "Unbuffed stream", `Quick, stream_rows "financial";

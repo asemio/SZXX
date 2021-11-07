@@ -3,9 +3,9 @@ let flags = Unix.[ O_RDONLY; O_NONBLOCK ]
 open! Core_kernel
 open Lwt.Infix
 
-let fold () =
-  let xlsx_path = "../../../test/files/financial.xlsx" in
-  let json_path = "../../../test/files/chunks.json" in
+let fold xlsx_filename json_filename () =
+  let xlsx_path = sprintf "../../../test/files/%s" xlsx_filename in
+  let json_path = sprintf "../../../test/files/%s" json_filename in
   let%lwt against =
     Lwt_io.with_file ~flags ~mode:Input json_path (fun ic ->
         let%lwt contents = Lwt_io.read ic in
@@ -36,4 +36,7 @@ let fold () =
      in *)
   Lwt.return_unit
 
-let () = Lwt_main.run @@ Alcotest_lwt.run "SZXX ZIP" [ "ZIP", [ "financial.xlsx", `Quick, fold ] ]
+let () =
+  Lwt_main.run
+  @@ Alcotest_lwt.run "SZXX ZIP"
+       [ "ZIP", [ "financial.xlsx", `Quick, fold "financial.xlsx" "chunks.json" ] ]

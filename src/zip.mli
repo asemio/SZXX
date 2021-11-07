@@ -5,21 +5,33 @@ type methd =
   | Deflated
 [@@deriving sexp_of]
 
+type version =
+  | Zip_2_0
+  | Zip_4_5
+[@@deriving sexp_of]
+
 type descriptor = {
   crc: Int32.t;
-  compressed_size: int;
-  uncompressed_size: int;
+  compressed_size: Int64.t;
+  uncompressed_size: Int64.t;
+}
+[@@deriving sexp_of]
+
+type extra_field = {
+  id: int;
+  size: int;
+  data: string;
 }
 [@@deriving sexp_of]
 
 type entry = {
-  version_needed: int;
+  version_needed: version;
   flags: int;
   trailing_descriptor_present: bool;
   methd: methd;
   descriptor: descriptor;
   filename: string;
-  extra: string;
+  extra_fields: extra_field list;
 }
 [@@deriving sexp_of]
 
