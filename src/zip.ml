@@ -268,7 +268,6 @@ let parser cb =
             Option.value_exn ~message:"Missing ZIP64 extra field"
               (get_zip64_descriptor ~crc:descriptor.crc extra_fields)
         in
-        print_endline (Sexp.to_string_hum (sexp_of_descriptor descriptor));
         {
           version_needed;
           flags;
