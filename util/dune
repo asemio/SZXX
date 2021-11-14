@@ -5,7 +5,7 @@
     lwt.unix
   )
   (preprocess (pps
-    lwt_ppx
+    ppx_jane
   ))
   (modes exe)
   (ocamlopt_flags -O3 -unbox-closures)

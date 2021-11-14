@@ -3,6 +3,7 @@ let flags_read = Unix.[ O_RDONLY; O_NONBLOCK ]
 let flags_overwrite = Unix.[ O_WRONLY; O_NONBLOCK; O_CREAT; O_TRUNC ]
 
 open! Core_kernel
+open Lwt.Syntax
 open SZXX
 
 let string_readers : string Xlsx.cell_parser =
@@ -42,20 +43,19 @@ let count xlsx_path =
         Xlsx.stream_rows_unparsed ~feed:(feed_bigstring ic) ~skip_sst:true ()
       in
 
-      let%lwt n = Lwt_stream.fold (fun _x acc -> acc + 1) stream 0 in
+      let* n = Lwt_stream.fold (fun _x acc -> acc + 1) stream 0 in
       let t1 = Time_now.nanoseconds_since_unix_epoch () in
 
-      let%lwt () =
+      let* () =
         Lwt_io.printlf "Row count: %d (%Ldms)" n Int63.((t1 - t0) / of_int 1_000_000 |> to_int64)
       in
 
-      let%lwt () = processed in
-      Lwt.return_unit)
+      processed)
 
 let length xlsx_path =
   Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
       let stream, p = Zip.stream_files ~feed:(feed_bigstring ic) (const Zip.Action.String) in
-      let%lwt () =
+      let* () =
         Lwt_stream.iter
           (function
             | ({ filename; _ } : Zip.entry), Zip.Data.String raw ->
@@ -73,7 +73,7 @@ let extract xlsx_path =
               | { filename = "xl/sharedStrings.xml"; _ } -> Zip.Action.String
               | _ -> Zip.Action.Skip)
           in
-          let%lwt () =
+          let* () =
             Lwt_stream.iter_s
               (function
                 | _, Zip.Data.String s -> Lwt_io.write oc s

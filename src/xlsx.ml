@@ -1,4 +1,5 @@
 open! Core_kernel
+open Lwt.Syntax
 
 type location = {
   sheet_number: int;
@@ -144,7 +145,7 @@ let process_file ?only_sheet ~skip_sst ~feed push finalize mode =
             >>| (fun sheet_number -> parse_sheet ~sheet_number push)
             |> Option.value ~default:Zip.Action.Skip)
     in
-    let%lwt () =
+    let* () =
       Lwt.finalize
         (fun () ->
           Lwt_stream.iter

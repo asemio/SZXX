@@ -7,10 +7,8 @@
     checkseum.ocaml
     decompress.de
     lwt
-    lwt_ppx
   )
   (preprocess (pps
-    lwt_ppx
     ppx_sexp_conv
   ))
 )

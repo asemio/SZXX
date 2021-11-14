@@ -7,11 +7,9 @@
     core_kernel
     lwt
     lwt.unix
-    lwt_ppx
     yojson
   )
   (preprocess (pps
-    lwt_ppx
     ppx_deriving_yojson
     ppx_jane
   ))

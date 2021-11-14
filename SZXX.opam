@@ -22,7 +22,6 @@ depends: [
   "core_kernel" { >= "v0.13.0" }
   "decompress"
   "lwt" { >= "5.0.0" }
-  "lwt_ppx"
 
   "alcotest-lwt" { with-test }
   "ppx_jane" { with-test }

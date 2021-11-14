@@ -1,4 +1,6 @@
 open! Core_kernel
+open Lwt.Syntax
+open Lwt.Infix
 
 type methd =
   | Stored
@@ -355,13 +357,13 @@ let stream_files ~feed:read cb =
     | Fail (_, [], err) -> failwith err
     | Fail (_, marks, err) -> failwithf "%s: %s" (String.concat ~sep:" > " marks) err ()
     | Done ({ buf; off = pos; len }, pair) -> (
-      let%lwt () = Lwt_mutex.with_lock mutex (fun () -> bounded#push pair) in
+      let* () = Lwt_mutex.with_lock mutex (fun () -> bounded#push pair) in
       match parse (parser cb) with
       | Partial feed -> (loop [@tailcall]) (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len)))
       | state -> (loop [@tailcall]) state
     )
     | Partial feed -> (
-      match%lwt read () with
+      read () >>= function
       | None -> (
         match feed `Eof with
         | Done (_, pair) -> Lwt_mutex.with_lock mutex (fun () -> bounded#push pair)
