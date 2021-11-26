@@ -5,7 +5,7 @@ _Streaming ZIP XML XLSX parser_
 SZXX is a streaming, **non-seeking** and efficient XLSX parser built from the ground up for very low memory usage. It begins outputting rows while a file is still incomplete. In cases it can be configured to run in **constant memory**. [It even works in the browser!](#does-it-work-in-the-browser)
 
 To paraphrase an [infamous rant](https://github.com/gco/xee/blob/4fa3a6d609dd72b8493e52a68f316f7a02903276/XeePhotoshopLoader.m#L108-L136):
-> At this point, I'd like to take a moment to speak to you about the OOXML (XLSX) format...
+> At this point, I'd like to take a moment to speak to you about the OOXML (XLSX) format... XLSX is not my favourite file format.
 
 XLSX seems to have been actively designed to consume obscene amounts of memory and computing power. It fights back every attempt at efficiently streaming data without deserializing the entire document into memory.
 
