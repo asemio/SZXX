@@ -72,19 +72,23 @@ type feed =
 (**
    Stream files.
 
-   [SZXX.Zip.stream_files ~read callback]
+   [SZXX.Zip.stream_files ~feed callback]
 
-   [read]: Produces data for the parser. Return [None] to indicate EOF.
+   [feed]: Produces data for the parser. This data can be simple strings or bigstrings. Return [None] to indicate EOF.
 
-   [callback]: function called on every file found within the zip archive.
-   Returning [Action.Skip] will skip over the compressed bytes of this file without attempting to uncompress them.
-   Returning [Action.String] will collect the whole uncompressed file into a single string.
-   Returning [Action.Chunk] will call the user-defined function for every small chunk (~1-5Kb) comprising the uncompressed file.
-   Returning [Action.Parse] will apply an [Angstrom.t] parser to the file while it is being uncompressed without having to fully uncompress it first.
+   [callback]: function called on every file found within the ZIP archive.
+   You must choose an Action for SZXX to perform over each file encountered within the ZIP archive.
 
-   The final stream returns all files in the same order they were found in the archive.
+   Return [Action.Skip] to skip over the compressed bytes of this file without attempting to uncompress them.
+   Return [Action.String] to collect the whole uncompressed file into a single string.
+   Return [Action.Fold_string] to fold this file into a final state, in string chunks of ~1k-5k.
+   Return [Action.Fold_bigstring] to fold this file into a final state, in bigstring chunks of ~1k-5k.
+   Return [Action.Parse] to apply an [Angstrom.t] parser to the file while it is being uncompressed without having to fully uncompress it first.
 
-   [unit promise]: A promise resolved once the entire zip archive has been processed.
-   It is important to bind to/await this promise in order to capture any errors encountered while processing the file.
+   This function returns [stream * success_promise]
+   [stream] contains all files in the same order they were found in the archive.
+   [success_promise] is a promise that resolves once the entire zip archive has been processed.
+
+   Important: bind to/await [success_promise] in order to capture any errors encountered while processing the file.
 *)
 val stream_files : feed:feed -> (entry -> 'a Action.t) -> (entry * 'a Data.t) Lwt_stream.t * unit Lwt.t

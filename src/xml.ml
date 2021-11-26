@@ -188,6 +188,16 @@ module SAX = struct
         Error (sprintf "Invalid document. Closing element '%s' before element '%s'" tag current.tag)
       | Element_close tag, Ok _ ->
         Error (sprintf "Invalid document. Closing tag without matching opening tag: %s" tag)
+
+    let folder ~filter_path:path_list ~on_match acc node =
+      let filter_path =
+        let buf = Buffer.create 30 in
+        List.iter path_list ~f:(fun s ->
+            Buffer.add_char buf ' ';
+            Buffer.add_string buf s);
+        Buffer.contents buf
+      in
+      folder ~filter_path ~on_match acc (node : node)
   end
 end
 

@@ -78,7 +78,7 @@ let fold_angstrom ~filter_path ~on_match =
 
 let parse_sheet ~sheet_number push =
   let num = ref 0 in
-  let filter_path = " worksheet sheetData row" in
+  let filter_path = [ "worksheet"; "sheetData"; "row" ] in
   let on_match (el : Xml.DOM.element) =
     incr num;
     let next = !num in
@@ -123,7 +123,7 @@ let process_file ?only_sheet ~skip_sst ~feed push finalize mode =
           | "xl/workbook.xml" -> Skip
           | "xl/sharedStrings.xml" when skip_sst -> Skip
           | "xl/sharedStrings.xml" -> (
-            let filter_path = " sst si" in
+            let filter_path = [ "sst"; "si" ] in
             match mode with
             | `Parsed ->
               let q = Queue.create () in
@@ -244,7 +244,7 @@ let extract_cell ~sst { string; error; boolean; number; null } location el =
 
 let col_cache = String.Table.create ()
 
-let column_to_index s =
+let index_of_column s =
   let key =
     String.take_while s ~f:(function
       | 'A' .. 'Z' -> true
@@ -263,11 +263,11 @@ let parse_row ?sst cell_parser ({ data; sheet_number; row_number } as row) =
     let num_cols =
       Array.last data
       |> (fun el -> Xml.get_attr el.attrs "r")
-      |> Option.value_map ~default:num_cells ~f:(fun r -> max num_cells (column_to_index r + 1))
+      |> Option.value_map ~default:num_cells ~f:(fun r -> max num_cells (index_of_column r + 1))
     in
     let new_data = Array.create ~len:num_cols null in
     Array.iteri data ~f:(fun i el ->
-        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:column_to_index in
+        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
         let v = extract_cell ~sst cell_parser { col_index; sheet_number; row_number } el in
         new_data.(col_index) <- v);
     { row with data = new_data }

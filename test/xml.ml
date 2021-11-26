@@ -267,6 +267,6 @@ let () =
            [
              "To DOM 1", `Quick, xml_to_dom test1 data1;
              "To DOM 2", `Quick, xml_to_dom test2 data2;
-             "Stream 2", `Quick, xml_stream test2 data3 " sst si t";
+             "Stream 2", `Quick, xml_stream test2 data3 [ "sst"; "si"; "t" ];
            ] );
        ]

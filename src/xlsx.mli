@@ -36,35 +36,15 @@ type 'a row = {
 type sst
 
 (**
-   Stream rows from an [Lwt_io.input_channel].
-   SZXX does not hold onto memory any longer than it needs to.
-   Most XLSX files can be streamed without buffering.
-   However, some documents that make use of the Shared Strings Table (SST) will place it at the end of the Zip archive,
-   forcing SZXX to buffer those rows until the SST is found in the archive.
-   Using inline strings and/or placing the SST before the worksheets allows SZXX as efficiently as possible.
+   Returns an [Lwt_stream.t] of fully parsed XLSX rows, with one caveat: every cell value is wrapped in ['a status].
+   The [status] can be either [Available of 'a] or [Delayed of delayed_string].
 
-   [SZXX.Xlsx.stream_rows ?only_sheet readers ic]
+   This function will not wait on delayed string cells (see README).
 
-   [only_sheet]: when present, only stream rows from this sheet, numbered from 1.
+   Returns [stream * sst_promise * success_promise].
 
-   [readers]: the parsers to convert from [string] into the type used in your application.
-   [SZXX.Xlsx.yojson_readers] is provided for convenience.
-
-   Note: you must pass your own readers if you need XML escaping, call [SZXX.Xml.unescape].
-
-   Note: XLSX dates are encoded as numbers, call [SZXX.Xlsx.parse_date] or [SZXX.Xlsx.parse_datetime] in your readers to convert them.
-
-   [ic]: The channel to read from
-
-   Returned: [stream * sst promise * unit promise]
-
-   [stream]: Lwt_stream.t of rows where the cell data is either [Available v] where [v] is of the type returned by your readers,
-   or [Delayed d]. [Delayed] cells are caused by that cell's reliance on the SST.
-
-   [sst promise]: A promise resolved once the SST is available.
-
-   [unit promise]: A promise resolved once all the rows have been written to the stream.
-   It is important to bind to/await this promise in order to capture any errors encountered while processing the file.
+   Await [success_promise] before awaiting the completion of any promise resulting from the stream.
+   See README for more information.
 *)
 val stream_rows :
   ?only_sheet:int ->
@@ -73,9 +53,18 @@ val stream_rows :
   'a cell_parser ->
   'a status row Lwt_stream.t * sst Lwt.t * unit Lwt.t
 
+(**
+  Same as [stream_rows] but automatically resolves string references.
+  Warning: This function can result in linear (as opposed to constant) memory usage.
+  See README for more information.
+*)
 val stream_rows_buffer :
   ?only_sheet:int -> feed:Zip.feed -> 'a cell_parser -> 'a row Lwt_stream.t * unit Lwt.t
 
+(**
+  Same as [stream_rows] but returns raw XML elements instead of parsed XLSX rows.
+  This function can be useful to filter out uninteresting rows at a lower cost.
+*)
 val stream_rows_unparsed :
   ?only_sheet:int ->
   ?skip_sst:bool ->
@@ -83,23 +72,14 @@ val stream_rows_unparsed :
   unit ->
   Xml.DOM.element row Lwt_stream.t * sst Lwt.t * unit Lwt.t
 
-(** Convenience cell_parser to read rows as JSON *)
+(** Convenience cell_parser to read rows as JSON (Yojson) *)
 val yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser
 
-(** Convert an XML element returned by [stream_rows_unparsed] into a nicer [Xlsx.row] *)
+(** Convert an XML element as returned by [stream_rows_unparsed] into a nicer [Xlsx.row] as returned by [stream_rows] *)
 val parse_row : ?sst:sst -> 'a cell_parser -> Xml.DOM.element row -> 'a status row
 
-(** XLSX dates are stored as floats. Converts from a [float] to a [Date.t] *)
-val parse_date : float -> Date.t
-
-(** XLSX datetimes are stored as floats. Converts from a [float] to a [Time.t] *)
-val parse_datetime : zone:Time.Zone.t -> float -> Time.t
-
-(** Converts from a cell ref such as [D7] or [AA2] to a 0-based column index *)
-val column_to_index : string -> int
-
 (**
-   Unwraps a single row, resolving all SST references.
+   Unwrap a single row, resolving all SST references.
 
    A common workflow is to call [Lwt_stream.filter] on the stream returned by [stream_rows],
    discarding uninteresting rows in order to buffer as few rows as possible,
@@ -107,7 +87,14 @@ val column_to_index : string -> int
 *)
 val unwrap_status : 'a cell_parser -> sst -> 'a status row -> 'a row
 
-(**
-   Resolve a single reference into the Shared Strings Table.
-*)
+(** Resolve a single reference into the Shared Strings Table. *)
 val resolve_sst_index : sst -> sst_index:string -> string option
+
+(** XLSX dates are stored as floats. Convert from a [float] to a [Date.t] *)
+val parse_date : float -> Date.t
+
+(** XLSX datetimes are stored as floats. Convert from a [float] to a [Time.t] *)
+val parse_datetime : zone:Time.Zone.t -> float -> Time.t
+
+(** Convert from a column reference such as ["D7"] or ["AA2"] to a 0-based column index *)
+val index_of_column : string -> int

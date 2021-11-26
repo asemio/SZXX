@@ -94,7 +94,7 @@ module SAX : sig
     val init : state
 
     val folder :
-      filter_path:string ->
+      filter_path:string list ->
       on_match:(DOM.element -> unit) ->
       (state, string) result ->
       node ->
@@ -103,29 +103,22 @@ module SAX : sig
 end
 
 (**
-   Creates an IO-agnostic [Angstrom.t] parser.
-   By combining it with Angstrom-lwt-unix or Angstrom-async, it can be used to stream data while the file is being read.
+   IO-agnostic [Angstrom.t] parser.
 
    It is not fully spec-compliant, it does not attempt to validate character encoding or reject all incorrect documents.
    It does not process references.
-   It does not automatically unescape XML escape sequences, but a limited utility function is provided.
+   It does not automatically unescape XML escape sequences automatically but [unescape] is provided to do so.
 
-   [SZXX.Xml.parser ?filter_map path]
+   Call this parser repeatedly to generate a sequence of SAX.node values.
+   Those SAX.node values can then be folded using [SAX.To_DOM] or [SAX.Stream].
 
-   [filter_map]: function called on every element matched by [path].
-   It can be used to stream data (by side effect) while the document is being parsed.
-   Elements for which [filter_map] returns [None] will be excluded from the parsed document output.
-   Excluding elements allows the user to stream a file of virtually infinite size.
-
-   [path]: Nodes located within the element described by this path will be processed by [filter_map].
-   For example, here's the [path] of the rows in an XLSX worksheet: [["worksheet"; "sheetData"; "row"]].
-   In that case, the top level element is [<worksheet>], which contains [<sheetData>], which in turn contains many [<row>] elements.
+   See README for more information.
 *)
 val parser : SAX.node Angstrom.t
 
 (**
    Limited but efficient function to unescapable XML escape sequences.
-   Good enough for most cases, but validate it meets your needs before using.
+   Good enough for most cases, but validate that it meets your needs before using.
    [unescape "Fast &amp; Furious"] returns ["Fast & Furious"]
 *)
 val unescape : string -> string
