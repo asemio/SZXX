@@ -60,11 +60,11 @@ let readme_example2 filename () =
       let filtered =
         Lwt_stream.filter
           (fun row ->
-            match row.data.(3), row.row_number with
-            | _, i when i > 1000 -> false
-            | Available (`Bool x), _ -> x
-            | Available _, _
-             |Delayed _, _ ->
+            match row.data.(3) with
+            | _ when row.row_number > 1000 -> false
+            | Available (`Bool x) -> x
+            | Available _
+             |Delayed _ ->
               false)
           stream
       in
