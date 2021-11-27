@@ -20,7 +20,7 @@ depends: [
 
   "angstrom" { >= "0.15.0" }
   "core_kernel" { >= "v0.13.0" }
-  "decompress"
+  "decompress" { >= "1.4.1" }
   "lwt" { >= "5.0.0" }
 
   "alcotest-lwt" { with-test }
