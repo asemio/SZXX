@@ -1,0 +1,12 @@
+{
+  "data": [
+    [
+      "NN", "Hierarchy", null, "Outline Number", "ID", "Name", "Type",
+      "Description", null
+    ],
+    [
+      1.0, "+", null, "1.", "RQ11610", "requirement", "Textual Requirement",
+      "test", null
+    ]
+  ]
+}

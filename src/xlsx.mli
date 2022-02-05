@@ -12,6 +12,7 @@ type 'a cell_parser = {
   error: location -> string -> 'a;
   boolean: location -> string -> 'a;
   number: location -> string -> 'a;
+  date: location -> string -> 'a;
   null: 'a;
 }
 

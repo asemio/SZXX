@@ -11,6 +11,7 @@ let extractors =
       error = (fun _location s -> `String (sprintf "#ERROR# %s" s));
       boolean = (fun _location s -> `Bool String.(s = "1"));
       number = (fun _location s -> `Float (Float.of_string s));
+      date = (fun _location s -> `String s);
       null = `Null;
     }
 
@@ -148,6 +149,8 @@ let () =
              "simple.xlsx", `Quick, xlsx "simple";
              "financial.xlsx", `Quick, xlsx "financial";
              "zip64.xlsx", `Quick, xlsx "zip64";
+             "formatting.xlsx", `Quick, xlsx "formatting";
+             "inline.xlsx", `Quick, xlsx "inline";
              "Readme example 1", `Quick, readme_example1 "financial";
              "Readme example 2", `Quick, readme_example2 "financial";
              "Unbuffed stream", `Quick, stream_rows "financial";

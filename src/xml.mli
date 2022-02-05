@@ -23,6 +23,12 @@ module DOM : sig
   (** [el |> dot "row"] returns the first immediate [<row>] child of element [el] *)
   val dot : string -> element -> element option
 
+  (** [el |> dot "row"] returns the text of the first immediate [<row>] child of element [el] *)
+  val dot_text : string -> element -> string option
+
+  (** [el |> filter_map "row" ~f] returns all filtered [f <row>] children of element [el] *)
+  val filter_map : string -> f:(element -> 'a option) -> element -> 'a array
+
   (** [el |> at "3"] returns the nth (0-based indexing) immediate child of element [el]. The first argument is a string. *)
   val at : string -> element -> element option
 

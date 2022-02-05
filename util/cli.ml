@@ -65,7 +65,7 @@ let length xlsx_path =
       in
       p)
 
-let extract xlsx_path =
+let extract_sst xlsx_path =
   Lwt_io.with_file ~flags:flags_overwrite ~mode:Output (sprintf "%s.sst.xml" xlsx_path) (fun oc ->
       Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
           let files, files_p =
@@ -82,9 +82,29 @@ let extract xlsx_path =
           in
           files_p))
 
+let show_json xlsx_path =
+  Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
+      let open Lwt.Syntax in
+      (* yojson_cell_parser is an easy way to quickly inspect a file by mapping XLSX's data types to JSON *)
+      let stream, success =
+        SZXX.Xlsx.stream_rows_buffer ~feed:(feed_string ic) SZXX.Xlsx.yojson_cell_parser
+      in
+      let processed =
+        Lwt_stream.iter
+          (fun (row : Yojson.Basic.t SZXX.Xlsx.row) ->
+            `List (Array.to_list row.data) |> Yojson.Basic.pretty_to_string |> print_endline)
+          stream
+      in
+      let* () = success in
+      (* bind to/await the `success` promise to catch any error that may have terminated the stream early *)
+      let* () = processed in
+      (* ... *)
+      Lwt.return_unit)
+
 let () =
   Sys.argv |> function
-  | [| _; "extract"; file |] -> Lwt_main.run (extract file)
+  | [| _; "extract_sst"; file |] -> Lwt_main.run (extract_sst file)
   | [| _; "count"; file |] -> Lwt_main.run (count file)
   | [| _; "length"; file |] -> Lwt_main.run (length file)
+  | [| _; "show_json"; file |] -> Lwt_main.run (show_json file)
   | _ -> failwith "Invalid arguments"

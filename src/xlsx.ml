@@ -13,6 +13,7 @@ type 'a cell_parser = {
   error: location -> string -> 'a;
   boolean: location -> string -> 'a;
   number: location -> string -> 'a;
+  date: location -> string -> 'a;
   null: 'a;
 }
 
@@ -106,12 +107,11 @@ let parse_sheet ~sheet_number push =
   in
   fold_angstrom ~filter_path ~on_match
 
-let parse_sst_el el =
+let parse_string_cell el =
   let open Xml.DOM in
-  (match el |> dot "t" with
-  | Some _ as x -> x
-  | None -> get el [ dot "r"; dot "t" ])
-  |> Option.value_map ~default:"" ~f:(fun { text; _ } -> text)
+  match el |> dot "t" with
+  | Some { text; _ } -> text
+  | None -> filter_map "r" el ~f:(fun r -> dot_text "t" r) |> String.concat_array
 
 let process_file ?only_sheet ~skip_sst ~feed push finalize mode =
   let sst_p, sst_w = Lwt.wait () in
@@ -128,7 +128,7 @@ let process_file ?only_sheet ~skip_sst ~feed push finalize mode =
             | `Parsed ->
               let q = Queue.create () in
               sst_ref := Some (SSTQ q);
-              let on_match el = Queue.enqueue q (parse_sst_el el) in
+              let on_match el = Queue.enqueue q (parse_string_cell el) in
               fold_angstrom ~filter_path ~on_match
             | `Unparsed ->
               let q = Queue.create () in
@@ -184,7 +184,7 @@ let resolve_sst_index sst ~sst_index =
   let index = Int.of_string sst_index in
   match sst with
   | SST sst when index < Array.length sst && index >= 0 -> Some sst.(index)
-  | SST_unparsed sst when index < Array.length sst && index >= 0 -> Some (sst.(index) |> parse_sst_el)
+  | SST_unparsed sst when index < Array.length sst && index >= 0 -> Some (sst.(index) |> parse_string_cell)
   | SST _
    |SST_unparsed _ ->
     None
@@ -207,7 +207,7 @@ let unwrap_status cell_parser sst (row : 'a status row) =
         | Delayed { location; sst_index } ->
           let index = Int.of_string sst_index in
           if index < Array.length sst && index >= 0
-          then cell_parser.string location (parse_sst_el sst.(index))
+          then cell_parser.string location (parse_string_cell sst.(index))
           else cell_parser.null)
     | SST_skipped -> failwith "Cannot unwrap status when the SST was intentionally skipped"
   in
@@ -217,17 +217,20 @@ let extract ~null location extractor : Xml.DOM.element option -> 'a status = fun
 | None -> Available null
 | Some { text; _ } -> Available (extractor location text)
 
-let extract_cell ~sst { string; error; boolean; number; null } location el =
+let extract_cell ~sst { string; error; boolean; number; date; null } location el =
   let reader = extract ~null location in
   let open Xml.DOM in
   match Xml.get_attr el.attrs "t" with
   | None
-   |Some "n" -> (
-    try el |> dot "v" |> reader number with
-    | _ -> Available null
-  )
+   |Some "n" ->
+    el |> dot "v" |> reader number
+  | Some "d" -> el |> dot "v" |> reader date
   | Some "str" -> el |> dot "v" |> reader string
-  | Some "inlineStr" -> get el [ dot "is"; dot "t" ] |> reader string
+  | Some "inlineStr" -> (
+    match dot "is" el with
+    | None -> Available null
+    | Some el -> Available (string location (parse_string_cell el))
+  )
   | Some "s" -> (
     match el |> dot "v", sst with
     | None, _ -> Available null
@@ -256,7 +259,6 @@ let index_of_column s =
 let parse_row ?sst cell_parser ({ data; sheet_number; row_number } as row) =
   let open Xml.DOM in
   let num_cells = Array.length data in
-  let null = Available cell_parser.null in
   match num_cells with
   | 0 -> { row with data = [||] }
   | num_cells ->
@@ -265,6 +267,7 @@ let parse_row ?sst cell_parser ({ data; sheet_number; row_number } as row) =
       |> (fun el -> Xml.get_attr el.attrs "r")
       |> Option.value_map ~default:num_cells ~f:(fun r -> max num_cells (index_of_column r + 1))
     in
+    let null = Available cell_parser.null in
     let new_data = Array.create ~len:num_cols null in
     Array.iteri data ~f:(fun i el ->
         let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
@@ -323,5 +326,6 @@ let yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of stri
     error = (fun _location s -> `String (sprintf "#ERROR# %s" s));
     boolean = (fun _location s -> `Bool String.(s = "1"));
     number = (fun _location s -> `Float (Float.of_string s));
+    date = (fun _location s -> `String s);
     null = `Null;
   }

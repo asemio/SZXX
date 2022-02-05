@@ -115,11 +115,11 @@ Lwt_io.printlf "Number of rows: %d" count
 
 `SZXX.Xlsx.stream_rows` takes a `cell_parser` argument. A simple Yojson cell_parser is included in this library (`SZXX.Xlsx.yojson_cell_parser`) but creating your own is probably a good idea for all but the simplest use cases.
 
-⚠️ **XLSX Hazard #2** ⚠️ XLSX cells are typed. Those types are: `string`, `error`, `boolean`, `number`, and `null`. Several functions in this module take an argument of type `'a cell_parser`. This is simply a set of 5 functions, one to parse each of the 5 cells types. SZXX will automatically invoke the right one based on the cell type. You can inspect the cell location (sheet, row, column) to determine how to map it to your own types.
+⚠️ **XLSX Hazard #2** ⚠️ XLSX cells are typed. The types are: `string`, `error`, `boolean`, `number`, `date` (rarely used) and `null`. Several functions in this module take an argument of type `'a cell_parser`. This is simply a set of 6 functions, one to parse each of the 6 cells types. SZXX will automatically invoke the right one based on the cell type. You can inspect the cell location (sheet, row, column) to determine how to map it to your own types.
 
 ⚠️ **XLSX Hazard #3** ⚠️ String cells use XML-escaping (`&gt;` for `>`, etc). For performance reasons SZXX avoids preemptively unescaping String cells in case they're not used. `SZXX.Xlsx.yojson_cell_parser` already unescapes strings for you. If you write your own `cell_parser` and your String cells might contain reserved XML characters (`<`, `>`, `'`, `"`, `&`, etc) you will need to call `SZXX.Xml.unescape` on data coming from String cells.
 
-⚠️ **XLSX Hazard #4** ⚠️ XLSX uses its `number` type (OCaml float) to encode Date and DateTime. Pass this float to `SZXX.Xlsx.parse_date` or `SZXX.Xlsx.parse_datetime` to decode it.
+⚠️ **XLSX Hazard #4** ⚠️ Most XLSX applications use the `number` type (OCaml float) to encode Date and DateTime. Pass this float to `SZXX.Xlsx.parse_date` or `SZXX.Xlsx.parse_datetime` to decode it. The `date` type was only added in Excel 2010 and very few applications use it.
 
 #### `stream_rows_buffer`
 

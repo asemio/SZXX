@@ -3,6 +3,7 @@
   (libraries
     SZXX
     lwt.unix
+    yojson
   )
   (preprocess (pps
     ppx_jane

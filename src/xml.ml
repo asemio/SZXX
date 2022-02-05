@@ -22,6 +22,16 @@ module DOM = struct
 
   let dot tag node = Array.find node.children ~f:(fun x -> String.(x.tag = tag))
 
+  let dot_text tag node =
+    Array.find_map node.children ~f:(function
+      | x when String.(x.tag = tag) -> Some x.text
+      | _ -> None)
+
+  let filter_map tag ~f node =
+    Array.filter_map node.children ~f:(function
+      | x when String.(x.tag = tag) -> f x
+      | _ -> None)
+
   let at i node = Option.try_with (fun () -> Int.of_string i |> Array.get node.children)
 
   let get node (steps : (element -> element option) list) =
