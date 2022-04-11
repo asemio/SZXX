@@ -8,7 +8,7 @@
     [ null, "355/4" ],
     [ null, 395.98 ],
     [ "back!" ],
-    [ "HELLO" ],
+    [ "=((UPPER(&quot;hello&quot;))) -> HELLO" ],
     [ null, "#ERROR# #VALUE!" ],
     [],
     [],

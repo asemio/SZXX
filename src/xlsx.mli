@@ -9,6 +9,7 @@ type location = {
 
 type 'a cell_parser = {
   string: location -> string -> 'a;
+  formula: location -> formula:string -> string -> 'a;
   error: location -> string -> 'a;
   boolean: location -> string -> 'a;
   number: location -> string -> 'a;

@@ -2,10 +2,10 @@
 
 _Streaming ZIP XML XLSX parser_
 
-SZXX is a streaming, **non-seeking** and efficient XLSX parser built from the ground up for very low memory usage. It begins outputting rows while a file is still incomplete. In cases it can be configured to run in **constant memory**. [It even works in the browser!](#does-it-work-in-the-browser)
+SZXX is a streaming, **non-seeking** and efficient XLSX parser built from the ground up for very low memory usage. It begins outputting rows while a file is still incomplete. In many cases it can be configured to run in **constant memory**. [It even works in the browser!](#does-it-work-in-the-browser)
 
 To paraphrase an [infamous rant](https://github.com/gco/xee/blob/4fa3a6d609dd72b8493e52a68f316f7a02903276/XeePhotoshopLoader.m#L108-L136):
-> At this point, I'd like to take a moment to speak to you about the OOXML (XLSX) format... XLSX is not my favourite file format.
+> At this point, I'd like to take a moment to speak to you about the OOXML [XLSX] format... OOXML is not my favourite file format.
 
 XLSX seems to have been actively designed to consume obscene amounts of memory and computing power. It fights back every attempt at efficiently streaming data without deserializing the entire document into memory.
 
@@ -14,7 +14,7 @@ This library attempts to abstract away as much of that complexity as possible an
 An XLSX file is actually a ZIP archive containing a number of XML files and SZXX is therefore made up of three modules: Zip, Xml, and Xlsx. They can all be used independently, but none of them implement the entire spec due to the non-seeking requirement, only enough to stream XLSX rows. Despite this, SZXX is probably a solid choice for your ZIP extraction or XML parsing needs.
 
 ### Example
-First we need a "feed" function. See [this section](#feed-function-examples) for more examples.
+First we need a `feed` function. See [this section](#feed-function-examples) for more examples.
 ```ocaml
 let feed_string ic =
   SZXX.Zip.String
@@ -50,7 +50,7 @@ let print_rows_as_json xlsx_path =
 ```
 
 
-### SZXX.Xlsx
+## SZXX.Xlsx
 
 The `SZXX.Xlsx` module is the entrypoint for most users.
 
@@ -107,7 +107,7 @@ let count =
       acc + 1)
     filtered 0
 in
-(* Step 3: Await [success] before awaiting the promise returned by Step 2 *)
+(* Step 3: Await [success] before awaiting the promise that consumes the stream (the one returned by Step 2) *)
 let* () = success in
 let* count = count in
 Lwt_io.printlf "Number of rows: %d" count
@@ -115,11 +115,23 @@ Lwt_io.printlf "Number of rows: %d" count
 
 `SZXX.Xlsx.stream_rows` takes a `cell_parser` argument. A simple Yojson cell_parser is included in this library (`SZXX.Xlsx.yojson_cell_parser`) but creating your own is probably a good idea for all but the simplest use cases.
 
-⚠️ **XLSX Hazard #2** ⚠️ XLSX cells are typed. The types are: `string`, `error`, `boolean`, `number`, `date` (rarely used) and `null`. Several functions in this module take an argument of type `'a cell_parser`. This is simply a set of 6 functions, one to parse each of the 6 cells types. SZXX will automatically invoke the right one based on the cell type. You can inspect the cell location (sheet, row, column) to determine how to map it to your own types.
+⚠️ **XLSX Hazard #2** ⚠️ XLSX cells are typed. The types are: `string`, `formula`, `error`, `boolean`, `number`, `date` (rarely used) and `null`. Several functions in this module take an argument of type `'a cell_parser`. This is simply a set of 7 functions, one to parse each of the 7 cells types. SZXX will automatically invoke the right one based on the cell type. You can inspect the cell location (sheet, row, column) to determine how to map it to your own types.
+
+```ocaml
+type 'a cell_parser = {
+  string: location -> string -> 'a;
+  formula: location -> formula:string -> string -> 'a;
+  error: location -> string -> 'a;
+  boolean: location -> string -> 'a;
+  number: location -> string -> 'a;
+  date: location -> string -> 'a;
+  null: 'a;
+}
+```
 
 ⚠️ **XLSX Hazard #3** ⚠️ String cells use XML-escaping (`&gt;` for `>`, etc). For performance reasons SZXX avoids preemptively unescaping String cells in case they're not used. `SZXX.Xlsx.yojson_cell_parser` already unescapes strings for you. If you write your own `cell_parser` and your String cells might contain reserved XML characters (`<`, `>`, `'`, `"`, `&`, etc) you will need to call `SZXX.Xml.unescape` on data coming from String cells.
 
-⚠️ **XLSX Hazard #4** ⚠️ Most XLSX applications use the `number` type (OCaml float) to encode Date and DateTime. Pass this float to `SZXX.Xlsx.parse_date` or `SZXX.Xlsx.parse_datetime` to decode it. The `date` type was only added in Excel 2010 and very few applications use it.
+⚠️ **XLSX Hazard #4** ⚠️ Most XLSX applications use the `number` type (OCaml float) to encode Date and DateTime. Pass this float to `SZXX.Xlsx.parse_date` or `SZXX.Xlsx.parse_datetime` to decode it. The `date` type was only introduced to Excel in 2010 and very XLSX readers/writers use it.
 
 #### `stream_rows_buffer`
 
@@ -165,9 +177,9 @@ XLSX uses its `number` type (OCaml float) to encode DateTime cells. This functio
 Converts from a column reference (such as "D7" or "AA2") into a 0-based column index.
 
 
-### SZXX.Xml
+## SZXX.Xml
 
-Most users will not need to directly interact with this module other than to call `Xml.unescape`.
+If your use case consists of processing XLSX, you will not need to directly interact with this module other than to call `Xml.unescape`.
 
 #### `parser`
 
@@ -203,35 +215,37 @@ Hence **shallow** DOM tree.
 
 This is used by `SZXX.Xlsx` to run in constant memory.
 
-### SZXX.Zip
+## SZXX.Zip
 
-This module is easy to use on its own.
+This ZIP parser always works in constant memory. It calls a `feed` function to request more input.
 
-It supports compression methods `0` (stored/none) and `8` (deflated). It supports ZIP 2.0 and 4.5 (ZIP64).
+It is fully featured and supports every type of ZIP, including the important but exotic ZIP64 subformat, with the exception of files using rare compression methods.
+
+Compression methods `0` (stored/none) and `8` (deflated) are supported.
 
 #### stream_files
 
-Takes a "feed" function and a "callback".
+Takes a `feed` function and a `callback`.
 
-SZXX will call "feed" any time it needs more bytes. Return `None` to indicate End Of File.
+SZXX will call `feed` any time it needs more bytes. Return `None` to indicate End Of File.
 
-SZXX will call "callback" when it encounters a new file within the ZIP archive. You must choose an Action for SZXX to perform over each file.
+SZXX will call `callback` when it encounters a new file within the ZIP archive. You must choose an Action for SZXX to perform over each file.
 
 - Return `Action.Skip` to skip over the compressed bytes of this file without attempting to uncompress them.
-- Return `Action.String` to collect the whole uncompressed file into a single string.
+- Return `Action.String` to collect the whole uncompressed file into a single string. This will obviously consume memory proportional to the size of the file.
 - Return `Action.Fold_string` to fold this file into a final state, in string chunks of roughly ~1k-5k.
 - Return `Action.Fold_bigstring` to fold this file into a final state, in bigstring chunks of roughly ~1k-5k.
-- Return `Action.Parse` to apply an `Angstrom.t` parser to the file while it is being uncompressed without having to fully uncompress it first.
+- Return `Action.Parse` to apply an `Angstrom.t` parser to the file while it is being uncompressed without having to fully uncompress it first. This will obviously consume memory proportial to the size of your parse state.
 
 This function returns `stream * success_promise`.
 `stream` contains all files in the same order they were found in the archive.
 `success_promise` is a promise that resolves once the entire zip archive has been processed.
 
-Important: bind to/await `success_promise` in order to capture any errors encountered while processing the file.
+Important: bind to/await `success_promise` (p1) in order to capture any errors encountered while processing the file. Consume data from the stream (p2), but bind to p1 before binding onto p2.
 
 ### Feed function examples
 
-Example 1: Make a trivial "feed" function from an `Lwt_io.input_channel`.
+_Example 1:_ Make a naive `feed` function from an `Lwt_io.input_channel`.
 ```ocaml
 let feed_string ic =
   SZXX.Zip.String
@@ -241,10 +255,11 @@ let feed_string ic =
       | chunk -> Some chunk)
 ```
 
-Example 2: Make an **efficient** "feed" function from an `Lwt_io.input_channel`.
+_Example 2:_ Make an **efficient** `feed` function from an `Lwt_io.input_channel`.
 ```ocaml
 let feed_bigstring ic =
   let open SZXX.Zip in
+  let open Lwt.Infix in
   let len = Lwt_io.buffer_size ic in
   let buf = Bigstring.create len in
   Bigstring
@@ -254,7 +269,7 @@ let feed_bigstring ic =
       | len -> Some { buf; pos = 0; len })
 ```
 
-Example 3: Make a "feed" function from a `string Lwt_stream.t`.
+_Example 3:_ Make a `feed` function from a `string Lwt_stream.t`.
 ```ocaml
 let feed_stream stream =
   SZXX.Zip.String (fun () -> Lwt_stream.get stream)

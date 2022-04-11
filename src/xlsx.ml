@@ -10,6 +10,7 @@ type location = {
 
 type 'a cell_parser = {
   string: location -> string -> 'a;
+  formula: location -> formula:string -> string -> 'a;
   error: location -> string -> 'a;
   boolean: location -> string -> 'a;
   number: location -> string -> 'a;
@@ -217,15 +218,19 @@ let extract ~null location extractor : Xml.DOM.element option -> 'a status = fun
 | None -> Available null
 | Some { text; _ } -> Available (extractor location text)
 
-let extract_cell ~sst { string; error; boolean; number; date; null } location el =
-  let reader = extract ~null location in
+let extract_cell ~sst { string; formula; error; boolean; number; date; null } location el =
   let open Xml.DOM in
   match Xml.get_attr el.attrs "t" with
   | None
    |Some "n" ->
-    el |> dot "v" |> reader number
-  | Some "d" -> el |> dot "v" |> reader date
-  | Some "str" -> el |> dot "v" |> reader string
+    el |> dot "v" |> extract ~null location number
+  | Some "d" -> el |> dot "v" |> extract ~null location date
+  | Some "str" -> (
+    match el |> dot_text "v", el |> dot_text "f" with
+    | None, _ -> Available null
+    | Some s, Some f -> Available (formula location ~formula:f s)
+    | Some s, None -> Available (formula location ~formula:"" s)
+  )
   | Some "inlineStr" -> (
     match dot "is" el with
     | None -> Available null
@@ -241,8 +246,8 @@ let extract_cell ~sst { string; error; boolean; number; date; null } location el
       | Some resolved -> Available (string location resolved)
     )
   )
-  | Some "e" -> el |> dot "v" |> reader error
-  | Some "b" -> el |> dot "v" |> reader boolean
+  | Some "e" -> el |> dot "v" |> extract ~null location error
+  | Some "b" -> el |> dot "v" |> extract ~null location boolean
   | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
 
 let col_cache = String.Table.create ()
@@ -323,6 +328,7 @@ let stream_rows_buffer ?only_sheet ~feed cell_parser =
 let yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser =
   {
     string = (fun _location s -> `String (Xml.unescape s));
+    formula = (fun _location ~formula:_ s -> `String (Xml.unescape s));
     error = (fun _location s -> `String (sprintf "#ERROR# %s" s));
     boolean = (fun _location s -> `Bool String.(s = "1"));
     number = (fun _location s -> `Float (Float.of_string s));

@@ -8,6 +8,7 @@ let extractors =
   SZXX.Xlsx.
     {
       string = (fun _location s -> `String (SZXX.Xml.unescape s));
+      formula = (fun _location ~formula s -> `String (sprintf !"=(%s) -> %{SZXX.Xml.unescape}" formula s));
       error = (fun _location s -> `String (sprintf "#ERROR# %s" s));
       boolean = (fun _location s -> `Bool String.(s = "1"));
       number = (fun _location s -> `Float (Float.of_string s));
