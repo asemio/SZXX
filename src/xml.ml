@@ -228,17 +228,18 @@ let decode_exn =
     |]
   in
   let convert_exn str =
-    let code = Int.of_string str in
-    let num_bytes =
-      match code with
-      | x when x <= 0x7f -> 1
-      | x when x <= 0x7ff -> 2
-      | x when x <= 0xffff -> 3
-      | _ -> 4
-    in
-    let consts = consts.(num_bytes - 1) in
-    String.init num_bytes ~f:(fun i ->
-        (code lsr consts.shifts.(i)) land consts.masks.(i) lor consts.blends.(i) |> Char.of_int_exn)
+    match Int.of_string str with
+    | code when code <= 0x7f -> Char.of_int_exn code |> String.of_char
+    | code ->
+      let num_bytes =
+        match code with
+        | x when x <= 0x7ff -> 2
+        | x when x <= 0xffff -> 3
+        | _ -> 4
+      in
+      let consts = consts.(num_bytes - 1) in
+      String.init num_bytes ~f:(fun i ->
+          (code lsr consts.shifts.(i)) land consts.masks.(i) lor consts.blends.(i) |> Char.of_int_exn)
   in
   function
   | "amp" -> "&"
