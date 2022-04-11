@@ -212,20 +212,33 @@ module SAX = struct
   end
 end
 
+type utf8_consts = {
+  shifts: int array;
+  masks: int array;
+  blends: int array;
+}
+
 let decode_exn =
-  let buf = Buffer.create 4 in
-  let make_encoder () = Uutf.encoder `UTF_8 (`Buffer buf) in
-  let encoder = ref (make_encoder ()) in
+  let consts =
+    [|
+      { shifts = [| 0 |]; masks = [| 127 |]; blends = [| 0 |] };
+      { shifts = [| 6; 0 |]; masks = [| 31; 63 |]; blends = [| 192; 128 |] };
+      { shifts = [| 12; 6; 0 |]; masks = [| 15; 63; 63 |]; blends = [| 224; 128; 128 |] };
+      { shifts = [| 18; 12; 6; 0 |]; masks = [| 7; 63; 63; 63 |]; blends = [| 240; 128; 128; 128 |] };
+    |]
+  in
   let convert_exn str =
-    let u = Int.of_string str |> Uchar.of_scalar_exn in
-    Buffer.clear buf;
-    match Uutf.encode !encoder (`Uchar u) with
-    | `Ok ->
-      let _status = Uutf.encode !encoder `End in
-      Buffer.contents buf
-    | `Partial ->
-      encoder := make_encoder ();
-      raise (Invalid_argument str)
+    let code = Int.of_string str in
+    let num_bytes =
+      match code with
+      | x when x <= 0x7f -> 1
+      | x when x <= 0x7ff -> 2
+      | x when x <= 0xffff -> 3
+      | _ -> 4
+    in
+    let consts = consts.(num_bytes - 1) in
+    String.init num_bytes ~f:(fun i ->
+        (code lsr consts.shifts.(i)) land consts.masks.(i) lor consts.blends.(i) |> Char.of_int_exn)
   in
   function
   | "amp" -> "&"

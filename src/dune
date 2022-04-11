@@ -7,7 +7,6 @@
     checkseum.ocaml
     decompress.de
     lwt
-    uutf
   )
   (preprocess (pps
     ppx_sexp_conv
