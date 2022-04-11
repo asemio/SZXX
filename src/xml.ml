@@ -1,3 +1,4 @@
+module STR = String
 open! Core_kernel
 open Angstrom
 
@@ -211,37 +212,60 @@ module SAX = struct
   end
 end
 
-let escape_table = function
-| "amp" -> "&"
-| "lt" -> "<"
-| "gt" -> ">"
-| "apos" -> "'"
-| "quot" -> "\""
-| s -> (
-  match String.chop_prefix ~prefix:"#" s with
-  | None -> sprintf "&%s;" s
-  | Some num -> (
-    try Int.of_string num |> Char.of_int_exn |> Char.to_string with
-    | _ -> sprintf "&%s;" s
-  )
-)
-
-let unescape s =
-  let buf = Buffer.create (String.length s) in
-  let _ =
-    String.fold s ~init:(false, []) ~f:(fun (escaping, ll) c ->
-        match c, escaping with
-        | '&', false -> true, ll
-        | ';', true ->
-          let code = String.of_char_list ll |> String.rev |> escape_table in
-          Buffer.add_string buf code;
-          false, []
-        | c, true -> true, c :: ll
-        | c, false ->
-          Buffer.add_char buf c;
-          false, ll)
+let decode_exn =
+  let buf = Buffer.create 4 in
+  let make_encoder () = Uutf.encoder `UTF_8 (`Buffer buf) in
+  let encoder = ref (make_encoder ()) in
+  let convert_exn str =
+    let u = Int.of_string str |> Uchar.of_scalar_exn in
+    Buffer.clear buf;
+    match Uutf.encode !encoder (`Uchar u) with
+    | `Ok ->
+      let _status = Uutf.encode !encoder `End in
+      Buffer.contents buf
+    | `Partial ->
+      encoder := make_encoder ();
+      raise (Invalid_argument str)
   in
-  if Buffer.length buf = String.length s then s else Buffer.contents buf
+  function
+  | "amp" -> "&"
+  | "lt" -> "<"
+  | "gt" -> ">"
+  | "apos" -> "'"
+  | "quot" -> "\""
+  | str -> (
+    match str.[0], str.[1] with
+    | '#', 'x' ->
+      let b = Bytes.of_string str in
+      Bytes.set b 0 '0';
+      Bytes.unsafe_to_string ~no_mutation_while_string_reachable:b |> convert_exn
+    | '#', '0' .. '9' -> String.slice str 1 0 |> convert_exn
+    | _ -> raise (Invalid_argument str)
+  )
+
+let unescape original =
+  let rec loop buf from =
+    match String.index_from original from '&' with
+    | None -> Buffer.add_substring buf original ~pos:from ~len:(String.length original - from)
+    | Some start -> (
+      match String.index_from original start ';' with
+      | None -> Buffer.add_substring buf original ~pos:from ~len:(String.length original - from)
+      | Some stop ->
+        Buffer.add_substring buf original ~pos:from ~len:(start - from);
+        (match decode_exn (String.slice original (start + 1) stop) with
+        | s -> Buffer.add_string buf s
+        | exception _ -> Buffer.add_substring buf original ~pos:start ~len:(stop - start + 1));
+        loop buf (stop + 1)
+    )
+  in
+  (* Unroll first index call for performance *)
+  match String.index original '&' with
+  | None -> original
+  | Some start ->
+    let buf = Buffer.create (String.length original) in
+    Buffer.add_substring buf original ~pos:0 ~len:start;
+    loop buf start;
+    Buffer.contents buf
 
 let is_token = function
 | '"'

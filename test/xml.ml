@@ -184,7 +184,7 @@ let data2 =
 }
 |json}
 
-let data3 =
+let data2b =
   Yojson.Safe.from_string
     {json|
 {
@@ -211,6 +211,72 @@ let data3 =
 }
 |json}
 
+let test3 =
+  {s|
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet>
+  <c>hello &amp; goodbye</c>
+  <c>world<v>woot</v>WORLD<v>hurray</v></c>
+  <t xml:space="preserve"> &quot;hello!&quot;  world <x/>  &#124; &#xa; &#x1F1E8;&#x1F1E6; </t>
+  <c>bad1: &abc&amp; -</c>
+  <c>bad2: &#1welp; -</c>
+</worksheet>
+|s}
+
+let data3 =
+  Yojson.Safe.from_string
+    {json|
+{
+  "decl_attrs": [
+    [ "version", "1.0" ],
+    [ "encoding", "UTF-8" ],
+    [ "standalone", "yes" ]
+  ],
+  "top": {
+    "tag": "worksheet",
+    "attrs": [],
+    "text": "",
+    "children": [
+      {
+        "tag": "c",
+        "attrs": [],
+        "text": "hello & goodbye",
+        "children": []
+      },
+      {
+        "tag": "c",
+        "attrs": [],
+        "text": "world WORLD",
+        "children": [
+          { "tag": "v", "attrs": [], "text": "woot", "children": [] },
+          { "tag": "v", "attrs": [], "text": "hurray", "children": [] }
+        ]
+      },
+      {
+        "tag": "t",
+        "attrs": [ [ "xml:space", "preserve" ] ],
+        "text": " \"hello!\"  world   | \n 🇨🇦 ",
+        "children": [
+          { "tag": "x", "attrs": [], "text": "", "children": [] }
+        ]
+      },
+      {
+        "tag": "c",
+        "attrs": [],
+        "text": "bad1: &abc&amp; -",
+        "children": []
+      },
+      {
+        "tag": "c",
+        "attrs": [],
+        "text": "bad2: &#1welp; -",
+        "children": []
+      }
+    ]
+  }
+}
+|json}
+
 type element = SZXX.Xml.DOM.element = {
   tag: string;
   attrs: (string * string) list;
@@ -234,8 +300,9 @@ let xml_to_dom test data () =
   | Ok nodes ->
     let doc =
       match
-        List.fold_result nodes ~init:SZXX.Xml.SAX.To_DOM.init ~f:(fun acc x ->
-            SZXX.Xml.SAX.To_DOM.folder (Ok acc) x)
+        List.fold_result nodes ~init:SZXX.Xml.SAX.To_DOM.init ~f:(fun acc -> function
+          | Text s -> SZXX.Xml.SAX.To_DOM.folder (Ok acc) (Text (SZXX.Xml.unescape s))
+          | el -> SZXX.Xml.SAX.To_DOM.folder (Ok acc) el)
       with
       | Ok { decl_attrs; stack = []; top = Some top; _ } -> { decl_attrs; top }
       | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.To_DOM.state}" state ()
@@ -267,6 +334,7 @@ let () =
            [
              "To DOM 1", `Quick, xml_to_dom test1 data1;
              "To DOM 2", `Quick, xml_to_dom test2 data2;
-             "Stream 2", `Quick, xml_stream test2 data3 [ "sst"; "si"; "t" ];
+             "Stream 2", `Quick, xml_stream test2 data2b [ "sst"; "si"; "t" ];
+             "To DOM 3", `Quick, xml_to_dom test3 data3;
            ] );
        ]

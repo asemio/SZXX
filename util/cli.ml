@@ -9,6 +9,8 @@ open SZXX
 let string_readers : string Xlsx.cell_parser =
   {
     string = (fun _location s -> s);
+    formula = (fun _location ~formula:_ s -> s);
+    date = (fun _location s -> s);
     error = (fun _location s -> s);
     boolean = (fun _location s -> s);
     number = (fun _location s -> s);
