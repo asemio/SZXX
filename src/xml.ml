@@ -220,6 +220,7 @@ type utf8_consts = {
 
 let decode_exn =
   let consts =
+    (* https://en.wikipedia.org/wiki/UTF-8#Encoding *)
     [|
       { shifts = [| 0 |]; masks = [| 127 |]; blends = [| 0 |] };
       { shifts = [| 6; 0 |]; masks = [| 31; 63 |]; blends = [| 192; 128 |] };
@@ -239,9 +240,13 @@ let decode_exn =
       in
       let consts = consts.(num_bytes - 1) in
       String.init num_bytes ~f:(fun i ->
+          (* lsr: Shift the relevant bits to the least significant position *)
+          (* land: Blank out the reserved bits *)
+          (* lor: Set the reserved bits to the right value *)
           (code lsr consts.shifts.(i)) land consts.masks.(i) lor consts.blends.(i) |> Char.of_int_exn)
   in
   function
+  (* https://en.wikipedia.org/wiki/List_of_XML_and_HTML_character_entity_references#List_of_predefined_entities_in_XML *)
   | "amp" -> "&"
   | "lt" -> "<"
   | "gt" -> ">"
@@ -332,13 +337,14 @@ let parser =
   in
   let attr_parser = lift2 double (token_parser <* ws <* char '=') (ws *> xml_string_parser) in
   let doctype_parser =
-    let entity =
-      string "[<!ENTITY" *> ws *> skip_many (ws *> (token_parser <|> xml_string_parser))
+    let declaration =
+      string "<!" *> token_parser *> ws *> skip_many (ws *> (token_parser <|> xml_string_parser))
       <* ws
-      <* string ">]"
+      <* char '>'
     in
+    let declarations = char '[' *> skip_many (blank *> declaration) <* blank <* char ']' in
     string "<!DOCTYPE"
-    *> (skip_many (blank *> choice [ drop token_parser; drop xml_string_parser; entity ])
+    *> (skip_many (blank *> choice [ drop token_parser; drop xml_string_parser; declarations ])
        <* blank
        <* char '>'
        )

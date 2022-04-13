@@ -3,7 +3,15 @@ open! Core_kernel
 let test1 =
   {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?> <!DOCTYPE stylesheet [<!ENTITY
 nbsp "<xsl:text
-disable-output-escaping='yes'>&amp;nbsp;</xsl:text>">]
+disable-output-escaping='yes'>&amp;nbsp;</xsl:text>">
+  <!ELEMENT html (head, body)>
+  <!ATTLIST img
+   src    CDATA          #REQUIRED
+   id     ID             #IMPLIED
+   sort   CDATA          #FIXED "true"
+   print  (yes | no) "yes"
+  >
+]
 <!--comment-with-dashes-->
 >
 <!-- some
