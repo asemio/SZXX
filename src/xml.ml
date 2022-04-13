@@ -15,12 +15,6 @@ module DOM = struct
   }
   [@@deriving sexp_of]
 
-  type doc = {
-    decl_attrs: attr_list option;
-    top: element;
-  }
-  [@@deriving sexp_of]
-
   let dot tag node = Array.find node.children ~f:(fun x -> String.(x.tag = tag))
 
   let dot_text tag node =
@@ -88,8 +82,9 @@ module SAX = struct
       | _, Error _ -> acc
       | Nothing, Ok _ -> acc
       | Many ll, Ok acc -> List.fold_result ll ~init:acc ~f:(fun acc x -> folder (Ok acc) x)
-      | Prologue _, Ok { decl_attrs = Some _; _ } -> Error "A prologue already exists"
-      | Prologue attrs, Ok ({ decl_attrs = None; _ } as acc) -> Ok { acc with decl_attrs = Some attrs }
+      | Prologue attrs, Ok ({ decl_attrs = None; stack = []; top = None; _ } as acc) ->
+        Ok { acc with decl_attrs = Some attrs }
+      | Prologue _, Ok _ -> Error "The prologue must located at the beginning of the file"
       | Element_open { tag; attrs; preserve_space }, Ok acc ->
         let partial =
           { tag; attrs; preserve_space; buf = Buffer.create 16; children = Queue.create ~capacity:4 () }
@@ -151,8 +146,9 @@ module SAX = struct
       | Nothing, Ok _ -> acc
       | Many ll, Ok acc ->
         List.fold_result ll ~init:acc ~f:(fun acc x -> folder ~filter_path ~on_match (Ok acc) x)
-      | Prologue _, Ok { decl_attrs = Some _; _ } -> Error "A prologue already exists"
-      | Prologue attrs, Ok ({ decl_attrs = None; _ } as acc) -> Ok { acc with decl_attrs = Some attrs }
+      | Prologue attrs, Ok ({ decl_attrs = None; stack = []; top = None; _ } as acc) ->
+        Ok { acc with decl_attrs = Some attrs }
+      | Prologue _, Ok _ -> Error "The prologue must located at the beginning of the file"
       | Element_open { tag; attrs; preserve_space }, Ok ({ path_stack = path :: _; _ } as acc) ->
         let partial =
           { tag; attrs; preserve_space; buf = Buffer.create 16; children = Queue.create ~capacity:4 () }
@@ -218,7 +214,7 @@ type utf8_consts = {
   blends: int array;
 }
 
-let decode_exn =
+let encode_utf_8_codepoint code =
   let consts =
     (* https://en.wikipedia.org/wiki/UTF-8#Encoding *)
     [|
@@ -228,39 +224,40 @@ let decode_exn =
       { shifts = [| 18; 12; 6; 0 |]; masks = [| 7; 63; 63; 63 |]; blends = [| 240; 128; 128; 128 |] };
     |]
   in
-  let convert_exn str =
-    match Int.of_string str with
-    | code when code <= 0x7f -> Char.of_int_exn code |> String.of_char
-    | code ->
-      let num_bytes =
-        match code with
-        | x when x <= 0x7ff -> 2
-        | x when x <= 0xffff -> 3
-        | _ -> 4
-      in
-      let consts = consts.(num_bytes - 1) in
-      String.init num_bytes ~f:(fun i ->
-          (* lsr: Shift the relevant bits to the least significant position *)
-          (* land: Blank out the reserved bits *)
-          (* lor: Set the reserved bits to the right value *)
-          (code lsr consts.shifts.(i)) land consts.masks.(i) lor consts.blends.(i) |> Char.of_int_exn)
-  in
-  function
-  (* https://en.wikipedia.org/wiki/List_of_XML_and_HTML_character_entity_references#List_of_predefined_entities_in_XML *)
-  | "amp" -> "&"
-  | "lt" -> "<"
-  | "gt" -> ">"
-  | "apos" -> "'"
-  | "quot" -> "\""
-  | str -> (
-    match str.[0], str.[1] with
-    | '#', 'x' ->
-      let b = Bytes.of_string str in
-      Bytes.set b 0 '0';
-      Bytes.unsafe_to_string ~no_mutation_while_string_reachable:b |> convert_exn
-    | '#', '0' .. '9' -> String.slice str 1 0 |> convert_exn
-    | _ -> raise (Invalid_argument str)
-  )
+  match code with
+  | code when code <= 0x7f -> Char.unsafe_of_int code |> String.of_char
+  | code ->
+    let num_bytes =
+      match code with
+      | x when x <= 0x7ff -> 2
+      | x when x <= 0xffff -> 3
+      | _ -> 4
+    in
+    let consts = consts.(num_bytes - 1) in
+    String.init num_bytes ~f:(fun i ->
+        (* lsr: Shift the relevant bits to the least significant position *)
+        (* land: Blank out the reserved bits *)
+        (* lor: Set the reserved bits to the right value *)
+        (code lsr consts.shifts.(i)) land consts.masks.(i) lor consts.blends.(i) |> Char.unsafe_of_int)
+
+let decode_exn = function
+(* https://en.wikipedia.org/wiki/List_of_XML_and_HTML_character_entity_references#List_of_predefined_entities_in_XML *)
+| "amp" -> "&"
+| "lt" -> "<"
+| "gt" -> ">"
+| "apos" -> "'"
+| "quot" -> "\""
+| str -> (
+  match str.[0], str.[1] with
+  | '#', 'x' ->
+    let b = Bytes.of_string str in
+    Bytes.set b 0 '0';
+    Bytes.unsafe_to_string ~no_mutation_while_string_reachable:b
+    |> Int.of_string
+    |> encode_utf_8_codepoint
+  | '#', '0' .. '9' -> String.slice str 1 0 |> Int.of_string |> encode_utf_8_codepoint
+  | _ -> raise (Invalid_argument str)
+)
 
 let unescape original =
   let rec loop buf from =
@@ -351,7 +348,13 @@ let parser =
     >>| const SAX.Nothing
   in
   let prologue_parser =
-    string "<?xml " *> (many (ws *> attr_parser) >>| fun attrs -> SAX.Prologue attrs) <* ws <* string "?>"
+    (* UTF-8 BOM *)
+    option "" (string "\xEF\xBB\xBF")
+    *> blank
+    *> string "<?xml "
+    *> (many (ws *> attr_parser) >>| fun attrs -> SAX.Prologue attrs)
+    <* ws
+    <* string "?>"
   in
   let cdata_parser =
     string "<![CDATA[" *> Parsing.take_until_pattern ~pattern:"]]>" >>| fun s -> SAX.Cdata s
@@ -378,7 +381,9 @@ let parser =
     peek_string 2 >>= function
     | "</" -> element_close_parser
     | "<!" -> cdata_parser <|> doctype_parser
-    | "<?" -> prologue_parser
+    | "<?"
+     |"\xEF\xBB" ->
+      prologue_parser
     | s -> (
       match s.[0] with
       | '<' -> element_open_parser

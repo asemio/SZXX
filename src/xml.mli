@@ -14,12 +14,6 @@ module DOM : sig
   }
   [@@deriving sexp_of]
 
-  type doc = {
-    decl_attrs: attr_list option;
-    top: element;
-  }
-  [@@deriving sexp_of]
-
   (** [el |> dot "row"] returns the first immediate [<row>] child of element [el] *)
   val dot : string -> element -> element option
 
@@ -123,8 +117,6 @@ end
 val parser : SAX.node Angstrom.t
 
 (**
-   Limited but efficient function to unescapable XML escape sequences.
-   Good enough for most cases, but validate that it meets your needs before using.
    [unescape "Fast &amp; Furious"] returns ["Fast & Furious"]
 *)
 val unescape : string -> string

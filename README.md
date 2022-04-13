@@ -158,7 +158,7 @@ Converts an `Xml.DOM.element Xlsx.row` (as returned by `stream_rows_unparsed`) i
 
 #### `unwrap_status`
 
-Converts a parsed row `'a Xlsx.status Xlsx.row` -as returned by `stream_rows` and `parse_row`- into `'a Xlsx.row` -as returned by `stream_rows_buffered`-.
+Converts a parsed row `'a Xlsx.status Xlsx.row` (as returned by `stream_rows` and `parse_row`) into `'a Xlsx.row` (as returned by `stream_rows_buffered`).
 
 #### `resolve_sst_index`
 

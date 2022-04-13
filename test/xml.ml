@@ -127,6 +127,8 @@ let test2 =
 <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="3" uniqueCount="3"><si><t xml:space="preserve">hello</t></si><si><t xml:space="preserve">world</t></si><si><t xml:space="preserve">ok bye</t></si></sst>
 
 |s}
+  (* UTF-8 BOM *)
+  |> sprintf "\xEF\xBB\xBF%s"
 
 let data2 =
   Yojson.Safe.from_string
@@ -230,6 +232,8 @@ let test3 =
   <c>bad2: &#1welp; -</c>
 </worksheet>
 |s}
+  (* UTF-8 BOM *)
+  |> sprintf "\xEF\xBB\xBF%s"
 
 let data3 =
   Yojson.Safe.from_string
@@ -293,7 +297,7 @@ type element = SZXX.Xml.DOM.element = {
 }
 [@@deriving sexp_of, to_yojson]
 
-type doc = SZXX.Xml.DOM.doc = {
+type doc = {
   decl_attrs: (string * string) list option;
   top: element;
 }
