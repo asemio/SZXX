@@ -2,6 +2,7 @@
   (names xlsx xml zip)
   (libraries
     SZXX
+    angstrom-lwt-unix
 
     alcotest-lwt
     core_kernel

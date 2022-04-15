@@ -338,6 +338,108 @@ let xml_stream test data filter_path () =
     Lwt.return_unit
   | Error msg -> failwith msg
 
+let readme_example1 () =
+  let open SZXX in
+  let raw_xml_string =
+    {|
+<container>123
+  <value>foo</value>
+  <value>bar</value>
+  456
+</container>
+|}
+  in
+
+  let nodes =
+    Angstrom.parse_string ~consume:All (Angstrom.many Xml.parser) raw_xml_string |> Result.ok_or_failwith
+  in
+  let xml =
+    List.fold_result nodes ~init:Xml.SAX.To_DOM.init ~f:(fun acc x -> Xml.SAX.To_DOM.folder (Ok acc) x)
+    |> Result.ok_or_failwith
+  in
+  (* Do something with `xml` *)
+  Lwt_io.printl
+    (Option.value_map xml.top ~default:"--" ~f:(fun el -> Xml.DOM.sexp_of_element el |> Sexp.to_string))
+
+let readme_example2 () =
+  let open Lwt.Syntax in
+  let open SZXX in
+  let input_channel, output_channel = Lwt_io.pipe () in
+  let* () = Lwt_io.write output_channel test1 in
+  let* () = Lwt_io.close output_channel in
+
+  let state = ref (Ok Xml.SAX.To_DOM.init) in
+  let on_parse node =
+    state := Xml.SAX.To_DOM.folder !state node;
+    Lwt.return_unit
+  in
+  let* _rest, result =
+    Lwt.finalize
+      (fun () -> Angstrom_lwt_unix.parse_many Xml.parser on_parse input_channel)
+      (fun () -> Lwt_io.close input_channel)
+  in
+
+  match result, !state with
+  | Error msg, _
+   |_, Error msg ->
+    failwith msg
+  | Ok (), Ok parsed_xml ->
+    (* Do something with parsed_xml *)
+    let* () =
+      Option.value_map parsed_xml.top ~default:"--" ~f:(fun el ->
+          Xml.DOM.sexp_of_element el |> Sexp.to_string)
+      |> Lwt_io.print
+    in
+    Lwt.return_unit
+
+let readme_example3 () =
+  let open Lwt.Syntax in
+  let open SZXX in
+  let input_channel, output_channel = Lwt_io.pipe () in
+  let* () =
+    Lwt_io.write output_channel
+      {|
+<html>
+  <head></head>
+  <body>
+    <div><p>foo</p></div>
+    <div>bar</div>
+    456
+  </body>
+</html>
+|}
+  in
+  let* () = Lwt_io.close output_channel in
+
+  let state = ref (Ok Xml.SAX.Stream.init) in
+  let filter_path = [ "html"; "body"; "div" ] in
+  let on_match div =
+    (* Do something with `div` *)
+    print_endline (Xml.DOM.sexp_of_element div |> Sexp.to_string)
+  in
+  let on_parse node =
+    state := Xml.SAX.Stream.folder ~filter_path ~on_match !state node;
+    Lwt.return_unit
+  in
+  let* _rest, result =
+    Lwt.finalize
+      (fun () -> Angstrom_lwt_unix.parse_many Xml.parser on_parse input_channel)
+      (fun () -> Lwt_io.close input_channel)
+  in
+
+  match result, !state with
+  | Error msg, _
+   |_, Error msg ->
+    failwith msg
+  | Ok (), Ok shallow_tree ->
+    (* Do something with `shallow_tree` or `acc_top_level_divs` *)
+    let* () =
+      Lwt_io.printl
+        (Option.value_map shallow_tree.decl_attrs ~default:"--" ~f:(fun x ->
+             Xml.sexp_of_attr_list x |> Sexp.to_string))
+    in
+    Lwt.return_unit
+
 let () =
   Lwt_main.run
   @@ Alcotest_lwt.run "SZXX XML"
@@ -348,5 +450,8 @@ let () =
              "To DOM 2", `Quick, xml_to_dom test2 data2;
              "Stream 2", `Quick, xml_stream test2 data2b [ "sst"; "si"; "t" ];
              "To DOM 3", `Quick, xml_to_dom test3 data3;
+             "Sync To_DOM", `Quick, readme_example1;
+             "Async To_DOM", `Quick, readme_example2;
+             "Async Stream", `Quick, readme_example3;
            ] );
        ]

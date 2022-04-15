@@ -35,11 +35,11 @@ let feed_bigstring ic =
 
 let readme_example1 filename () =
   let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
-  Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
+  Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun input_channel ->
       let open Lwt.Syntax in
       (* yojson_cell_parser is an easy way to quickly inspect a file by mapping XLSX's data types to JSON *)
       let stream, success =
-        SZXX.Xlsx.stream_rows_buffer ~feed:(feed_string ic) SZXX.Xlsx.yojson_cell_parser
+        SZXX.Xlsx.stream_rows_buffer ~feed:(feed_string input_channel) SZXX.Xlsx.yojson_cell_parser
       in
       let processed =
         Lwt_stream.iter
@@ -55,10 +55,10 @@ let readme_example1 filename () =
 
 let readme_example2 filename () =
   let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
-  Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
+  Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun input_channel ->
       let open SZXX.Xlsx in
       let open Lwt.Syntax in
-      let stream, sst_p, success = stream_rows ~feed:(feed_string ic) yojson_cell_parser in
+      let stream, sst_p, success = stream_rows ~feed:(feed_string input_channel) yojson_cell_parser in
       let filtered =
         Lwt_stream.filter
           (fun row ->
