@@ -141,6 +141,16 @@ let stream_rows filename () =
   Json_diff.check parsed against;
   Lwt.return_unit
 
+let sst_from_zip filename () =
+  let open SZXX in
+  let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
+  Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
+      let+ sst = Xlsx.SST.from_zip ~feed:(feed_bigstring ic) in
+      match Xlsx.resolve_sst_index sst ~sst_index:"30" with
+      | Some "October" -> ()
+      | Some x -> failwithf "Invalid SST index 30: '%s'" x ()
+      | None -> failwith "Failed to resolve SST index 30")
+
 let () =
   Lwt_main.run
   @@ Alcotest_lwt.run "SZXX XLSX"
@@ -155,5 +165,6 @@ let () =
              "Readme example 1", `Quick, readme_example1 "financial";
              "Readme example 2", `Quick, readme_example2 "financial";
              "Unbuffed stream", `Quick, stream_rows "financial";
+             "SST from ZIP", `Quick, sst_from_zip "financial";
            ] );
        ]

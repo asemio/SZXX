@@ -5,6 +5,9 @@ type attr_list = (string * string) list [@@deriving sexp_of]
 (** Convenience function to access attributes by name *)
 val get_attr : attr_list -> string -> string option
 
+(** Convenience function to check whether a node has attribute [xml:space="preserve"]  *)
+val preserve_space : attr_list -> bool
+
 module DOM : sig
   type element = {
     tag: string;
@@ -34,16 +37,12 @@ module DOM : sig
 end
 
 module SAX : sig
-  type element_open = {
-    tag: string;
-    attrs: attr_list;
-    preserve_space: bool Lazy.t;
-  }
-  [@@deriving sexp_of]
-
   type node =
     | Prologue      of attr_list
-    | Element_open  of element_open
+    | Element_open  of {
+        tag: string;
+        attrs: attr_list;
+      }
     | Element_close of string
     | Text          of string
     | Cdata         of string
@@ -55,7 +54,6 @@ module SAX : sig
     type partial = {
       tag: string;
       attrs: attr_list;
-      preserve_space: bool Lazy.t;
       buf: Buffer.t;
       children: DOM.element Queue.t;
     }
@@ -77,7 +75,6 @@ module SAX : sig
     type partial = {
       tag: string;
       attrs: attr_list;
-      preserve_space: bool Lazy.t;
       buf: Buffer.t;
       children: DOM.element Queue.t;
     }
@@ -109,10 +106,7 @@ end
    It does not process references.
    It does not automatically unescape XML escape sequences automatically but [unescape] is provided to do so.
 
-   Call this parser repeatedly to generate a sequence of SAX.node values.
-   Those SAX.node values can then be folded using [SAX.To_DOM] or [SAX.Stream].
-
-   See README for more information.
+   See README.md for examples on how to use it.
 *)
 val parser : SAX.node Angstrom.t
 

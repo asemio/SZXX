@@ -1,5 +1,6 @@
 open! Core_kernel
 open Lwt.Syntax
+open Lwt.Infix
 
 type location = {
   sheet_number: int;
@@ -35,15 +36,6 @@ type 'a row = {
   data: 'a array;
 }
 [@@deriving sexp_of]
-
-type sstq =
-  | SSTQ          of string Queue.t
-  | SSTQ_unparsed of Xml.DOM.element Queue.t
-
-type sst =
-  | SST          of string array
-  | SST_unparsed of Xml.DOM.element array
-  | SST_skipped
 
 let origin = Date.add_days (Date.create_exn ~y:1900 ~m:(Month.of_int_exn 1) ~d:1) (-2)
 
@@ -114,74 +106,100 @@ let parse_string_cell el =
   | Some { text; _ } -> text
   | None -> filter_map "r" el ~f:(fun r -> dot_text "t" r) |> String.concat_array
 
-let process_file ?only_sheet ~skip_sst ~feed push finalize mode =
-  let sst_p, sst_w = Lwt.wait () in
-  let sst_ref = ref None in
-  let processed_p =
-    let zip_stream, zip_processed =
-      Zip.stream_files ~feed (fun entry ->
-          match entry.filename with
-          | "xl/workbook.xml" -> Skip
-          | "xl/sharedStrings.xml" when skip_sst -> Skip
-          | "xl/sharedStrings.xml" -> (
-            let filter_path = [ "sst"; "si" ] in
-            match mode with
-            | `Parsed ->
-              let q = Queue.create () in
-              sst_ref := Some (SSTQ q);
-              let on_match el = Queue.enqueue q (parse_string_cell el) in
-              fold_angstrom ~filter_path ~on_match
-            | `Unparsed ->
-              let q = Queue.create () in
-              sst_ref := Some (SSTQ_unparsed q);
-              let on_match el = Queue.enqueue q el in
-              fold_angstrom ~filter_path ~on_match
-          )
-          | filename ->
-            let open Option.Monad_infix in
-            String.chop_prefix ~prefix:"xl/worksheets/sheet" filename
-            >>= String.chop_suffix ~suffix:".xml"
-            >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
-            |> Option.filter ~f:(fun i -> Option.value_map only_sheet ~default:true ~f:(( = ) i))
-            >>| (fun sheet_number -> parse_sheet ~sheet_number push)
-            |> Option.value ~default:Zip.Action.Skip)
-    in
-    let* () =
-      Lwt.finalize
-        (fun () ->
-          Lwt_stream.iter
-            (fun (entry, data) ->
-              let open Zip in
-              match data with
-              | Data.Skip
-               |Data.String _
-               |Data.Parse _
-               |Data.Fold_string _ ->
-                ()
-              | Data.Fold_bigstring (_, Error msg) ->
-                failwithf "XLSX Parsing error for %s: %s" entry.filename msg ()
-              | Data.Fold_bigstring (_, Ok _) -> (
-                match entry.filename with
-                | "xl/sharedStrings.xml" ->
-                  let sst =
-                    match !sst_ref with
-                    | None -> SST_skipped
-                    | Some (SSTQ q) -> SST (Queue.to_array q)
-                    | Some (SSTQ_unparsed q) -> SST_unparsed (Queue.to_array q)
-                  in
-                  Lwt.wakeup_later sst_w sst
-                | _ -> ()
-              ))
-            zip_stream)
-        (fun () ->
-          if Lwt.is_sleeping sst_p then Lwt.wakeup_later sst_w (SST [||]);
-          Lwt.return_unit)
-    in
-    Lwt.( <&> ) (finalize ()) zip_processed
-  in
-  sst_p, processed_p
+let flush_zip_stream zip_stream =
+  Lwt_stream.filter_map
+    (function
+      | Zip.{ filename; _ }, Zip.Data.Fold_bigstring (_, Error msg) ->
+        Some (sprintf "XLSX Parsing error in %s: %s" filename msg)
+      | _ -> None)
+    zip_stream
+  |> Lwt_stream.to_list
+  >>= function
+  | [] -> Lwt.return_unit
+  | errors -> failwith (String.concat ~sep:". " errors)
 
-let resolve_sst_index sst ~sst_index =
+module SST = struct
+  type partial =
+    | SSTQ          of string Queue.t
+    | SSTQ_unparsed of Xml.DOM.element Queue.t
+    | SSTQ_skipped
+
+  type t =
+    | SST          of string array
+    | SST_unparsed of Xml.DOM.element array
+
+  let of_partial = function
+  | SSTQ q -> SST (Queue.to_array q)
+  | SSTQ_unparsed q -> SST_unparsed (Queue.to_array q)
+  | SSTQ_skipped -> SST [||]
+
+  let filter_path = [ "sst"; "si" ]
+
+  let zip_entry_filename = "xl/sharedStrings.xml"
+
+  let from_zip ~feed =
+    let q = Queue.create () in
+    let zip_stream, zip_success =
+      Zip.stream_files ~feed (function
+        | { filename = "xl/sharedStrings.xml"; _ } ->
+          let on_match el = Queue.enqueue q (parse_string_cell el) in
+          fold_angstrom ~filter_path ~on_match
+        | _ -> Zip.Action.Skip)
+    in
+    let sst_p =
+      let+ () = flush_zip_stream zip_stream in
+      SST (Queue.to_array q)
+    in
+    let* () = zip_success in
+    sst_p
+end
+
+let process_file ?only_sheet ~skip_sst ~feed push finalize mode =
+  let sst_ref : SST.partial ref = ref SST.SSTQ_skipped in
+  let zip_stream, zip_success =
+    Zip.stream_files ~feed (function
+      | { filename = "xl/workbook.xml"; _ } -> Skip
+      | { filename = "xl/sharedStrings.xml"; _ } when skip_sst -> Skip
+      | { filename = "xl/sharedStrings.xml"; _ } -> (
+        match mode with
+        | `Parsed ->
+          let q = Queue.create () in
+          sst_ref := SSTQ q;
+          let on_match el = Queue.enqueue q (parse_string_cell el) in
+          fold_angstrom ~filter_path:SST.filter_path ~on_match
+        | `Unparsed ->
+          let q = Queue.create () in
+          sst_ref := SSTQ_unparsed q;
+          let on_match el = Queue.enqueue q el in
+          fold_angstrom ~filter_path:SST.filter_path ~on_match
+      )
+      | { filename; _ } ->
+        let open Option.Monad_infix in
+        String.chop_prefix ~prefix:"xl/worksheets/sheet" filename
+        >>= String.chop_suffix ~suffix:".xml"
+        >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
+        |> Option.filter ~f:(fun i -> Option.value_map only_sheet ~default:true ~f:(( = ) i))
+        >>| (fun sheet_number -> parse_sheet ~sheet_number push)
+        |> Option.value ~default:Zip.Action.Skip)
+  in
+  let result_p =
+    Lwt.finalize
+      (fun () -> flush_zip_stream zip_stream)
+      (fun () ->
+        finalize ();
+        Lwt.return_unit)
+  in
+  let success =
+    let* () = zip_success in
+    result_p
+  in
+  let sst_p =
+    let+ () = result_p in
+    SST.of_partial !sst_ref
+  in
+  sst_p, success
+
+let resolve_sst_index (sst : SST.t) ~sst_index =
   let index = Int.of_string sst_index in
   match sst with
   | SST sst when index < Array.length sst && index >= 0 -> Some sst.(index)
@@ -189,9 +207,8 @@ let resolve_sst_index sst ~sst_index =
   | SST _
    |SST_unparsed _ ->
     None
-  | SST_skipped -> failwith "Cannot resolve SST indexed when the SST was intentionally skipped"
 
-let unwrap_status cell_parser sst (row : 'a status row) =
+let unwrap_status cell_parser (sst : SST.t) (row : 'a status row) =
   let data =
     match sst with
     | SST sst ->
@@ -210,7 +227,6 @@ let unwrap_status cell_parser sst (row : 'a status row) =
           if index < Array.length sst && index >= 0
           then cell_parser.string location (parse_string_cell sst.(index))
           else cell_parser.null)
-    | SST_skipped -> failwith "Cannot unwrap status when the SST was intentionally skipped"
   in
   { row with data }
 
@@ -282,10 +298,7 @@ let parse_row ?sst cell_parser ({ data; sheet_number; row_number } as row) =
 
 let stream_rows ?only_sheet ?(skip_sst = false) ~feed cell_parser =
   let stream, push = Lwt_stream.create () in
-  let finalize () =
-    push None;
-    Lwt.return_unit
-  in
+  let finalize () = push None in
   let sst_ref = ref None in
 
   let sst_p, processed_p =
@@ -298,10 +311,7 @@ let stream_rows ?only_sheet ?(skip_sst = false) ~feed cell_parser =
 
 let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~feed () =
   let stream, push = Lwt_stream.create () in
-  let finalize () =
-    push None;
-    Lwt.return_unit
-  in
+  let finalize () = push None in
 
   let sst_p, processed_p =
     process_file ?only_sheet ~skip_sst ~feed (fun x -> push (Some x)) finalize `Unparsed
@@ -310,10 +320,7 @@ let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~feed () =
 
 let stream_rows_buffer ?only_sheet ~feed cell_parser =
   let stream, push = Lwt_stream.create () in
-  let finalize () =
-    push None;
-    Lwt.return_unit
-  in
+  let finalize () = push None in
   let sst_p, processed_p =
     process_file ?only_sheet ~skip_sst:false ~feed (fun x -> push (Some x)) finalize `Parsed
   in

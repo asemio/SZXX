@@ -90,5 +90,7 @@ type feed =
    [success_promise] is a promise that resolves once the entire zip archive has been processed.
 
    Important: bind to/await [success_promise] in order to capture any errors encountered while processing the file.
+
+   See README.md for examples on how to use it.
 *)
 val stream_files : feed:feed -> (entry -> 'a Action.t) -> (entry * 'a Data.t) Lwt_stream.t * unit Lwt.t

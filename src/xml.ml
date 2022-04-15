@@ -6,6 +6,11 @@ type attr_list = (string * string) list [@@deriving sexp_of]
 
 let get_attr attrs name = List.find_map attrs ~f:(fun (x, y) -> Option.some_if String.(x = name) y)
 
+let rec preserve_space = function
+| [] -> false
+| ("xml:space", "preserve") :: _ -> true
+| _ :: rest -> (preserve_space [@tailcall]) rest
+
 module DOM = struct
   type element = {
     tag: string;
@@ -38,16 +43,12 @@ module DOM = struct
 end
 
 module SAX = struct
-  type element_open = {
-    tag: string;
-    attrs: attr_list;
-    preserve_space: bool Lazy.t;
-  }
-  [@@deriving sexp_of]
-
   type node =
     | Prologue      of attr_list
-    | Element_open  of element_open
+    | Element_open  of {
+        tag: string;
+        attrs: attr_list;
+      }
     | Element_close of string
     | Text          of string
     | Cdata         of string
@@ -59,7 +60,6 @@ module SAX = struct
     type partial = {
       tag: string;
       attrs: attr_list;
-      preserve_space: bool Lazy.t;
       buf: Buffer.t;
       children: DOM.element Queue.t;
     }
@@ -85,10 +85,8 @@ module SAX = struct
       | Prologue attrs, Ok ({ decl_attrs = None; stack = []; top = None; _ } as acc) ->
         Ok { acc with decl_attrs = Some attrs }
       | Prologue _, Ok _ -> Error "The prologue must located at the beginning of the file"
-      | Element_open { tag; attrs; preserve_space }, Ok acc ->
-        let partial =
-          { tag; attrs; preserve_space; buf = Buffer.create 16; children = Queue.create ~capacity:4 () }
-        in
+      | Element_open { tag; attrs }, Ok acc ->
+        let partial = { tag; attrs; buf = Buffer.create 16; children = Queue.create ~capacity:4 () } in
         Ok { acc with stack = partial :: acc.stack }
       | Text s, Ok { stack = []; top = None; _ } ->
         Error (sprintf "Invalid document. Text not contained within an element: \"%s\"" s)
@@ -97,9 +95,9 @@ module SAX = struct
       | Text _, Ok { stack = []; top = Some _; _ }
        |Cdata _, Ok { stack = []; top = Some _; _ } ->
         acc
-      | Text s, Ok { stack = { buf; preserve_space; _ } :: _; _ }
-       |Cdata s, Ok { stack = { buf; preserve_space; _ } :: _; _ } ->
-        let preserve = force preserve_space in
+      | Text s, Ok { stack = { buf; attrs; _ } :: _; _ }
+       |Cdata s, Ok { stack = { buf; attrs; _ } :: _; _ } ->
+        let preserve = preserve_space attrs in
         if Buffer.length buf > 0 && not (preserve && String.is_prefix s ~prefix:" ")
         then Buffer.add_char buf ' ';
         Buffer.add_string buf (if preserve then s else String.strip s);
@@ -121,7 +119,6 @@ module SAX = struct
     type partial = {
       tag: string;
       attrs: attr_list;
-      preserve_space: bool Lazy.t;
       buf: Buffer.t;
       children: DOM.element Queue.t;
     }
@@ -149,10 +146,8 @@ module SAX = struct
       | Prologue attrs, Ok ({ decl_attrs = None; stack = []; top = None; _ } as acc) ->
         Ok { acc with decl_attrs = Some attrs }
       | Prologue _, Ok _ -> Error "The prologue must located at the beginning of the file"
-      | Element_open { tag; attrs; preserve_space }, Ok ({ path_stack = path :: _; _ } as acc) ->
-        let partial =
-          { tag; attrs; preserve_space; buf = Buffer.create 16; children = Queue.create ~capacity:4 () }
-        in
+      | Element_open { tag; attrs }, Ok ({ path_stack = path :: _; _ } as acc) ->
+        let partial = { tag; attrs; buf = Buffer.create 16; children = Queue.create ~capacity:4 () } in
         Ok
           {
             acc with
@@ -165,10 +160,10 @@ module SAX = struct
         Error (sprintf "Invalid document. Text not contained within an element: %s" s)
       | Cdata s, Ok { stack = []; top = None; _ } ->
         Error (sprintf "Invalid document. CDATA not contained within an element: %s" s)
-      | Text s, Ok { stack = { buf; preserve_space; _ } :: _; path_stack = path :: _; _ }
-       |Cdata s, Ok { stack = { buf; preserve_space; _ } :: _; path_stack = path :: _; _ }
+      | Text s, Ok { stack = { buf; attrs; _ } :: _; path_stack = path :: _; _ }
+       |Cdata s, Ok { stack = { buf; attrs; _ } :: _; path_stack = path :: _; _ }
         when String.is_prefix path ~prefix:filter_path ->
-        let preserve = force preserve_space in
+        let preserve = preserve_space attrs in
         if Buffer.length buf > 0 && not (preserve && String.is_prefix s ~prefix:" ")
         then Buffer.add_char buf ' ';
         Buffer.add_string buf (if preserve then s else String.strip s);
@@ -362,12 +357,7 @@ let parser =
   let element_open_parser =
     lift3
       (fun tag attrs self_closing ->
-        let preserve_space =
-          lazy
-            (List.mem attrs ("xml:space", "preserve")
-               ~equal:String.((fun (x1, y1) (x2, y2) -> x1 = x2 && y1 = y2)))
-        in
-        let eopen = SAX.Element_open { tag; attrs; preserve_space } in
+        let eopen = SAX.Element_open { tag; attrs } in
         if self_closing then SAX.Many [ eopen; Element_close tag ] else eopen)
       (char '<' *> ws *> token_parser)
       (many (ws *> attr_parser) <* ws)

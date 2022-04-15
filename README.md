@@ -2,14 +2,14 @@
 
 _Streaming ZIP XML XLSX parser_
 
-SZXX is a streaming, **non-seeking** and efficient XLSX parser built from the ground up for very low memory usage. It begins outputting rows while a file is still incomplete. In many cases it can be configured to run in **constant memory**. [It even works in the browser!](#does-it-work-in-the-browser)
+SZXX is a streaming, **non-seeking** and efficient parser built from the ground up for very low memory usage. It begins outputting data while a file is still incomplete. In many cases it can be configured to run in **constant memory**. [It even works in the browser!](#does-it-work-in-the-browser)
 
 SZXX can be used to stream data out of ZIP files, XML files, as well as XLSX files.
 
 Modules:
-- [SZXX.Xlsx](#SZXX.Xlsx)
-- [SZXX.Xml](#SZXX.Xml)
-- [SZXX.Zip](#SZXX.Zip)
+- [SZXX.Xlsx](#szxxxlsx)
+- [SZXX.Xml](#szxxxml)
+- [SZXX.Zip](#szxxzip)
 
 ## SZXX.Xlsx
 
@@ -56,7 +56,7 @@ A simple Yojson cell_parser is included in this library (`SZXX.Xlsx.yojson_cell_
 
 ⚠️ **XLSX Hazard #2** ⚠️ String cells use XML-escaping (`&gt;` for ">", `&#x1F600;` for "😀" etc). For performance reasons SZXX avoids preemptively unescaping String cells in case they're not used. `SZXX.Xlsx.yojson_cell_parser` already unescapes strings for you. If you write your own `cell_parser` and your String cells might contain reserved XML characters (`<`, `>`, `'`, `"`, `&`, etc) you will need to call `SZXX.Xml.unescape` on data coming from String cells.
 
-⚠️ **XLSX Hazard #3** ⚠️ Most XLSX applications use the `number` type (OCaml float) to encode Date and DateTime. Pass this float to `SZXX.Xlsx.parse_date` or `SZXX.Xlsx.parse_datetime` to decode it. The `date` type was only introduced to Excel in 2010 and very XLSX readers/writers use it.
+⚠️ **XLSX Hazard #3** ⚠️ Most XLSX applications use the `number` type (OCaml float) to encode Date and DateTime. Pass this float to `SZXX.Xlsx.parse_date` or `SZXX.Xlsx.parse_datetime` to decode it. The `date` type was only introduced to Excel in 2010 and very few XLSX readers/writers use it.
 
 3. We can finally process our XLSX file.
 
@@ -100,12 +100,14 @@ let print_rows_as_json xlsx_path =
 
 ### Streaming is hard
 
-⚠️ **XLSX Hazard #4** ⚠️ Unfortunately, the vast majority of applications that generate XLSX files will keep not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to a Shared String. This saves space, but 99.9% of the time the Shared String Table (SST) is located **after** the sheet! SZXX is a non-seeking parser: it can't skip ahead to parse the SST and then rewind to parse the spreadsheet!
+⚠️ **XLSX Hazard #4** ⚠️ Unfortunately, the vast majority of applications that generate XLSX files will not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to an offset in the Shared Strings Table. This saves space, but 99.9% of the time the Shared Strings Table (SST) is located **after** the sheet! SZXX is a non-seeking parser: it can't skip ahead to parse the SST and then rewind to parse the spreadsheet!
 
 Therefore, the user must either:
 - ignore String cells
 - OR buffer rows until String cells can be read
 - OR work exclusively with spreadsheets that use Inline Strings and/or place the SST at the beginning of the XLSX file.
+
+<sub>At this point clever readers may be thinking that we could have the best of both worlds if we could process the XLSX file twice: once to extract the SST and another time with `stream_rows`. You are correct. If your use case allows for it, you can use `Xlsx.SST.from_zip` to extract the SST.</sub>
 
 Keep reading to see how to design a solution for your use case.
 
