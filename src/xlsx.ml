@@ -119,19 +119,7 @@ let flush_zip_stream zip_stream =
   | errors -> failwith (String.concat ~sep:". " errors)
 
 module SST = struct
-  type partial =
-    | SSTQ          of string Queue.t
-    | SSTQ_unparsed of Xml.DOM.element Queue.t
-    | SSTQ_skipped
-
-  type t =
-    | SST          of string array
-    | SST_unparsed of Xml.DOM.element array
-
-  let of_partial = function
-  | SSTQ q -> SST (Queue.to_array q)
-  | SSTQ_unparsed q -> SST_unparsed (Queue.to_array q)
-  | SSTQ_skipped -> SST [||]
+  type t = string Lazy.t array
 
   let filter_path = [ "sst"; "si" ]
 
@@ -142,37 +130,27 @@ module SST = struct
     let zip_stream, zip_success =
       Zip.stream_files ~feed (function
         | { filename = "xl/sharedStrings.xml"; _ } ->
-          let on_match el = Queue.enqueue q (parse_string_cell el) in
+          let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
           fold_angstrom ~filter_path ~on_match
         | _ -> Zip.Action.Skip)
     in
     let sst_p =
       let+ () = flush_zip_stream zip_stream in
-      SST (Queue.to_array q)
+      Queue.to_array q
     in
     let* () = zip_success in
     sst_p
 end
 
-let process_file ?only_sheet ~skip_sst ~feed push finalize mode =
-  let sst_ref : SST.partial ref = ref SST.SSTQ_skipped in
+let process_file ?only_sheet ~skip_sst ~feed push finalize =
+  let q = Queue.create () in
   let zip_stream, zip_success =
     Zip.stream_files ~feed (function
       | { filename = "xl/workbook.xml"; _ } -> Skip
       | { filename = "xl/sharedStrings.xml"; _ } when skip_sst -> Skip
-      | { filename = "xl/sharedStrings.xml"; _ } -> (
-        match mode with
-        | `Parsed ->
-          let q = Queue.create () in
-          sst_ref := SSTQ q;
-          let on_match el = Queue.enqueue q (parse_string_cell el) in
-          fold_angstrom ~filter_path:SST.filter_path ~on_match
-        | `Unparsed ->
-          let q = Queue.create () in
-          sst_ref := SSTQ_unparsed q;
-          let on_match el = Queue.enqueue q el in
-          fold_angstrom ~filter_path:SST.filter_path ~on_match
-      )
+      | { filename = "xl/sharedStrings.xml"; _ } ->
+        let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
+        fold_angstrom ~filter_path:SST.filter_path ~on_match
       | { filename; _ } ->
         let open Option.Monad_infix in
         String.chop_prefix ~prefix:"xl/worksheets/sheet" filename
@@ -195,38 +173,25 @@ let process_file ?only_sheet ~skip_sst ~feed push finalize mode =
   in
   let sst_p =
     let+ () = result_p in
-    SST.of_partial !sst_ref
+    Queue.to_array q
   in
   sst_p, success
 
 let resolve_sst_index (sst : SST.t) ~sst_index =
   let index = Int.of_string sst_index in
   match sst with
-  | SST sst when index < Array.length sst && index >= 0 -> Some sst.(index)
-  | SST_unparsed sst when index < Array.length sst && index >= 0 -> Some (sst.(index) |> parse_string_cell)
-  | SST _
-   |SST_unparsed _ ->
-    None
+  | sst when index < Array.length sst && index >= 0 -> Some (force sst.(index))
+  | _ -> None
 
 let unwrap_status cell_parser (sst : SST.t) (row : 'a status row) =
   let data =
-    match sst with
-    | SST sst ->
-      Array.map row.data ~f:(function
-        | Available x -> x
-        | Delayed { location; sst_index } ->
-          let index = Int.of_string sst_index in
-          if index < Array.length sst && index >= 0
-          then cell_parser.string location sst.(index)
-          else cell_parser.null)
-    | SST_unparsed sst ->
-      Array.map row.data ~f:(function
-        | Available x -> x
-        | Delayed { location; sst_index } ->
-          let index = Int.of_string sst_index in
-          if index < Array.length sst && index >= 0
-          then cell_parser.string location (parse_string_cell sst.(index))
-          else cell_parser.null)
+    Array.map row.data ~f:(function
+      | Available x -> x
+      | Delayed { location; sst_index } -> (
+        match resolve_sst_index sst ~sst_index with
+        | Some index -> cell_parser.string location index
+        | None -> cell_parser.null
+      ))
   in
   { row with data }
 
@@ -304,7 +269,7 @@ let stream_rows ?only_sheet ?(skip_sst = false) ~feed cell_parser =
   let sst_p, processed_p =
     process_file ?only_sheet ~skip_sst ~feed
       (fun x -> push (Some (parse_row ?sst:!sst_ref cell_parser x)))
-      finalize `Parsed
+      finalize
   in
   Lwt.on_success sst_p (fun x -> sst_ref := Some x);
   stream, sst_p, processed_p
@@ -313,16 +278,14 @@ let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~feed () =
   let stream, push = Lwt_stream.create () in
   let finalize () = push None in
 
-  let sst_p, processed_p =
-    process_file ?only_sheet ~skip_sst ~feed (fun x -> push (Some x)) finalize `Unparsed
-  in
+  let sst_p, processed_p = process_file ?only_sheet ~skip_sst ~feed (fun x -> push (Some x)) finalize in
   stream, sst_p, processed_p
 
 let stream_rows_buffer ?only_sheet ~feed cell_parser =
   let stream, push = Lwt_stream.create () in
   let finalize () = push None in
   let sst_p, processed_p =
-    process_file ?only_sheet ~skip_sst:false ~feed (fun x -> push (Some x)) finalize `Parsed
+    process_file ?only_sheet ~skip_sst:false ~feed (fun x -> push (Some x)) finalize
   in
   let parsed_stream =
     Lwt_stream.map_s

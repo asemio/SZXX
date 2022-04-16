@@ -109,6 +109,41 @@ let xlsx filename () =
 
   Lwt.return_unit
 
+let xlsx_unparsed filename () =
+  let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
+  let json_path = sprintf "../../../test/files/%s.json" filename in
+  let* against =
+    Lwt_io.with_file ~flags ~mode:Input json_path (fun ic ->
+        let+ contents = Lwt_io.read ic in
+        Yojson.Safe.from_string contents)
+  in
+  let* parsed =
+    Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
+        let open SZXX.Xlsx in
+        let stream, sst_p, processed = stream_rows_unparsed ~feed:(feed_bigstring ic) () in
+        let json_p =
+          Lwt_stream.fold_s
+            (fun element acc ->
+              let+ sst = sst_p in
+              let row =
+                parse_row ~sst yojson_cell_parser element |> unwrap_status yojson_cell_parser sst
+              in
+              `List (Array.to_list row.data) :: acc)
+            stream []
+        in
+        let* () = processed in
+        let+ json = json_p in
+        `Assoc [ "data", `List (List.rev json) ])
+  in
+
+  (* let* () =
+       Lwt_io.with_file ~flags:[ O_WRONLY; O_NONBLOCK; O_TRUNC ] ~mode:Output json_path (fun oc ->
+           Lwt_io.write oc (Yojson.Safe.to_string parsed))
+     in *)
+  Json_diff.check (parsed : Yojson.Basic.t :> Yojson.Safe.t) against;
+
+  Lwt.return_unit
+
 let stream_rows filename () =
   let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
   let json_path = "../../../test/files/streamed.json" in
@@ -158,7 +193,7 @@ let () =
          ( "XLSX",
            [
              "simple.xlsx", `Quick, xlsx "simple";
-             "financial.xlsx", `Quick, xlsx "financial";
+             "financial.xlsx", `Quick, xlsx_unparsed "financial";
              "zip64.xlsx", `Quick, xlsx "zip64";
              "formatting.xlsx", `Quick, xlsx "formatting";
              "inline.xlsx", `Quick, xlsx "inline";
