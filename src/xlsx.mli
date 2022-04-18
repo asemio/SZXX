@@ -55,7 +55,7 @@ end
 
    Await [success_promise] before awaiting the completion of any promise resulting from the stream.
 
-   See README.md for examples on how to use it.
+   See README.md for examples.
 *)
 val stream_rows :
   ?only_sheet:int ->
@@ -86,8 +86,11 @@ val stream_rows_unparsed :
 (** Convenience cell_parser to read rows as JSON (Yojson) *)
 val yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser
 
-(** Convert an XML element as returned by [stream_rows_unparsed] into a nicer [Xlsx.row] as returned by [stream_rows] *)
-val parse_row : ?sst:SST.t -> 'a cell_parser -> Xml.DOM.element row -> 'a status row
+(** Convert an XML element as returned by [stream_rows_unparsed] into a nicer ['a row] as returned by [stream_rows_buffer] *)
+val parse_row_with_sst : SST.t -> 'a cell_parser -> Xml.DOM.element row -> 'a row
+
+(** Convert an XML element as returned by [stream_rows_unparsed] into a nicer ['a status row] as returned by [stream_rows] *)
+val parse_row_without_sst : 'a cell_parser -> Xml.DOM.element row -> 'a status row
 
 (**
    Unwrap a single row, resolving all SST references.

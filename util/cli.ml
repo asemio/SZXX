@@ -17,16 +17,6 @@ let string_readers : string Xlsx.cell_parser =
     null = "";
   }
 
-let feed_string ic =
-  let open Lwt.Infix in
-  let open SZXX.Zip in
-  let count = Lwt_io.buffer_size ic in
-  String
-    (fun () ->
-      Lwt_io.read ~count ic >|= function
-      | "" -> None
-      | chunk -> Some chunk)
-
 let feed_bigstring ic =
   let open Lwt.Infix in
   let open SZXX.Zip in
@@ -86,21 +76,55 @@ let extract_sst xlsx_path =
 
 let show_json xlsx_path =
   Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-      let open Lwt.Syntax in
-      (* yojson_cell_parser is an easy way to quickly inspect a file by mapping XLSX's data types to JSON *)
       let stream, success =
-        SZXX.Xlsx.stream_rows_buffer ~feed:(feed_string ic) SZXX.Xlsx.yojson_cell_parser
+        SZXX.Xlsx.stream_rows_buffer ~feed:(feed_bigstring ic) SZXX.Xlsx.yojson_cell_parser
       in
       let processed =
-        Lwt_stream.iter
+        Lwt_stream.iter_s
           (fun (row : Yojson.Basic.t SZXX.Xlsx.row) ->
-            `List (Array.to_list row.data) |> Yojson.Basic.pretty_to_string |> print_endline)
+            `List (Array.to_list row.data) |> Yojson.Basic.pretty_to_string |> Lwt_io.printl)
           stream
       in
       let* () = success in
-      (* bind to/await the `success` promise to catch any error that may have terminated the stream early *)
       let* () = processed in
-      (* ... *)
+      Lwt.return_unit)
+
+let count_types xlsx_path =
+  Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
+      let string = ref 0 in
+      let ss = ref 0 in
+      let formula = ref 0 in
+      let error = ref 0 in
+      let boolean = ref 0 in
+      let number = ref 0 in
+      let date = ref 0 in
+      let cell_parser =
+        Xlsx.
+          {
+            string = (fun _location _s -> incr string);
+            formula = (fun _location ~formula:_ _s -> incr formula);
+            error = (fun _location _s -> incr error);
+            boolean = (fun _location _s -> incr boolean);
+            number = (fun _location _s -> incr number);
+            date = (fun _location _s -> incr date);
+            null = ();
+          }
+      in
+      let stream, _sst_p, success = Xlsx.stream_rows ~feed:(feed_bigstring ic) cell_parser in
+      let processed =
+        Lwt_stream.iter
+          (fun Xlsx.{ data; _ } ->
+            Array.iter data ~f:(function
+              | Xlsx.Available _ -> ()
+              | Delayed _ -> incr ss))
+          stream
+      in
+      let* () = success in
+      let* () = processed in
+      print_endline
+        (sprintf
+           "%s\nstring: %d\nshared_string: %d\nformula: %d\nerror: %d\nboolean: %d\nnumber: %d\ndate: %d"
+           xlsx_path !string !ss !formula !error !boolean !number !date);
       Lwt.return_unit)
 
 let () =
@@ -109,4 +133,5 @@ let () =
   | [| _; "count"; file |] -> Lwt_main.run (count file)
   | [| _; "length"; file |] -> Lwt_main.run (length file)
   | [| _; "show_json"; file |] -> Lwt_main.run (show_json file)
+  | [| _; "count_types"; file |] -> Lwt_main.run (count_types file)
   | _ -> failwith "Invalid arguments"

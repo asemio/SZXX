@@ -125,9 +125,7 @@ let xlsx_unparsed filename () =
           Lwt_stream.fold_s
             (fun element acc ->
               let+ sst = sst_p in
-              let row =
-                parse_row ~sst yojson_cell_parser element |> unwrap_status yojson_cell_parser sst
-              in
+              let row = parse_row_with_sst sst yojson_cell_parser element in
               `List (Array.to_list row.data) :: acc)
             stream []
         in

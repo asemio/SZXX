@@ -107,7 +107,7 @@ Therefore, the user must either:
 - OR buffer rows until String cells can be read
 - OR work exclusively with spreadsheets that use Inline Strings and/or place the SST at the beginning of the XLSX file.
 
-<sub>At this point clever readers may be thinking that we could have the best of both worlds if we could process the XLSX file twice: once to extract the SST and another time with `stream_rows`. You are correct. If your use case allows for it, you can use `Xlsx.SST.from_zip` to extract the SST.</sub>
+<sub>At this point clever readers are probably thinking that we could have the best of both worlds by processing the XLSX file twice: once to extract the SST and a second time with `stream_rows`. You are correct. If your use case allows for it, you can use `Xlsx.SST.from_zip` to extract the SST, then call `Xlsx.stream_rows_unparsed` and call `Xlsx.parse_row_with_sst` on each stream element.</sub>
 
 Keep reading to see how to design a solution for your use case.
 
@@ -210,17 +210,21 @@ In other words it eliminates the complexity of having to call `unwrap_status` to
 
 Same as `stream_rows`, but returns each row as a raw XML element: `Xml.DOM.element row Lwt_stream.t`.
 
-Call `Xlsx.parse_row` to get the more user friendly `'a status row`, or directly manipulate the XML element through the functions provided in the `Xml.DOM` module.
+Call `Xlsx.parse_row_without_sst`/`Xlsx.parse_row_with_sst` to get the more user friendly `'a status row`, or directly manipulate the XML element through the functions provided in the `Xml.DOM` module.
 
 This function is especially interesting for users that might be interested in just a few rows out of a large spreadsheet because it avoids wasting time parsing every row.
 
-#### `parse_row`
+#### `parse_row_without_sst`
 
 Converts an `Xml.DOM.element Xlsx.row` (as returned by `stream_rows_unparsed`) into an `'a Xlsx.status Xlsx.row` (as returned by `stream_rows`).
 
+#### `parse_row_with_sst`
+
+Converts an `Xml.DOM.element Xlsx.row` (as returned by `stream_rows_unparsed`) into an `'a Xlsx.row` (as returned by `stream_rows_buffer`).
+
 #### `unwrap_status`
 
-Converts a parsed row `'a Xlsx.status Xlsx.row` (as returned by `stream_rows` and `parse_row`) into `'a Xlsx.row` (as returned by `stream_rows_buffered`).
+Converts a parsed row `'a Xlsx.status Xlsx.row` (as returned by `stream_rows` and `parse_row_without_sst`) into `'a Xlsx.row` (as returned by `stream_rows_buffered` and `parse_row_with_sst`).
 
 #### `resolve_sst_index`
 
@@ -269,9 +273,9 @@ in
 (* Do something with `xml` *)
 ```
 
-**Example 2: streamed raw input data, progressively parse whole XML tree in memory**
+**Example 2: streamed raw input data, progressively parse the whole XML tree in memory**
 
-Here the XML tree is constructed on the fly as the raw bytes come in, instead of having to read everything into a string before we even begin constructing the XML tree.
+Here the XML tree is constructed on the fly as the raw bytes come in instead of having to read everything into a string before we even begin constructing the XML tree.
 ```ocaml
 let state = ref (Ok Xml.SAX.To_DOM.init) in
 let on_parse node =
@@ -301,7 +305,7 @@ The `folder` function takes 2 more arguments than `To_DOM.folder`:
 - `filter_path`: where to truncate the tree.
 - `on_match`: the callback invoked whenever an XML node is a direct child of `filter_path`.
 
-Example: given a standard HTML document, if `~filter_path:["html"; "head"]` then `on_match` will be called for every `<script>`, `<style>`, etc. Furthermore, `html -> head` will have no `children` because they were passed to `on_match` _instead_ of being added to the tree.
+Example: given a standard HTML document, if `~filter_path:["html"; "head"; "script"]` then `on_match` will be called for every `<script>` tag located within `<html><head>`. Furthermore, `html -> head` will have no `<script>` `children` because they were passed to `on_match` _instead_ of being added to the tree.
 
 Hence **shallow** DOM tree.
 
@@ -323,7 +327,9 @@ let on_match div =
 in
 let on_parse node =
   state := Xml.SAX.Stream.folder ~filter_path ~on_match !state node;
-  (* Here we can asynchronously process matches we saved from `on_match` by side effect *)
+  (* Here we can:
+    - inspect `node` and act on it
+    - asynchronously process matches we saved from `on_match` by side effect *)
   Lwt.return_unit
 in
 let* _rest, result =
@@ -338,11 +344,6 @@ match result, !state with
   failwith msg
 | Ok (), Ok shallow_tree ->
   (* Do something with `shallow_tree` *)
-  let* () =
-    Lwt_io.printl
-      (Option.value_map shallow_tree.decl_attrs ~default:"--" ~f:(fun x ->
-            Xml.sexp_of_attr_list x |> Sexp.to_string))
-  in
   Lwt.return_unit
 ```
 
@@ -375,9 +376,10 @@ let exact_file_from_zip ~extract_filename input_channel =
   (* 1. Create a `feed` function. This README contains examples of this towards the end. *)
   let feed = feed_string input_channel in
 
-  (* 2. Create a callback function. Here we skip all files except the one we're interested in.
+  (* 2. Create a callback function.
+      Here we skip all files except the one we're interested in.
       If you deem the file(s) too large for `Action.String`,
-      then look into `Action.Fold_string`, `Action.Fold_bigstring` and `Action.Angstrom` *)
+      then look into `Action.Fold_string`, `Action.Fold_bigstring` or `Action.Angstrom` *)
   let callback = function
     | ({ filename; _ } : Zip.entry) when String.(filename = extract_filename) -> Zip.Action.String
     | _ -> Zip.Action.Skip
@@ -389,7 +391,9 @@ let exact_file_from_zip ~extract_filename input_channel =
   (* 4. Work with the stream, but DO NOT AWAIT this promise!
       Again, do not bind unto this promise yet! *)
   let unzipped =
-    (* Here we're just going to flush out the contents of the stream by collecting into a list *)
+    (* As an example, we're just going to flush out the contents of the stream by collecting it into a list.
+        The ZIP parser will not pull more input from `feed` nor add more output to the stream
+        if the stream is already holding at least one unread element. *)
     let+ files = Lwt_stream.to_list stream in
     (* Due to our `callback` function, all values in `files` will be `Zip.Data.Skipped`,
         except for possibly one `Zip.Data.String` if the desired file (`extract_filename`)
@@ -407,7 +411,7 @@ let exact_file_from_zip ~extract_filename input_channel =
   let* unzipped = unzipped in
   match unzipped with
   | None -> failwithf "File `%s` not found in ZIP archive" extract_filename ()
-  | Some _raw ->
+  | Some raw ->
     (* Use `raw` file contents *)
     Lwt.return_unit
 ```
@@ -448,7 +452,7 @@ let feed_stream stream =
 
 #### Why `Lwt_stream`?
 
-It's a convenient way to expose this sort of functionality. Unfortunately it forces the library to also return a promise to pass back errors that killed the stream half way through. A future version might improve on this.
+It's a convenient way to expose this sort of functionality. Unfortunately it forces this library to also return a promise to pass back errors that killed the stream half way through. A future version might improve on this.
 
 #### Does it work in the browser?
 
@@ -469,8 +473,10 @@ depends: [
 
 #### Is it fast?
 
-Not really.
+Not really. It's fine.
 
 Streaming data is always going to be slower than deserializing a whole file into memory.
 
-Using 1 core on an older 2017 Macbook Pro, it processes an enormous 107MB, 28-column x 1,048,576-row XLSX file in 160 seconds **using only 27MB of memory**. The same file takes 70 seconds to open in LibreOffice using 2 cores and 1.8GB of memory.
+It takes a lot of processing to extract each row from an XLSX file: ZIP is a format designed for floppy disks and old hard drives, XML is far from efficient, and XLSX requires reading **a lot** of XML data just to produce one row of data.
+
+Using 1 core on an older 2017 Macbook Pro, SZXX processes an enormous 107MB, 28-column x 1,048,576-row XLSX file in 160 seconds **using only 27MB of memory**. The same file takes 70 seconds to open in LibreOffice using 2 cores and **1.8GB of memory**.

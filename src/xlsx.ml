@@ -72,39 +72,29 @@ let fold_angstrom ~filter_path ~on_match =
 
 let parse_sheet ~sheet_number push =
   let num = ref 0 in
-  let filter_path = [ "worksheet"; "sheetData"; "row" ] in
   let on_match (el : Xml.DOM.element) =
-    incr num;
-    let next = !num in
-    let row_number =
-      match Xml.get_attr el.attrs "r" with
-      | None -> next
-      | Some s -> (
-        try
-          let i = Int.of_string s in
-          if next < i
-          then begin
-            (* Insert blank rows *)
-            for row_number = next to pred i do
-              push { sheet_number; row_number; data = [||] }
-            done;
-            num := i;
-            i
-          end
-          else next
-        with
-        | _ -> next
-      )
-    in
-    push { sheet_number; row_number; data = el.children }
+    (match Xml.get_attr el.attrs "r" with
+    | None -> incr num
+    | Some s -> (
+      try
+        let i = Int.of_string s in
+        (* Insert blank rows *)
+        for row_number = !num to i - 2 do
+          push { sheet_number; row_number; data = [||] }
+        done;
+        num := i
+      with
+      | _ -> incr num
+    ));
+    push { sheet_number; row_number = !num; data = el.children }
   in
-  fold_angstrom ~filter_path ~on_match
+  fold_angstrom ~filter_path:[ "worksheet"; "sheetData"; "row" ] ~on_match
 
 let parse_string_cell el =
   let open Xml.DOM in
   match el |> dot "t" with
   | Some { text; _ } -> text
-  | None -> filter_map "r" el ~f:(fun r -> dot_text "t" r) |> String.concat_array
+  | None -> filter_map "r" el ~f:(dot_text "t") |> String.concat_array
 
 let flush_zip_stream zip_stream =
   Lwt_stream.filter_map
@@ -195,41 +185,55 @@ let unwrap_status cell_parser (sst : SST.t) (row : 'a status row) =
   in
   { row with data }
 
-let extract ~null location extractor : Xml.DOM.element option -> 'a status = function
-| None -> Available null
-| Some { text; _ } -> Available (extractor location text)
-
-let extract_cell ~sst { string; formula; error; boolean; number; date; null } location el =
+let extract_cell_sst, extract_cell_status =
   let open Xml.DOM in
-  match Xml.get_attr el.attrs "t" with
-  | None
-   |Some "n" ->
-    el |> dot "v" |> extract ~null location number
-  | Some "d" -> el |> dot "v" |> extract ~null location date
-  | Some "str" -> (
-    match el |> dot_text "v", el |> dot_text "f" with
-    | None, _ -> Available null
-    | Some s, Some f -> Available (formula location ~formula:f s)
-    | Some s, None -> Available (formula location ~formula:"" s)
-  )
-  | Some "inlineStr" -> (
-    match dot "is" el with
-    | None -> Available null
-    | Some el -> Available (string location (parse_string_cell el))
-  )
-  | Some "s" -> (
-    match el |> dot "v", sst with
-    | None, _ -> Available null
-    | Some { text = sst_index; _ }, None -> Delayed { location; sst_index }
-    | Some { text = sst_index; _ }, Some sst -> (
-      match resolve_sst_index sst ~sst_index with
-      | None -> Available null
-      | Some resolved -> Available (string location resolved)
+  let extract ~null location extractor : element option -> 'a = function
+    | None -> null
+    | Some { text; _ } -> extractor location text
+  in
+  let extract_cell_base { string; formula; error; boolean; number; date; null } location el ty =
+    match ty with
+    | None
+     |Some "n" ->
+      el |> dot "v" |> extract ~null location number
+    | Some "d" -> el |> dot "v" |> extract ~null location date
+    | Some "str" -> (
+      match el |> dot_text "v" with
+      | None -> null
+      | Some s -> formula location s ~formula:(el |> dot_text "f" |> Option.value ~default:"")
     )
-  )
-  | Some "e" -> el |> dot "v" |> extract ~null location error
-  | Some "b" -> el |> dot "v" |> extract ~null location boolean
-  | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
+    | Some "inlineStr" -> (
+      match dot "is" el with
+      | None -> null
+      | Some el -> string location (parse_string_cell el)
+    )
+    | Some "e" -> el |> dot "v" |> extract ~null location error
+    | Some "b" -> el |> dot "v" |> extract ~null location boolean
+    | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
+  in
+  let extract_cell_sst sst cell_parser location el =
+    match Xml.get_attr el.attrs "t" with
+    | Some "s" -> (
+      match el |> dot "v" with
+      | None -> cell_parser.null
+      | Some { text = sst_index; _ } -> (
+        match resolve_sst_index sst ~sst_index with
+        | None -> cell_parser.null
+        | Some resolved -> cell_parser.string location resolved
+      )
+    )
+    | ty -> extract_cell_base cell_parser location el ty
+  in
+  let extract_cell_status cell_parser location el =
+    match Xml.get_attr el.attrs "t" with
+    | Some "s" -> (
+      match el |> dot "v" with
+      | None -> Available cell_parser.null
+      | Some { text = sst_index; _ } -> Delayed { location; sst_index }
+    )
+    | ty -> Available (extract_cell_base cell_parser location el ty)
+  in
+  extract_cell_sst, extract_cell_status
 
 let col_cache = String.Table.create ()
 
@@ -242,36 +246,47 @@ let index_of_column s =
   String.Table.find_or_add col_cache key ~default:(fun () ->
       String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1)
 
-let parse_row ?sst cell_parser ({ data; sheet_number; row_number } as row) =
+let row_width num_cells data =
   let open Xml.DOM in
-  let num_cells = Array.length data in
-  match num_cells with
+  Xml.get_attr (Array.last data).attrs "r" |> function
+  | None -> num_cells
+  | Some r -> max num_cells (index_of_column r + 1)
+
+let parse_row_with_sst sst cell_parser ({ data; sheet_number; row_number } as row) =
+  let open Xml.DOM in
+  match Array.length data with
   | 0 -> { row with data = [||] }
   | num_cells ->
-    let num_cols =
-      Array.last data
-      |> (fun el -> Xml.get_attr el.attrs "r")
-      |> Option.value_map ~default:num_cells ~f:(fun r -> max num_cells (index_of_column r + 1))
-    in
-    let null = Available cell_parser.null in
-    let new_data = Array.create ~len:num_cols null in
+    let num_cols = row_width num_cells data in
+    let new_data = Array.create ~len:num_cols cell_parser.null in
     Array.iteri data ~f:(fun i el ->
         let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
-        let v = extract_cell ~sst cell_parser { col_index; sheet_number; row_number } el in
+        let v = extract_cell_sst sst cell_parser { col_index; sheet_number; row_number } el in
+        new_data.(col_index) <- v);
+    { row with data = new_data }
+
+let parse_row_without_sst cell_parser ({ data; sheet_number; row_number } as row) =
+  let open Xml.DOM in
+  match Array.length data with
+  | 0 -> { row with data = [||] }
+  | num_cells ->
+    let num_cols = row_width num_cells data in
+    let new_data = Array.create ~len:num_cols (Available cell_parser.null) in
+    Array.iteri data ~f:(fun i el ->
+        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
+        let v = extract_cell_status cell_parser { col_index; sheet_number; row_number } el in
         new_data.(col_index) <- v);
     { row with data = new_data }
 
 let stream_rows ?only_sheet ?(skip_sst = false) ~feed cell_parser =
   let stream, push = Lwt_stream.create () in
   let finalize () = push None in
-  let sst_ref = ref None in
 
   let sst_p, processed_p =
     process_file ?only_sheet ~skip_sst ~feed
-      (fun x -> push (Some (parse_row ?sst:!sst_ref cell_parser x)))
+      (fun x -> push (Some (parse_row_without_sst cell_parser x)))
       finalize
   in
-  Lwt.on_success sst_p (fun x -> sst_ref := Some x);
   stream, sst_p, processed_p
 
 let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~feed () =
@@ -289,8 +304,7 @@ let stream_rows_buffer ?only_sheet ~feed cell_parser =
   in
   let parsed_stream =
     Lwt_stream.map_s
-      (fun row ->
-        sst_p |> Lwt.map (fun sst -> parse_row cell_parser row |> unwrap_status cell_parser sst))
+      (fun row -> sst_p |> Lwt.map (fun sst -> parse_row_with_sst sst cell_parser row))
       stream
   in
   parsed_stream, processed_p
