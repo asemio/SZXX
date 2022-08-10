@@ -100,7 +100,7 @@ let print_rows_as_json xlsx_path =
 
 ### Streaming is hard
 
-⚠️ **XLSX Hazard #4** ⚠️ Unfortunately, the vast majority of applications that generate XLSX files will not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to an offset in the Shared Strings Table. This saves space, but 99.9% of the time the Shared Strings Table (SST) is located **after** the sheet! SZXX is a non-seeking parser: it can't skip ahead to parse the SST and then rewind to parse the spreadsheet!
+⚠️ **XLSX Hazard #4** ⚠️ Unfortunately, the vast majority of applications that generate XLSX files will not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to an offset in the Shared Strings Table (SST). This saves space, but 99.9% of the time the SST is located **after** the sheet! SZXX is a non-seeking parser: it can't skip ahead to parse the SST and then rewind to parse the spreadsheet.
 
 Therefore, the user must either:
 - ignore String cells
@@ -147,7 +147,7 @@ For those that do, the typical process is to filter out as many rows as possible
 let open Lwt.Syntax in
 let open SZXX.Xlsx in
 
-(* Step 1: Invoke `stream_rows` *)
+(* Step 1: Invoke `stream_rows`. Here we're using the built-in Yojson cell_parser *)
 let stream, sst_p, success = stream_rows ~feed yojson_cell_parser in
 
 (* Step 2: Filter out as many rows as possible by inspecting metadata (row_number, etc) and non-string data *)
@@ -174,7 +174,7 @@ let count =
       (* 99% of the time, the location of the SST is at the end of the XLSX file, meaning `sst_p` will
           only resolve AFTER SZXX has finished parsing your sheet (adding its rows to the stream).
           Therefore your program will consume as much RAM as necessary to store all the rows you
-          didn't filter out at Step 1 *)
+          didn't filter out in Step 2 *)
 
       (* await the SST. This causes buffering. *)
       let* sst = sst_p in
@@ -301,11 +301,11 @@ match result, !state with
 
 Fold your sequence/list/stream of `SAX.node` values into a **shallow** DOM tree.
 
-The `folder` function takes 2 more arguments than `To_DOM.folder`:
+The `folder` function takes 2 extra arguments over `To_DOM.folder`:
 - `filter_path`: where to truncate the tree.
-- `on_match`: the callback invoked whenever an XML node is a direct child of `filter_path`.
+- `on_match`: the callback invoked whenever an XML node matches `filter_path`.
 
-Example: given a standard HTML document, if `~filter_path:["html"; "head"; "script"]` then `on_match` will be called for every `<script>` tag located within `<html><head>`. Furthermore, `html -> head` will have no `<script>` `children` because they were passed to `on_match` _instead_ of being added to the tree.
+Example: given a standard HTML document, if `~filter_path:["html"; "head"; "script"]` then `on_match` will be called for every `<script>` tag located within `<html><head>`. Furthermore, `html -> head` will have no `<script>` children because they were passed to `on_match` _instead_ of being added to the tree.
 
 Hence **shallow** DOM tree.
 
