@@ -227,7 +227,7 @@ let test3 =
 <worksheet>
   <c>hello &amp; goodbye</c>
   <c>world<v>woot</v>WORLD<v>hurray</v></c>
-  <t xml:space="preserve"> &quot;hello!&quot;  world <x/>  &#124; &#xa; &#x1F1E8;&#x1F1E6; </t>
+  <t xml:space="preserve" scoped> &quot;hello!&quot;  world <x/>  &#124; &#xa; &#x1F1E8;&#x1F1E6; </t>
   <c>bad1: &abc&amp; -</c>
   <c>bad2: &#1welp; -</c>
 </worksheet>
@@ -266,7 +266,7 @@ let data3 =
       },
       {
         "tag": "t",
-        "attrs": [ [ "xml:space", "preserve" ] ],
+        "attrs": [ [ "xml:space", "preserve" ], [ "scoped", "" ] ],
         "text": " \"hello!\"  world   | \n 🇨🇦 ",
         "children": [
           { "tag": "x", "attrs": [], "text": "", "children": [] }

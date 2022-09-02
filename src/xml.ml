@@ -309,8 +309,6 @@ let is_ws = function
 
 let drop p = p >>| const ()
 
-let double x y = x, y
-
 let make_string_parser ~separator = char separator *> take_till (Char.( = ) separator) <* char separator
 
 let ws = skip_while is_ws
@@ -327,7 +325,9 @@ let parser =
     let sq_string = make_string_parser ~separator:'\'' in
     dq_string <|> sq_string
   in
-  let attr_parser = lift2 double (token_parser <* ws <* char '=') (ws *> xml_string_parser) in
+  let attr_parser =
+    lift2 Tuple2.create token_parser (option "" (ws *> char '=' *> ws *> xml_string_parser))
+  in
   let doctype_parser =
     let declaration =
       string "<!" *> token_parser *> ws *> skip_many (ws *> (token_parser <|> xml_string_parser))
