@@ -48,7 +48,8 @@ let parse_datetime ~zone f =
   let ofday = Time.Ofday.of_span_since_start_of_day_exn frac in
   Time.of_date_ofday ~zone date ofday
 
-let xml_parser = Xml.make_parser Xml.{ accept_html_boolean_attributes = false }
+let xml_parser =
+  Xml.make_parser Xml.{ accept_html_boolean_attributes = false; accept_unquoted_attributes = false }
 
 let fold_angstrom ~filter_path ~on_match =
   let open Angstrom.Buffered in

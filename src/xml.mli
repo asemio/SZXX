@@ -99,7 +99,10 @@ module SAX : sig
   end
 end
 
-type parser_options = { accept_html_boolean_attributes: bool }
+type parser_options = {
+  accept_html_boolean_attributes: bool;
+  accept_unquoted_attributes: bool;
+}
 
 val default_parser_options : parser_options
 

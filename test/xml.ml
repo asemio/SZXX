@@ -311,12 +311,13 @@ module Test4 = struct
     <link rel="stylesheet" href="/assets/css/main.css">
     <title>Group Income</title>
     back to the top
+    <!--<welp>welpo</welp>-->
   </head>
   <head2 xml:space="preserve">
     clear head   text
     <link rel="stylesheet" href="/assets/css/main.css">
     <meta charset="utf-8">
-    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    <meta http-equiv=x-ua-compatible content="ie=edge">
     some lost text
     <meta name="description" content="">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
@@ -490,9 +491,14 @@ type buffer = Buffer.t
 
 let sexp_of_buffer buf = Sexp.List [ Atom "Buffer"; Atom (Buffer.contents buf) ]
 
-let xml_to_dom ?strict test data () =
-  match Angstrom.parse_string ~consume:Angstrom.Consume.All (Angstrom.many SZXX.Xml.parser) test with
+let xml_to_dom ?(options = SZXX.Xml.default_parser_options) ?strict test data () =
+  match
+    Angstrom.parse_string ~consume:Angstrom.Consume.All
+      (Angstrom.many SZXX.Xml.(make_parser options))
+      test
+  with
   | Ok nodes ->
+    (* print_endline (sprintf !"%{sexp#hum: SZXX.Xml.SAX.node list}" nodes); *)
     let doc =
       match
         List.fold_result nodes ~init:SZXX.Xml.SAX.To_DOM.init ~f:(fun acc -> function
@@ -507,10 +513,14 @@ let xml_to_dom ?strict test data () =
     Lwt.return_unit
   | Error msg -> failwith msg
 
-let xml_stream ?strict test data filter_path () =
+let xml_stream ?(options = SZXX.Xml.default_parser_options) ?strict test data filter_path () =
   let queue = Queue.create () in
   let on_match x = Queue.enqueue queue x in
-  match Angstrom.parse_string ~consume:Angstrom.Consume.All (Angstrom.many SZXX.Xml.parser) test with
+  match
+    Angstrom.parse_string ~consume:Angstrom.Consume.All
+      (Angstrom.many SZXX.Xml.(make_parser options))
+      test
+  with
   | Ok nodes ->
     let _state =
       List.fold_result nodes ~init:SZXX.Xml.SAX.Stream.init ~f:(fun acc x ->
@@ -625,7 +635,7 @@ let readme_example3 () =
 
 let () =
   Lwt_main.run
-  @@ Alcotest_lwt.run "SZXX XML"
+  @@ Alcotest_lwt.run ~verbose:true "SZXX XML"
        [
          ( "XML",
            [
@@ -633,10 +643,16 @@ let () =
              "To DOM 2", `Quick, xml_to_dom Test2.raw Test2.data;
              "Stream 2", `Quick, xml_stream Test2.raw Test2.data_streamed [ "sst"; "si"; "t" ];
              "To DOM 3", `Quick, xml_to_dom Test3.raw Test3.data;
-             "To DOM 4", `Quick, xml_to_dom ~strict:false Test4.raw Test4.data;
+             ( "To DOM 4",
+               `Quick,
+               xml_to_dom ~strict:false
+                 ~options:{ accept_html_boolean_attributes = true; accept_unquoted_attributes = true }
+                 Test4.raw Test4.data );
              ( "Stream 4",
                `Quick,
-               xml_stream ~strict:false Test4.raw Test4.data_streamed [ "html"; "head"; "meta" ] );
+               xml_stream ~strict:false
+                 ~options:{ accept_html_boolean_attributes = true; accept_unquoted_attributes = true }
+                 Test4.raw Test4.data_streamed [ "html"; "head"; "meta" ] );
              "Sync To_DOM", `Quick, readme_example1;
              "Async To_DOM", `Quick, readme_example2;
              "Async Stream", `Quick, readme_example3;

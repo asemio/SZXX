@@ -330,7 +330,6 @@ let unescape original =
 
 let is_token = function
 | '"'
- |'\''
  |'='
  |'<'
  |'?'
@@ -362,15 +361,34 @@ let blank = skip_many (ws *> comment) *> ws
 
 let token_parser = take_while1 is_token
 
-type parser_options = { accept_html_boolean_attributes: bool }
+type parser_options = {
+  accept_html_boolean_attributes: bool;
+  accept_unquoted_attributes: bool;
+}
 
-let default_parser_options = { accept_html_boolean_attributes = true }
+let default_parser_options = { accept_html_boolean_attributes = true; accept_unquoted_attributes = false }
 
-let make_parser { accept_html_boolean_attributes } =
+let make_parser { accept_html_boolean_attributes; accept_unquoted_attributes } =
   let xml_string_parser =
     let dq_string = make_string_parser ~separator:'"' in
     let sq_string = make_string_parser ~separator:'\'' in
-    dq_string <|> sq_string
+    if accept_unquoted_attributes
+    then (
+      let uq_string =
+        take_while1 (function
+          | ' '
+           |'"'
+           |'\''
+           |'='
+           |'<'
+           |'>'
+           |'`' ->
+            false
+          | _ -> true)
+      in
+      choice [ dq_string; sq_string; uq_string ]
+    )
+    else choice [ dq_string; sq_string ]
   in
   let attr_parser =
     let value_parser = ws *> char '=' *> ws *> xml_string_parser in
@@ -391,6 +409,7 @@ let make_parser { accept_html_boolean_attributes } =
        )
     >>| const SAX.Nothing
   in
+  let comment_parser = comment >>| const SAX.Nothing in
   let prologue_parser =
     (* UTF-8 BOM *)
     option "" (string "\xEF\xBB\xBF")
@@ -416,25 +435,28 @@ let make_parser { accept_html_boolean_attributes } =
     string "</" *> ws *> (token_parser >>| fun s -> SAX.Element_close s) <* (ws <* char '>')
   in
   let text_parser = take_while1 is_text >>| fun s -> SAX.Text s in
+  let slow_path =
+    choice
+      [
+        element_close_parser;
+        element_open_parser;
+        text_parser;
+        comment_parser;
+        cdata_parser;
+        prologue_parser;
+        doctype_parser;
+      ]
+  in
   let fast_path =
     peek_string 2 >>= function
     | "</" -> element_close_parser
-    | "<!" -> cdata_parser <|> doctype_parser
+    | "<!" -> choice [ comment_parser; cdata_parser; doctype_parser ]
+    | s when is_token s.[0] -> text_parser
+    | s when Char.(s.[0] = '<') -> element_open_parser
     | "<?"
      |"\xEF\xBB" ->
       prologue_parser
-    | s -> (
-      match s.[0] with
-      | '<' -> element_open_parser
-      | c when is_token c -> text_parser
-      | _ -> fail "Lookahead impossible"
-    )
-  in
-  let slow_path =
-    let node =
-      choice [ element_close_parser; element_open_parser; cdata_parser; prologue_parser; doctype_parser ]
-    in
-    skip_many (ws *> comment) *> (node <|> text_parser)
+    | _ -> fail "Lookahead impossible"
   in
   fast_path <|> slow_path
 
