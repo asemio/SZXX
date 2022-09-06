@@ -95,7 +95,7 @@ module Storage = struct
       do_uncompress ()
     in
     let add bs len = finished := uncompress bs len in
-    let finalize () = if not !finished then ignore (uncompress outbs 0) in
+    let finalize () = if not !finished then ignore (uncompress outbs 0 : bool) in
     { add; finalize }
 
   let stored flush =

@@ -56,15 +56,72 @@ module SAX = struct
     | Many          of node list
   [@@deriving sexp_of]
 
-  module To_DOM = struct
-    type partial = {
-      tag: string;
-      attrs: attr_list;
-      buf: Buffer.t;
-      children: DOM.element Queue.t;
-    }
-    [@@deriving sexp_of]
+  type partial_text = {
+    literal: bool;
+    raw: string;
+  }
+  [@@deriving sexp_of]
 
+  type partial = {
+    tag: string;
+    attrs: attr_list;
+    text: partial_text Queue.t;
+    children: DOM.element Queue.t;
+    staged: DOM.element Queue.t;
+  }
+  [@@deriving sexp_of]
+
+  let make_partial tag attrs =
+    {
+      tag;
+      attrs;
+      text = Queue.create ~capacity:4 ();
+      children = Queue.create ~capacity:4 ();
+      staged = Queue.create ~capacity:2 ();
+    }
+
+  let is_ws = function
+  | '\x20'
+   |'\x0d'
+   |'\x09'
+   |'\x0a' ->
+    true
+  | _ -> false
+
+  let squish_into raw final acc =
+    String.fold raw ~init:acc ~f:(fun acc c ->
+        match acc with
+        | after_first, _ when is_ws c -> after_first, true
+        | true, true ->
+          Buffer.add_char final ' ';
+          Buffer.add_char final c;
+          true, false
+        | _ ->
+          Buffer.add_char final c;
+          true, false)
+
+  let render attrs text =
+    match Queue.length text with
+    | 0 -> ""
+    | 1 when (Queue.get text 0).literal -> (Queue.get text 0).raw
+    | _ ->
+      let final = Buffer.create 16 in
+      let preserve_space = lazy (preserve_space attrs) in
+      let _prev_ws =
+        Queue.fold text ~init:(false, false) ~f:(fun ((after_first, prev_ws) as acc) -> function
+          | { raw = ""; _ } -> acc
+          | { literal; raw } when literal || force preserve_space ->
+            if after_first && not prev_ws then Buffer.add_char final ' ';
+            Buffer.add_string final raw;
+            true, is_ws raw.[String.length raw - 1]
+          | { raw; _ } -> squish_into raw final (if after_first then true, true else acc))
+      in
+      Buffer.contents final
+
+  let partial_to_element { tag; attrs; text; children; _ } =
+    DOM.{ tag; attrs; text = render attrs text; children = Queue.to_array children }
+
+  module To_DOM = struct
     type state = {
       decl_attrs: attr_list option;
       stack: partial list;
@@ -74,56 +131,48 @@ module SAX = struct
 
     let init = { decl_attrs = None; stack = []; top = None }
 
-    let partial_to_element { tag; attrs; buf; children; _ } =
-      DOM.{ tag; attrs; text = Buffer.contents buf; children = Queue.to_array children }
-
-    let rec folder acc (node : node) =
+    let rec folder ?(strict = true) acc (node : node) =
       match node, acc with
       | _, Error _ -> acc
       | Nothing, Ok _ -> acc
-      | Many ll, Ok acc -> List.fold_result ll ~init:acc ~f:(fun acc x -> folder (Ok acc) x)
+      | Many ll, Ok acc -> List.fold_result ll ~init:acc ~f:(fun acc x -> folder ~strict (Ok acc) x)
       | Prologue attrs, Ok ({ decl_attrs = None; stack = []; top = None; _ } as acc) ->
         Ok { acc with decl_attrs = Some attrs }
       | Prologue _, Ok _ -> Error "The prologue must located at the beginning of the file"
       | Element_open { tag; attrs }, Ok acc ->
-        let partial = { tag; attrs; buf = Buffer.create 16; children = Queue.create ~capacity:4 () } in
+        let partial = make_partial tag attrs in
         Ok { acc with stack = partial :: acc.stack }
-      | Text s, Ok { stack = []; top = None; _ } ->
-        Error (sprintf "Invalid document. Text not contained within an element: \"%s\"" s)
-      | Cdata s, Ok { stack = []; top = None; _ } ->
-        Error (sprintf "Invalid document. CDATA not contained within an element: \"%s\"" s)
+      | Text _, Ok { stack = []; top = None; _ }
+       |Cdata _, Ok { stack = []; top = None; _ } ->
+        acc
       | Text _, Ok { stack = []; top = Some _; _ }
        |Cdata _, Ok { stack = []; top = Some _; _ } ->
         acc
-      | Text s, Ok { stack = { buf; attrs; _ } :: _; _ }
-       |Cdata s, Ok { stack = { buf; attrs; _ } :: _; _ } ->
-        let preserve = preserve_space attrs in
-        if Buffer.length buf > 0 && not (preserve && String.is_prefix s ~prefix:" ")
-        then Buffer.add_char buf ' ';
-        Buffer.add_string buf (if preserve then s else String.strip s);
+      | Text s, Ok { stack = current :: _; _ } ->
+        Queue.enqueue current.text { raw = s; literal = false };
+        acc
+      | Cdata s, Ok { stack = current :: _; _ } ->
+        Queue.enqueue current.text { raw = s; literal = true };
         acc
       | Element_close tag, Ok ({ stack = current :: (parent :: _ as rest); _ } as acc)
         when String.( = ) tag current.tag ->
         Queue.enqueue parent.children (partial_to_element current);
+        Queue.blit_transfer ~src:parent.staged ~dst:parent.children ();
         Ok { acc with stack = rest }
       | Element_close tag, Ok ({ stack = [ current ]; top = None; _ } as acc)
         when String.( = ) tag current.tag ->
         Ok { acc with stack = []; top = Some (partial_to_element current) }
-      | Element_close tag, Ok { stack = current :: _ :: _; _ } ->
-        Error (sprintf "Invalid document. Closing element \"%s\" before element \"%s\"" tag current.tag)
+      | Element_close tag, Ok { stack = current :: _ :: _; _ } when strict ->
+        Error (sprintf "Invalid document. Closing element '%s' before element '%s'" tag current.tag)
+      | (Element_close _ as tried), Ok { stack = current :: parent :: _; _ } ->
+        Queue.blit_transfer ~src:current.children ~dst:parent.staged ();
+        Queue.blit_transfer ~src:current.text ~dst:parent.text ();
+        folder ~strict acc (Many [ Element_close current.tag; tried ])
       | Element_close tag, Ok _ ->
-        Error (sprintf "Invalid document. Closing tag without matching opening tag: %s" tag)
+        Error (sprintf "Invalid document. Closing tag without a matching opening tag: '%s'" tag)
   end
 
   module Stream = struct
-    type partial = {
-      tag: string;
-      attrs: attr_list;
-      buf: Buffer.t;
-      children: DOM.element Queue.t;
-    }
-    [@@deriving sexp_of]
-
     type state = {
       decl_attrs: attr_list option;
       stack: partial list;
@@ -134,20 +183,17 @@ module SAX = struct
 
     let init = { decl_attrs = None; stack = []; path_stack = [ "" ]; top = None }
 
-    let partial_to_element { tag; attrs; buf; children; _ } =
-      DOM.{ tag; attrs; text = Buffer.contents buf; children = Queue.to_array children }
-
-    let rec folder ~filter_path ~on_match acc (node : node) =
+    let rec folder ~filter_path ~on_match ~strict acc (node : node) =
       match node, acc with
       | _, Error _ -> acc
       | Nothing, Ok _ -> acc
       | Many ll, Ok acc ->
-        List.fold_result ll ~init:acc ~f:(fun acc x -> folder ~filter_path ~on_match (Ok acc) x)
+        List.fold_result ll ~init:acc ~f:(fun acc x -> folder ~filter_path ~on_match ~strict (Ok acc) x)
       | Prologue attrs, Ok ({ decl_attrs = None; stack = []; top = None; _ } as acc) ->
         Ok { acc with decl_attrs = Some attrs }
       | Prologue _, Ok _ -> Error "The prologue must located at the beginning of the file"
       | Element_open { tag; attrs }, Ok ({ path_stack = path :: _; _ } as acc) ->
-        let partial = { tag; attrs; buf = Buffer.create 16; children = Queue.create ~capacity:4 () } in
+        let partial = make_partial tag attrs in
         Ok
           {
             acc with
@@ -156,17 +202,16 @@ module SAX = struct
           }
       | Element_open _, Ok { path_stack = []; _ } ->
         Error "Impossible case. Path stack cannot be empty. Please report this bug."
-      | Text s, Ok { stack = []; top = None; _ } ->
-        Error (sprintf "Invalid document. Text not contained within an element: %s" s)
-      | Cdata s, Ok { stack = []; top = None; _ } ->
-        Error (sprintf "Invalid document. CDATA not contained within an element: %s" s)
-      | Text s, Ok { stack = { buf; attrs; _ } :: _; path_stack = path :: _; _ }
-       |Cdata s, Ok { stack = { buf; attrs; _ } :: _; path_stack = path :: _; _ }
+      | Text _, Ok { stack = []; top = None; _ }
+       |Cdata _, Ok { stack = []; top = None; _ } ->
+        acc
+      | Text s, Ok { stack = current :: _; path_stack = path :: _; _ }
         when String.is_prefix path ~prefix:filter_path ->
-        let preserve = preserve_space attrs in
-        if Buffer.length buf > 0 && not (preserve && String.is_prefix s ~prefix:" ")
-        then Buffer.add_char buf ' ';
-        Buffer.add_string buf (if preserve then s else String.strip s);
+        Queue.enqueue current.text { raw = s; literal = false };
+        acc
+      | Cdata s, Ok { stack = current :: _; path_stack = path :: _; _ }
+        when String.is_prefix path ~prefix:filter_path ->
+        Queue.enqueue current.text { raw = s; literal = true };
         acc
       | Text _, Ok _
        |Cdata _, Ok _ ->
@@ -182,16 +227,21 @@ module SAX = struct
           (* Children of filter_path *)
           Queue.enqueue parent.children (partial_to_element current)
         | false -> ());
+        Queue.blit_transfer ~src:parent.staged ~dst:parent.children ();
         Ok { acc with stack = rest; path_stack = path_rest }
       | Element_close tag, Ok ({ stack = [ current ]; top = None; _ } as acc)
         when String.( = ) tag current.tag ->
         Ok { acc with stack = []; top = Some (partial_to_element current) }
-      | Element_close tag, Ok { stack = current :: _ :: _; _ } ->
+      | Element_close tag, Ok { stack = current :: _ :: _; _ } when strict ->
         Error (sprintf "Invalid document. Closing element '%s' before element '%s'" tag current.tag)
+      | (Element_close _ as tried), Ok { stack = current :: parent :: _; _ } ->
+        Queue.blit_transfer ~src:current.children ~dst:parent.staged ();
+        Queue.blit_transfer ~src:current.text ~dst:parent.text ();
+        folder ~filter_path ~on_match ~strict acc (Many [ Element_close current.tag; tried ])
       | Element_close tag, Ok _ ->
-        Error (sprintf "Invalid document. Closing tag without matching opening tag: %s" tag)
+        Error (sprintf "Invalid document. Closing tag without a matching opening tag: '%s'" tag)
 
-    let folder ~filter_path:path_list ~on_match acc node =
+    let folder ~filter_path:path_list ~on_match ?(strict = true) acc node =
       let filter_path =
         let buf = Buffer.create 30 in
         List.iter path_list ~f:(fun s ->
@@ -199,7 +249,7 @@ module SAX = struct
             Buffer.add_string buf s);
         Buffer.contents buf
       in
-      folder ~filter_path ~on_match acc (node : node)
+      folder ~filter_path ~on_match ~strict acc (node : node)
   end
 end
 
@@ -284,6 +334,7 @@ let is_token = function
  |'='
  |'<'
  |'?'
+ |'!'
  |'/'
  |'>'
  |'['
@@ -299,19 +350,11 @@ let is_text = function
 | '<' -> false
 | _ -> true
 
-let is_ws = function
-| '\x20'
- |'\x0d'
- |'\x09'
- |'\x0a' ->
-  true
-| _ -> false
-
 let drop p = p >>| const ()
 
 let make_string_parser ~separator = char separator *> take_till (Char.( = ) separator) <* char separator
 
-let ws = skip_while is_ws
+let ws = skip_while SAX.is_ws
 
 let comment = string "<!--" *> Parsing.skip_until_pattern ~pattern:"-->"
 
@@ -319,14 +362,20 @@ let blank = skip_many (ws *> comment) *> ws
 
 let token_parser = take_while1 is_token
 
-let parser =
+type parser_options = { accept_html_boolean_attributes: bool }
+
+let default_parser_options = { accept_html_boolean_attributes = true }
+
+let make_parser { accept_html_boolean_attributes } =
   let xml_string_parser =
     let dq_string = make_string_parser ~separator:'"' in
     let sq_string = make_string_parser ~separator:'\'' in
     dq_string <|> sq_string
   in
   let attr_parser =
-    lift2 Tuple2.create token_parser (option "" (ws *> char '=' *> ws *> xml_string_parser))
+    let value_parser = ws *> char '=' *> ws *> xml_string_parser in
+    lift2 Tuple2.create token_parser
+      (if accept_html_boolean_attributes then option "" value_parser else value_parser)
   in
   let doctype_parser =
     let declaration =
@@ -335,7 +384,7 @@ let parser =
       <* char '>'
     in
     let declarations = char '[' *> skip_many (blank *> declaration) <* blank <* char ']' in
-    string "<!DOCTYPE"
+    (string "<!DOCTYPE" <|> string "<!doctype")
     *> (skip_many (blank *> choice [ drop token_parser; drop xml_string_parser; declarations ])
        <* blank
        <* char '>'
@@ -385,6 +434,8 @@ let parser =
     let node =
       choice [ element_close_parser; element_open_parser; cdata_parser; prologue_parser; doctype_parser ]
     in
-    skip_many (ws *> comment) *> (ws *> node <|> text_parser)
+    skip_many (ws *> comment) *> (node <|> text_parser)
   in
   fast_path <|> slow_path
+
+let parser = make_parser default_parser_options

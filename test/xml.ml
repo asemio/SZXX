@@ -1,7 +1,8 @@
 open! Core_kernel
 
-let test1 =
-  {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?> <!DOCTYPE stylesheet [<!ENTITY
+module Test1 = struct
+  let raw =
+    {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?> <!DOCTYPE stylesheet [<!ENTITY
 nbsp "<xsl:text
 disable-output-escaping='yes'>&amp;nbsp;</xsl:text>">
   <!ELEMENT html (head, body)>
@@ -32,9 +33,9 @@ comment -->
     </worksheet>
     |s}
 
-let data1 =
-  Yojson.Safe.from_string
-    {json|
+  let data =
+    Yojson.Safe.from_string
+      {json|
 {
   "decl_attrs": [
     [ "version", "1.0" ],
@@ -104,7 +105,7 @@ let data1 =
       {
         "tag": "t",
         "attrs": [],
-        "text": "hello  world y",
+        "text": "hello world y",
         "children": [
           { "tag": "x", "attrs": [], "text": "", "children": [] }
         ]
@@ -121,18 +122,20 @@ let data1 =
   }
 }
 |json}
+end
 
-let test2 =
-  {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+module Test2 = struct
+  let raw =
+    {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="3" uniqueCount="3"><si><t xml:space="preserve">hello</t></si><si><t xml:space="preserve">world</t></si><si><t xml:space="preserve">ok bye</t></si></sst>
 
 |s}
-  (* UTF-8 BOM *)
-  |> sprintf "\xEF\xBB\xBF%s"
+    (* UTF-8 BOM *)
+    |> sprintf "\xEF\xBB\xBF%s"
 
-let data2 =
-  Yojson.Safe.from_string
-    {json|
+  let data =
+    Yojson.Safe.from_string
+      {json|
 {
   "decl_attrs": [
     [ "version", "1.0" ],
@@ -194,9 +197,9 @@ let data2 =
 }
 |json}
 
-let data2b =
-  Yojson.Safe.from_string
-    {json|
+  let data_streamed =
+    Yojson.Safe.from_string
+      {json|
 {
   "data": [
     {
@@ -220,9 +223,11 @@ let data2b =
   ]
 }
 |json}
+end
 
-let test3 =
-  {s|
+module Test3 = struct
+  let raw =
+    {s|
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet>
   <c>hello &amp; goodbye</c>
@@ -232,12 +237,12 @@ let test3 =
   <c>bad2: &#1welp; -</c>
 </worksheet>
 |s}
-  (* UTF-8 BOM *)
-  |> sprintf "\xEF\xBB\xBF%s"
+    (* UTF-8 BOM *)
+    |> sprintf "\xEF\xBB\xBF%s"
 
-let data3 =
-  Yojson.Safe.from_string
-    {json|
+  let data =
+    Yojson.Safe.from_string
+      {json|
 {
   "decl_attrs": [
     [ "version", "1.0" ],
@@ -288,6 +293,184 @@ let data3 =
   }
 }
 |json}
+end
+
+module Test4 = struct
+  let raw =
+    {s|
+<!doctype html>
+<html lang="eng">
+  <head>
+    clear head   text
+    <meta charset="utf-8">X
+    <link rel="stylesheet" href="/assets/css/main.css">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    some lost text
+    <meta name="description" content="">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+    <link rel="stylesheet" href="/assets/css/main.css">
+    <title>Group Income</title>
+    back to the top
+  </head>
+  <head2 xml:space="preserve">
+    clear head   text
+    <link rel="stylesheet" href="/assets/css/main.css">
+    <meta charset="utf-8">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    some lost text
+    <meta name="description" content="">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+    <link rel="stylesheet" href="/assets/css/main.css">
+    <title>Group Income</title>
+    back to the top
+  </head2>
+  <body scoped>
+    <span>BOO!</span>
+  </body>
+</html>
+|s}
+
+  let data =
+    Yojson.Safe.from_string
+      {json|
+{
+  "decl_attrs": null,
+  "top": {
+    "tag": "html",
+    "attrs": [ [ "lang", "eng" ] ],
+    "text": "",
+    "children": [
+      {
+        "tag": "head",
+        "attrs": [],
+        "text": "clear head text X some lost text back to the top",
+        "children": [
+          {
+            "tag": "meta",
+            "attrs": [ [ "charset", "utf-8" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "link",
+            "attrs": [ [ "rel", "stylesheet" ], [ "href", "/assets/css/main.css" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "meta",
+            "attrs": [ [ "http-equiv", "x-ua-compatible" ], [ "content", "ie=edge" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "meta",
+            "attrs": [ [ "name", "description" ], [ "content", "" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "meta",
+            "attrs": [ [ "name", "viewport" ], [ "content", "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "link",
+            "attrs": [ [ "rel", "stylesheet" ], [ "href", "/assets/css/main.css" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "title",
+            "attrs": [],
+            "text": "Group Income",
+            "children": []
+          }
+        ]
+      },
+      {
+        "tag": "head2",
+        "attrs": [ [ "xml:space", "preserve" ] ],
+        "text": "\n    clear head   text\n    \n    \n    \n    some lost text\n    \n    \n    \n    \n    back to the top\n  ",
+        "children": [
+          {
+            "tag": "link",
+            "attrs": [ [ "rel", "stylesheet" ], [ "href", "/assets/css/main.css" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "meta",
+            "attrs": [ [ "charset", "utf-8" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "meta",
+            "attrs": [ [ "http-equiv", "x-ua-compatible" ], [ "content", "ie=edge" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "meta",
+            "attrs": [ [ "name", "description" ], [ "content", "" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "meta",
+            "attrs": [ [ "name", "viewport" ], [ "content", "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "link",
+            "attrs": [ [ "rel", "stylesheet" ], [ "href", "/assets/css/main.css" ] ],
+            "text": "",
+            "children": []
+          },
+          {
+            "tag": "title",
+            "attrs": [],
+            "text": "Group Income",
+            "children": []
+          }
+        ]
+      },
+      {
+        "tag": "body",
+        "attrs": [ [ "scoped", "" ] ],
+        "text": "",
+        "children": [
+          {
+            "tag": "span",
+            "attrs": [],
+            "text": "BOO!",
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+}
+|json}
+
+  let data_streamed =
+    Yojson.Safe.from_string
+      {json|
+{
+"data": [
+  {
+    "tag": "meta",
+    "attrs": [ [ "charset", "utf-8" ] ],
+    "text": "",
+    "children": []
+  }
+]
+}
+|json}
+end
 
 type element = SZXX.Xml.DOM.element = {
   tag: string;
@@ -307,14 +490,14 @@ type buffer = Buffer.t
 
 let sexp_of_buffer buf = Sexp.List [ Atom "Buffer"; Atom (Buffer.contents buf) ]
 
-let xml_to_dom test data () =
+let xml_to_dom ?strict test data () =
   match Angstrom.parse_string ~consume:Angstrom.Consume.All (Angstrom.many SZXX.Xml.parser) test with
   | Ok nodes ->
     let doc =
       match
         List.fold_result nodes ~init:SZXX.Xml.SAX.To_DOM.init ~f:(fun acc -> function
-          | Text s -> SZXX.Xml.SAX.To_DOM.folder (Ok acc) (Text (SZXX.Xml.unescape s))
-          | el -> SZXX.Xml.SAX.To_DOM.folder (Ok acc) el)
+          | Text s -> SZXX.Xml.SAX.To_DOM.folder ?strict (Ok acc) (Text (SZXX.Xml.unescape s))
+          | el -> SZXX.Xml.SAX.To_DOM.folder ?strict (Ok acc) el)
       with
       | Ok { decl_attrs; stack = []; top = Some top; _ } -> { decl_attrs; top }
       | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.To_DOM.state}" state ()
@@ -324,14 +507,14 @@ let xml_to_dom test data () =
     Lwt.return_unit
   | Error msg -> failwith msg
 
-let xml_stream test data filter_path () =
+let xml_stream ?strict test data filter_path () =
   let queue = Queue.create () in
   let on_match x = Queue.enqueue queue x in
   match Angstrom.parse_string ~consume:Angstrom.Consume.All (Angstrom.many SZXX.Xml.parser) test with
   | Ok nodes ->
     let _state =
       List.fold_result nodes ~init:SZXX.Xml.SAX.Stream.init ~f:(fun acc x ->
-          SZXX.Xml.SAX.Stream.folder ~filter_path ~on_match (Ok acc) x)
+          SZXX.Xml.SAX.Stream.folder ?strict ~filter_path ~on_match (Ok acc) x)
     in
     let streamed = `Assoc [ "data", [%to_yojson: element array] (Queue.to_array queue) ] in
     Json_diff.check streamed data;
@@ -365,7 +548,7 @@ let readme_example2 () =
   let open Lwt.Syntax in
   let open SZXX in
   let input_channel, output_channel = Lwt_io.pipe () in
-  let* () = Lwt_io.write output_channel test1 in
+  let* () = Lwt_io.write output_channel Test1.raw in
   let* () = Lwt_io.close output_channel in
 
   let state = ref (Ok Xml.SAX.To_DOM.init) in
@@ -446,10 +629,14 @@ let () =
        [
          ( "XML",
            [
-             "To DOM 1", `Quick, xml_to_dom test1 data1;
-             "To DOM 2", `Quick, xml_to_dom test2 data2;
-             "Stream 2", `Quick, xml_stream test2 data2b [ "sst"; "si"; "t" ];
-             "To DOM 3", `Quick, xml_to_dom test3 data3;
+             "To DOM 1", `Quick, xml_to_dom Test1.raw Test1.data;
+             "To DOM 2", `Quick, xml_to_dom Test2.raw Test2.data;
+             "Stream 2", `Quick, xml_stream Test2.raw Test2.data_streamed [ "sst"; "si"; "t" ];
+             "To DOM 3", `Quick, xml_to_dom Test3.raw Test3.data;
+             "To DOM 4", `Quick, xml_to_dom ~strict:false Test4.raw Test4.data;
+             ( "Stream 4",
+               `Quick,
+               xml_stream ~strict:false Test4.raw Test4.data_streamed [ "html"; "head"; "meta" ] );
              "Sync To_DOM", `Quick, readme_example1;
              "Async To_DOM", `Quick, readme_example2;
              "Async Stream", `Quick, readme_example3;

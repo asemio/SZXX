@@ -48,13 +48,15 @@ let parse_datetime ~zone f =
   let ofday = Time.Ofday.of_span_since_start_of_day_exn frac in
   Time.of_date_ofday ~zone date ofday
 
+let xml_parser = Xml.make_parser Xml.{ accept_html_boolean_attributes = false }
+
 let fold_angstrom ~filter_path ~on_match =
   let open Angstrom.Buffered in
   let rec loop state acc =
     match state, acc with
     | Done ({ buf; off = pos; len }, node), acc -> (
       let acc = Xml.SAX.Stream.folder ~filter_path ~on_match acc node in
-      match parse Xml.parser with
+      match parse xml_parser with
       | Partial feed -> (loop [@tailcall]) (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len))) acc
       | state -> (loop [@tailcall]) state acc
     )
@@ -68,7 +70,7 @@ let fold_angstrom ~filter_path ~on_match =
     | (Done _ as parse), Ok _ -> parse, Error "Impossible case Done. Please report this bug."
     | Partial feed, (Ok _ as acc) -> loop (feed (`Bigstring (Bigstring.sub_shared bs ~pos:0 ~len))) acc
   in
-  Zip.Action.Fold_bigstring { init = parse Xml.parser, Ok Xml.SAX.Stream.init; f }
+  Zip.Action.Fold_bigstring { init = parse xml_parser, Ok Xml.SAX.Stream.init; f }
 
 let parse_sheet ~sheet_number push =
   let num = ref 0 in

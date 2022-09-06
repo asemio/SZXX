@@ -127,6 +127,54 @@ let count_types xlsx_path =
            xlsx_path !string !ss !formula !error !boolean !number !date);
       Lwt.return_unit)
 
+let count_total_string_length xlsx_path =
+  let t0 = Time_now.nanoseconds_since_unix_epoch () in
+  let* sst =
+    Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
+        Xlsx.SST.from_zip ~feed:(feed_bigstring ic))
+  in
+  let t1 = Time_now.nanoseconds_since_unix_epoch () in
+  print_endline
+    (sprintf !"%s" (Int63.(t1 - t0 |> to_float) |> Time.Span.of_ns |> Time.Span.to_string_hum));
+  let num_rows = ref 0 in
+  let num_strings = ref 0 in
+  let total_length = ref 0 in
+  let cell_parser =
+    Xlsx.
+      {
+        string =
+          (fun _location s ->
+            incr num_strings;
+            total_length := !total_length + String.length s);
+        formula = (fun _location ~formula:_ _s -> ());
+        error = (fun _location _s -> ());
+        boolean = (fun _location _s -> ());
+        number = (fun _location _s -> ());
+        date = (fun _location _s -> ());
+        null = ();
+      }
+  in
+  let* () =
+    Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
+        let stream, _sst, success =
+          Xlsx.stream_rows_unparsed ~skip_sst:true ~feed:(feed_bigstring ic) ()
+        in
+        let processed =
+          Lwt_stream.iter
+            (fun el ->
+              let _row = Xlsx.parse_row_with_sst sst cell_parser el in
+              incr num_rows)
+            stream
+        in
+        let* () = success in
+        processed)
+  in
+  print_endline
+    (sprintf
+       !"Rows: %d\nStrings: %d\nTotal string length: %{Int.to_string_hum}"
+       !num_rows !num_strings !total_length);
+  Lwt.return_unit
+
 let () =
   Sys.argv |> function
   | [| _; "extract_sst"; file |] -> Lwt_main.run (extract_sst file)
@@ -134,4 +182,5 @@ let () =
   | [| _; "length"; file |] -> Lwt_main.run (length file)
   | [| _; "show_json"; file |] -> Lwt_main.run (show_json file)
   | [| _; "count_types"; file |] -> Lwt_main.run (count_types file)
+  | [| _; "count_length"; file |] -> Lwt_main.run (count_total_string_length file)
   | _ -> failwith "Invalid arguments"

@@ -50,15 +50,22 @@ module SAX : sig
     | Many          of node list
   [@@deriving sexp_of]
 
-  module To_DOM : sig
-    type partial = {
-      tag: string;
-      attrs: attr_list;
-      buf: Buffer.t;
-      children: DOM.element Queue.t;
-    }
-    [@@deriving sexp_of]
+  type partial_text = {
+    literal: bool;
+    raw: string;
+  }
+  [@@deriving sexp_of]
 
+  type partial = {
+    tag: string;
+    attrs: attr_list;
+    text: partial_text Queue.t;
+    children: DOM.element Queue.t;
+    staged: DOM.element Queue.t;
+  }
+  [@@deriving sexp_of]
+
+  module To_DOM : sig
     type state = {
       decl_attrs: attr_list option;
       stack: partial list;
@@ -68,18 +75,10 @@ module SAX : sig
 
     val init : state
 
-    val folder : (state, string) result -> node -> (state, string) result
+    val folder : ?strict:bool -> (state, string) result -> node -> (state, string) result
   end
 
   module Stream : sig
-    type partial = {
-      tag: string;
-      attrs: attr_list;
-      buf: Buffer.t;
-      children: DOM.element Queue.t;
-    }
-    [@@deriving sexp_of]
-
     type state = {
       decl_attrs: attr_list option;
       stack: partial list;
@@ -93,11 +92,18 @@ module SAX : sig
     val folder :
       filter_path:string list ->
       on_match:(DOM.element -> unit) ->
+      ?strict:bool ->
       (state, string) result ->
       node ->
       (state, string) result
   end
 end
+
+type parser_options = { accept_html_boolean_attributes: bool }
+
+val default_parser_options : parser_options
+
+val make_parser : parser_options -> SAX.node Angstrom.t
 
 (**
    IO-agnostic [Angstrom.t] parser.
