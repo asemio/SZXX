@@ -175,6 +175,51 @@ let count_total_string_length xlsx_path =
        !num_rows !num_strings !total_length);
   Lwt.return_unit
 
+let count_tokens xlsx_path =
+  let num_prologue = ref 0 in
+  let num_open = ref 0 in
+  let num_close = ref 0 in
+  let num_text = ref 0 in
+  let num_cdata = ref 0 in
+  let num_nothing = ref 0 in
+  let rec on_parse : Xml.SAX.node -> unit = function
+    | Prologue _ -> incr num_prologue
+    | Element_open _ -> incr num_open
+    | Element_close _ -> incr num_close
+    | Text _ -> incr num_text
+    | Cdata _ -> incr num_cdata
+    | Nothing -> incr num_nothing
+    | Many ll -> List.iter ll ~f:on_parse
+  in
+  let* () =
+    Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
+        let files, success =
+          Zip.stream_files ~feed:(feed_bigstring ic) (function
+            | { filename = "xl/sharedStrings.xml"; _ } ->
+              Zip.Action.Parse Angstrom.(skip_many (Xml.parser >>| on_parse))
+            | _ -> Zip.Action.Skip)
+        in
+        let p =
+          Lwt_stream.iter
+            (function
+              | _, Zip.Data.Parse result -> Result.ok_or_failwith result
+              | _ -> ())
+            files
+        in
+        let* () = success in
+        p)
+  in
+  print_endline
+    (sprintf
+       !"Prologue: %{Int#hum}\n\
+         Element open: %{Int#hum}\n\
+         Element close: %{Int#hum}\n\
+         Text: %{Int#hum}\n\
+         Cdata: %{Int#hum}\n\
+         Nothing: %{Int#hum}"
+       !num_prologue !num_open !num_close !num_text !num_cdata !num_nothing);
+  Lwt.return_unit
+
 let () =
   Sys.argv |> function
   | [| _; "extract_sst"; file |] -> Lwt_main.run (extract_sst file)
@@ -183,4 +228,5 @@ let () =
   | [| _; "show_json"; file |] -> Lwt_main.run (show_json file)
   | [| _; "count_types"; file |] -> Lwt_main.run (count_types file)
   | [| _; "count_length"; file |] -> Lwt_main.run (count_total_string_length file)
+  | [| _; "count_tokens"; file |] -> Lwt_main.run (count_tokens file)
   | _ -> failwith "Invalid arguments"

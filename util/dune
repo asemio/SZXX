@@ -2,6 +2,7 @@
   (name cli)
   (libraries
     SZXX
+    angstrom-lwt-unix
     lwt.unix
     yojson
   )

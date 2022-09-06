@@ -451,12 +451,11 @@ let make_parser { accept_html_boolean_attributes; accept_unquoted_attributes } =
     peek_string 2 >>= function
     | "</" -> element_close_parser
     | "<!" -> choice [ comment_parser; cdata_parser; doctype_parser ]
-    | s when is_token s.[0] -> text_parser
-    | s when Char.(s.[0] = '<') -> element_open_parser
     | "<?"
      |"\xEF\xBB" ->
       prologue_parser
-    | _ -> fail "Lookahead impossible"
+    | s when Char.(s.[0] = '<') -> element_open_parser
+    | _ -> text_parser
   in
   fast_path <|> slow_path
 
