@@ -75,6 +75,8 @@ module SAX : sig
 
     val init : state
 
+    (** [strict] (default: [true]) When false, non-closed elements are treated as self-closing elements, HTML-style.
+        For example a [<br>] without a matching [</br>] is treated as [<br />] *)
     val folder : ?strict:bool -> (state, string) result -> node -> (state, string) result
   end
 
@@ -89,6 +91,10 @@ module SAX : sig
 
     val init : state
 
+    (** [strict] (default: [true]) When false, non-closed elements are treated as self-closing elements, HTML-style.
+        For example a [<br>] without a matching [</br>] is treated as [<br />].
+        Note that non-closed elements within the path to [filter_path] will prevent
+        [on_match] from being called on some (but not all) otherwise matching elements. *)
     val folder :
       filter_path:string list ->
       on_match:(DOM.element -> unit) ->
@@ -100,7 +106,11 @@ module SAX : sig
 end
 
 type parser_options = {
+  (** Invalid XML but valid HTML: [<div attr1="foo" attr2>]
+      When this option is [true], [attr2] will be [""] *)
   accept_html_boolean_attributes: bool;
+  (** Invalid XML but valid HTML: [<div attr1="foo" attr2=bar>]
+      When this option is [true], [attr2] will be ["bar"] *)
   accept_unquoted_attributes: bool;
 }
 

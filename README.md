@@ -251,6 +251,8 @@ This XML parser is far from fully spec-compliant and does not attempt to validat
 
 It returns one "XML event" (XML node) at a time. Invoke it using `Angstrom.many` to form a sequence/list/etc that can be passed to `Xml.SAX.To_DOM.folder` or `Xml.SAX.Stream.folder` to form a valid XML tree.
 
+Both `folder` functions take an optional `~strict` argument (`true` by default). When `false`, non-closed elements are treated as self-closing elements, HTML-style. In combination with `Xml.make_parser` it becomes possible to parse HTML using SZXX.Xml.
+
 #### `To_DOM` module
 
 Fold your sequence/list/stream of `SAX.node` values into a fully formed XML tree.

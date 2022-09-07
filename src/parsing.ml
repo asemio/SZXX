@@ -8,6 +8,8 @@ type storage = {
 
 let slice_size = 1024
 
+let slice_bits = 10
+
 (* Boyer–Moore–Horspool algorithm *)
 type bmh =
   | Found
