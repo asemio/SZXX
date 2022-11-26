@@ -1,4 +1,4 @@
-open! Core_kernel
+open! Core
 open Lwt.Syntax
 open Lwt.Infix
 
@@ -276,8 +276,7 @@ let parser cb =
           trailing_descriptor_present =
             (flags land 0x008 <> 0
             || Int64.(descriptor.compressed_size = 0L)
-            || Int64.(descriptor.uncompressed_size = 0L)
-            );
+            || Int64.(descriptor.uncompressed_size = 0L));
           methd;
           descriptor;
           filename;
@@ -285,8 +284,7 @@ let parser cb =
         })
       (flags_methd_parser
       <* LE.any_uint16 (* last modified time *)
-      <* LE.any_uint16 (* last modified date *)
-      )
+      <* LE.any_uint16 (* last modified date *))
       descriptor_parser dynamic_len_fields_parser
   in
   lift2 const entry_parser commit >>= fun entry ->
@@ -360,17 +358,14 @@ let stream_files ~feed:read cb =
       let* () = Lwt_mutex.with_lock mutex (fun () -> bounded#push pair) in
       match parse (parser cb) with
       | Partial feed -> (loop [@tailcall]) (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len)))
-      | state -> (loop [@tailcall]) state
-    )
+      | state -> (loop [@tailcall]) state)
     | Partial feed -> (
       read () >>= function
       | None -> (
         match feed `Eof with
         | Done (_, pair) -> Lwt_mutex.with_lock mutex (fun () -> bounded#push pair)
-        | _ -> Lwt.return_unit
-      )
-      | Some chunk -> (loop [@tailcall]) (feed chunk)
-    )
+        | _ -> Lwt.return_unit)
+      | Some chunk -> (loop [@tailcall]) (feed chunk))
   in
   let p =
     Lwt.finalize

@@ -1,4 +1,4 @@
-open! Core_kernel
+open! Core
 
 type attr_list = (string * string) list [@@deriving sexp_of]
 

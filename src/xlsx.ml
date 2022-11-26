@@ -1,4 +1,4 @@
-open! Core_kernel
+open! Core
 open Lwt.Syntax
 open Lwt.Infix
 
@@ -59,8 +59,7 @@ let fold_angstrom ~filter_path ~on_match =
       let acc = Xml.SAX.Stream.folder ~filter_path ~on_match acc node in
       match parse xml_parser with
       | Partial feed -> (loop [@tailcall]) (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len))) acc
-      | state -> (loop [@tailcall]) state acc
-    )
+      | state -> (loop [@tailcall]) state acc)
     | state -> state
   in
   let f _entry bs ~len = function
@@ -87,8 +86,7 @@ let parse_sheet ~sheet_number push =
         done;
         num := i
       with
-      | _ -> incr num
-    ));
+      | _ -> incr num));
     push { sheet_number; row_number = !num; data = el.children }
   in
   fold_angstrom ~filter_path:[ "worksheet"; "sheetData"; "row" ] ~on_match
@@ -183,8 +181,7 @@ let unwrap_status cell_parser (sst : SST.t) (row : 'a status row) =
       | Delayed { location; sst_index } -> (
         match resolve_sst_index sst ~sst_index with
         | Some index -> cell_parser.string location index
-        | None -> cell_parser.null
-      ))
+        | None -> cell_parser.null))
   in
   { row with data }
 
@@ -203,13 +200,11 @@ let extract_cell_sst, extract_cell_status =
     | Some "str" -> (
       match el |> dot_text "v" with
       | None -> null
-      | Some s -> formula location s ~formula:(el |> dot_text "f" |> Option.value ~default:"")
-    )
+      | Some s -> formula location s ~formula:(el |> dot_text "f" |> Option.value ~default:""))
     | Some "inlineStr" -> (
       match dot "is" el with
       | None -> null
-      | Some el -> string location (parse_string_cell el)
-    )
+      | Some el -> string location (parse_string_cell el))
     | Some "e" -> el |> dot "v" |> extract ~null location error
     | Some "b" -> el |> dot "v" |> extract ~null location boolean
     | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
@@ -222,9 +217,7 @@ let extract_cell_sst, extract_cell_status =
       | Some { text = sst_index; _ } -> (
         match resolve_sst_index sst ~sst_index with
         | None -> cell_parser.null
-        | Some resolved -> cell_parser.string location resolved
-      )
-    )
+        | Some resolved -> cell_parser.string location resolved))
     | ty -> extract_cell_base cell_parser location el ty
   in
   let extract_cell_status cell_parser location el =
@@ -232,8 +225,7 @@ let extract_cell_sst, extract_cell_status =
     | Some "s" -> (
       match el |> dot "v" with
       | None -> Available cell_parser.null
-      | Some { text = sst_index; _ } -> Delayed { location; sst_index }
-    )
+      | Some { text = sst_index; _ } -> Delayed { location; sst_index })
     | ty -> Available (extract_cell_base cell_parser location el ty)
   in
   extract_cell_sst, extract_cell_status

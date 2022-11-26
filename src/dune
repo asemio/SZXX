@@ -2,7 +2,7 @@
   (name SZXX)
   (public_name SZXX)
   (libraries
-    core_kernel
+    core
     angstrom
     checkseum.ocaml
     decompress.de

@@ -1,4 +1,4 @@
-open! Core_kernel
+open! Core
 module Zip = Zip
 module Xml = Xml
 module Xlsx = Xlsx

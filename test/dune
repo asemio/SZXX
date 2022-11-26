@@ -5,7 +5,7 @@
     angstrom-lwt-unix
 
     alcotest-lwt
-    core_kernel
+    core
     lwt
     lwt.unix
     yojson

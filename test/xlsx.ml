@@ -1,6 +1,6 @@
 let flags = Unix.[ O_RDONLY; O_NONBLOCK ]
 
-open! Core_kernel
+open! Core
 open Lwt.Syntax
 open Lwt.Infix
 
@@ -154,7 +154,7 @@ let stream_rows filename () =
     Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
         let open SZXX.Xlsx in
         let stream, sst, processed = stream_rows ~feed:(feed_bigstring ic) yojson_cell_parser in
-        let* sst = sst in
+        let* sst in
         let json_list_p =
           Lwt_stream.map
             (fun status ->

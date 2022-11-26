@@ -232,11 +232,11 @@ Manually resolve a single SST reference.
 
 #### `parse_date`
 
-XLSX uses its `number` type (OCaml float) to encode Date cells. This function converts one such float into a Core_kernel `Date.t`.
+XLSX uses its `number` type (OCaml float) to encode Date cells. This function converts one such float into a Core `Date.t`.
 
 #### `parse_datetime`
 
-XLSX uses its `number` type (OCaml float) to encode DateTime cells. This function converts one such float into a Core_kernel `Time.t`.
+XLSX uses its `number` type (OCaml float) to encode DateTime cells. This function converts one such float into a Core `Time.t`.
 
 #### `index_of_column`
 

@@ -1,4 +1,4 @@
-open! Core_kernel
+open! Core
 open Angstrom
 
 type storage = {
@@ -75,8 +75,7 @@ let bounded_file_reader ~pattern { add; finalize } =
     if len > slice_size
     then (
       add buf len;
-      pos := 0
-    )
+      pos := 0)
   in
   let rec loop window =
     match same ~pattern table window (len - 1) with

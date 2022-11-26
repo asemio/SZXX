@@ -1,5 +1,5 @@
 module STR = String
-open! Core_kernel
+open! Core
 open Angstrom
 
 type attr_list = (string * string) list [@@deriving sexp_of]
@@ -301,8 +301,7 @@ let decode_exn = function
     |> Int.of_string
     |> encode_utf_8_codepoint
   | '#', '0' .. '9' -> String.slice str 1 0 |> Int.of_string |> encode_utf_8_codepoint
-  | _ -> raise (Invalid_argument str)
-)
+  | _ -> raise (Invalid_argument str))
 
 let unescape original =
   let rec loop buf from =
@@ -316,8 +315,7 @@ let unescape original =
         (match decode_exn (String.slice original (start + 1) stop) with
         | s -> Buffer.add_string buf s
         | exception _ -> Buffer.add_substring buf original ~pos:start ~len:(stop - start + 1));
-        loop buf (stop + 1)
-    )
+        loop buf (stop + 1))
   in
   (* Unroll first index call for performance *)
   match String.index original '&' with
@@ -386,8 +384,7 @@ let make_parser { accept_html_boolean_attributes; accept_unquoted_attributes } =
             false
           | _ -> true)
       in
-      choice [ dq_string; sq_string; uq_string ]
-    )
+      choice [ dq_string; sq_string; uq_string ])
     else choice [ dq_string; sq_string ]
   in
   let attr_parser =
@@ -405,8 +402,7 @@ let make_parser { accept_html_boolean_attributes; accept_unquoted_attributes } =
     (string "<!DOCTYPE" <|> string "<!doctype")
     *> (skip_many (blank *> choice [ drop token_parser; drop xml_string_parser; declarations ])
        <* blank
-       <* char '>'
-       )
+       <* char '>')
     >>| const SAX.Nothing
   in
   let comment_parser = comment >>| const SAX.Nothing in

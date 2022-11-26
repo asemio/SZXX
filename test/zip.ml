@@ -1,6 +1,6 @@
 let flags = Unix.[ O_RDONLY; O_NONBLOCK ]
 
-open! Core_kernel
+open! Core
 open Lwt.Syntax
 open Lwt.Infix
 
@@ -82,7 +82,7 @@ let readme_example extract_filename input_channel =
   let* () = success in
 
   (* 5. Finally we can bind/await the promise from step 3 and use it! *)
-  let* unzipped = unzipped in
+  let* unzipped in
   match unzipped with
   | None -> failwithf "File `%s` not found in ZIP archive" extract_filename ()
   | Some _raw ->
