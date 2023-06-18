@@ -13,13 +13,13 @@ let slice_bits = 10
 (* Boyer–Moore–Horspool algorithm *)
 type bmh =
   | Found
-  | Shift   of int
+  | Shift of int
   | Restart
 
 let make_table ~pattern len =
   let table = Array.create ~len:256 Restart in
   String.foldi pattern ~init:() ~f:(fun i () c ->
-      if i < len - 1 then table.(Char.to_int c) <- Shift (len - (i + 1)));
+    if i < len - 1 then table.(Char.to_int c) <- Shift (len - (i + 1)) );
   table
 
 let same ~pattern table s =
@@ -75,7 +75,7 @@ let bounded_file_reader ~pattern { add; finalize } =
     if len > slice_size
     then (
       add buf len;
-      pos := 0)
+      pos := 0 )
   in
   let rec loop window =
     match same ~pattern table window (len - 1) with

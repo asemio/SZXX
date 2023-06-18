@@ -38,16 +38,16 @@ end
 
 module SAX : sig
   type node =
-    | Prologue      of attr_list
-    | Element_open  of {
+    | Prologue of attr_list
+    | Element_open of {
         tag: string;
         attrs: attr_list;
       }
     | Element_close of string
-    | Text          of string
-    | Cdata         of string
+    | Text of string
+    | Cdata of string
     | Nothing
-    | Many          of node list
+    | Many of node list
   [@@deriving sexp_of]
 
   type partial_text = {
@@ -106,12 +106,12 @@ module SAX : sig
 end
 
 type parser_options = {
-  (** Invalid XML but valid HTML: [<div attr1="foo" attr2>]
-      When this option is [true], [attr2] will be [""] *)
   accept_html_boolean_attributes: bool;
-  (** Invalid XML but valid HTML: [<div attr1="foo" attr2=bar>]
-      When this option is [true], [attr2] will be ["bar"] *)
+    (** Invalid XML but valid HTML: [<div attr1="foo" attr2>]
+      When [accept_html_boolean_attributes] is [true], [attr2] will be [""] *)
   accept_unquoted_attributes: bool;
+    (** Invalid XML but valid HTML: [<div attr1="foo" attr2=bar>]
+          When [accept_unquoted_attributes] is [true], [attr2] will be ["bar"] *)
 }
 
 val default_parser_options : parser_options

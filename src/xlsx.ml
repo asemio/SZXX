@@ -27,7 +27,7 @@ type delayed_string = {
 
 type 'a status =
   | Available of 'a
-  | Delayed   of delayed_string
+  | Delayed of delayed_string
 [@@deriving sexp_of]
 
 type 'a row = {
@@ -59,7 +59,7 @@ let fold_angstrom ~filter_path ~on_match =
       let acc = Xml.SAX.Stream.folder ~filter_path ~on_match acc node in
       match parse xml_parser with
       | Partial feed -> (loop [@tailcall]) (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len))) acc
-      | state -> (loop [@tailcall]) state acc)
+      | state -> (loop [@tailcall]) state acc )
     | state -> state
   in
   let f _entry bs ~len = function
@@ -86,7 +86,7 @@ let parse_sheet ~sheet_number push =
         done;
         num := i
       with
-      | _ -> incr num));
+      | _ -> incr num ));
     push { sheet_number; row_number = !num; data = el.children }
   in
   fold_angstrom ~filter_path:[ "worksheet"; "sheetData"; "row" ] ~on_match
@@ -123,7 +123,7 @@ module SST = struct
         | { filename = "xl/sharedStrings.xml"; _ } ->
           let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
           fold_angstrom ~filter_path ~on_match
-        | _ -> Zip.Action.Skip)
+        | _ -> Zip.Action.Skip )
     in
     let sst_p =
       let+ () = flush_zip_stream zip_stream in
@@ -149,7 +149,7 @@ let process_file ?only_sheet ~skip_sst ~feed push finalize =
         >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
         |> Option.filter ~f:(fun i -> Option.value_map only_sheet ~default:true ~f:(( = ) i))
         >>| (fun sheet_number -> parse_sheet ~sheet_number push)
-        |> Option.value ~default:Zip.Action.Skip)
+        |> Option.value ~default:Zip.Action.Skip )
   in
   let result_p =
     Lwt.finalize
@@ -181,7 +181,7 @@ let unwrap_status cell_parser (sst : SST.t) (row : 'a status row) =
       | Delayed { location; sst_index } -> (
         match resolve_sst_index sst ~sst_index with
         | Some index -> cell_parser.string location index
-        | None -> cell_parser.null))
+        | None -> cell_parser.null ) )
   in
   { row with data }
 
@@ -200,11 +200,11 @@ let extract_cell_sst, extract_cell_status =
     | Some "str" -> (
       match el |> dot_text "v" with
       | None -> null
-      | Some s -> formula location s ~formula:(el |> dot_text "f" |> Option.value ~default:""))
+      | Some s -> formula location s ~formula:(el |> dot_text "f" |> Option.value ~default:"") )
     | Some "inlineStr" -> (
       match dot "is" el with
       | None -> null
-      | Some el -> string location (parse_string_cell el))
+      | Some el -> string location (parse_string_cell el) )
     | Some "e" -> el |> dot "v" |> extract ~null location error
     | Some "b" -> el |> dot "v" |> extract ~null location boolean
     | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
@@ -217,7 +217,7 @@ let extract_cell_sst, extract_cell_status =
       | Some { text = sst_index; _ } -> (
         match resolve_sst_index sst ~sst_index with
         | None -> cell_parser.null
-        | Some resolved -> cell_parser.string location resolved))
+        | Some resolved -> cell_parser.string location resolved ) )
     | ty -> extract_cell_base cell_parser location el ty
   in
   let extract_cell_status cell_parser location el =
@@ -225,7 +225,7 @@ let extract_cell_sst, extract_cell_status =
     | Some "s" -> (
       match el |> dot "v" with
       | None -> Available cell_parser.null
-      | Some { text = sst_index; _ } -> Delayed { location; sst_index })
+      | Some { text = sst_index; _ } -> Delayed { location; sst_index } )
     | ty -> Available (extract_cell_base cell_parser location el ty)
   in
   extract_cell_sst, extract_cell_status
@@ -236,10 +236,10 @@ let index_of_column s =
   let key =
     String.take_while s ~f:(function
       | 'A' .. 'Z' -> true
-      | _ -> false)
+      | _ -> false )
   in
   Hashtbl.find_or_add col_cache key ~default:(fun () ->
-      String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1)
+    String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1 )
 
 let row_width num_cells data =
   let open Xml.DOM in
@@ -255,9 +255,9 @@ let parse_row_with_sst sst cell_parser ({ data; sheet_number; row_number } as ro
     let num_cols = row_width num_cells data in
     let new_data = Array.create ~len:num_cols cell_parser.null in
     Array.iteri data ~f:(fun i el ->
-        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
-        let v = extract_cell_sst sst cell_parser { col_index; sheet_number; row_number } el in
-        new_data.(col_index) <- v);
+      let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
+      let v = extract_cell_sst sst cell_parser { col_index; sheet_number; row_number } el in
+      new_data.(col_index) <- v );
     { row with data = new_data }
 
 let parse_row_without_sst cell_parser ({ data; sheet_number; row_number } as row) =
@@ -268,9 +268,9 @@ let parse_row_without_sst cell_parser ({ data; sheet_number; row_number } as row
     let num_cols = row_width num_cells data in
     let new_data = Array.create ~len:num_cols (Available cell_parser.null) in
     Array.iteri data ~f:(fun i el ->
-        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
-        let v = extract_cell_status cell_parser { col_index; sheet_number; row_number } el in
-        new_data.(col_index) <- v);
+      let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
+      let v = extract_cell_status cell_parser { col_index; sheet_number; row_number } el in
+      new_data.(col_index) <- v );
     { row with data = new_data }
 
 let stream_rows ?only_sheet ?(skip_sst = false) ~feed cell_parser =
@@ -304,7 +304,7 @@ let stream_rows_buffer ?only_sheet ~feed cell_parser =
   in
   parsed_stream, processed_p
 
-let yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser =
+let yojson_cell_parser : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_parser =
   {
     string = (fun _location s -> `String (Xml.unescape s));
     formula = (fun _location ~formula:_ s -> `String (Xml.unescape s));

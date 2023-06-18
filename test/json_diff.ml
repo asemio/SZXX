@@ -2,7 +2,7 @@ open! Core
 
 type mismatch =
   | Changed of (Yojson.Safe.t * Yojson.Safe.t)
-  | Added   of Yojson.Safe.t
+  | Added of Yojson.Safe.t
   | Deleted of Yojson.Safe.t
 
 let color s = function
@@ -44,7 +44,7 @@ let check left right =
         sprintf "%s: %s %s %s"
           (color (sprintf "+/- %s" key) `Yellow)
           (stringify x) (color "!=" `Yellow) (stringify y)
-        |> mismatch)
+        |> mismatch )
   in
   match Queue.length errors with
   | 0 -> ()

@@ -503,7 +503,7 @@ let xml_to_dom ?(options = SZXX.Xml.default_parser_options) ?strict test data ()
       match
         List.fold_result nodes ~init:SZXX.Xml.SAX.To_DOM.init ~f:(fun acc -> function
           | Text s -> SZXX.Xml.SAX.To_DOM.folder ?strict (Ok acc) (Text (SZXX.Xml.unescape s))
-          | el -> SZXX.Xml.SAX.To_DOM.folder ?strict (Ok acc) el)
+          | el -> SZXX.Xml.SAX.To_DOM.folder ?strict (Ok acc) el )
       with
       | Ok { decl_attrs; stack = []; top = Some top; _ } -> { decl_attrs; top }
       | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.To_DOM.state}" state ()
@@ -524,7 +524,7 @@ let xml_stream ?(options = SZXX.Xml.default_parser_options) ?strict test data fi
   | Ok nodes ->
     let _state =
       List.fold_result nodes ~init:SZXX.Xml.SAX.Stream.init ~f:(fun acc x ->
-          SZXX.Xml.SAX.Stream.folder ?strict ~filter_path ~on_match (Ok acc) x)
+        SZXX.Xml.SAX.Stream.folder ?strict ~filter_path ~on_match (Ok acc) x )
     in
     let streamed = `Assoc [ "data", [%to_yojson: element array] (Queue.to_array queue) ] in
     Json_diff.check streamed data;
@@ -580,7 +580,7 @@ let readme_example2 () =
     (* Do something with parsed_xml *)
     let* () =
       Option.value_map parsed_xml.top ~default:"--" ~f:(fun el ->
-          Xml.DOM.sexp_of_element el |> Sexp.to_string)
+        Xml.DOM.sexp_of_element el |> Sexp.to_string )
       |> Lwt_io.print
     in
     Lwt.return_unit
@@ -629,7 +629,7 @@ let readme_example3 () =
     let* () =
       Lwt_io.printl
         (Option.value_map shallow_tree.decl_attrs ~default:"--" ~f:(fun x ->
-             Xml.sexp_of_attr_list x |> Sexp.to_string))
+           Xml.sexp_of_attr_list x |> Sexp.to_string ) )
     in
     Lwt.return_unit
 
