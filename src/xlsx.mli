@@ -1,4 +1,5 @@
 open! Core
+open Eio.Std
 
 type location = {
   sheet_number: int;
@@ -42,8 +43,10 @@ module SST : sig
 
   val zip_entry_filename : string
 
-  val from_zip : feed:Zip.feed -> t Lwt.t
+  val from_zip : feed:Zip.feed -> t
 end
+
+val to_seq : 'a option Eio.Stream.t -> 'a Seq.t
 
 (**
    Returns an [Lwt_stream.t] of fully parsed XLSX rows, with one caveat: every cell value is wrapped in ['a status].
@@ -60,17 +63,20 @@ end
 val stream_rows :
   ?only_sheet:int ->
   ?skip_sst:bool ->
+  sw:Switch.t ->
   feed:Zip.feed ->
   'a cell_parser ->
-  'a status row Lwt_stream.t * SST.t Lwt.t * unit Lwt.t
+  'a status row option Eio.Stream.t * SST.t Promise.or_exn
+
+val with_minimal_buffering :
+  'a option Eio.Stream.t -> SST.t Promise.or_exn -> parse:(sst:SST.t -> 'a -> 'c) -> 'c Seq.t
 
 (**
   Same as [stream_rows] but automatically resolves string references.
   Warning: This function can result in linear (as opposed to constant) memory usage.
   See README for more information.
 *)
-val stream_rows_buffer :
-  ?only_sheet:int -> feed:Zip.feed -> 'a cell_parser -> 'a row Lwt_stream.t * unit Lwt.t
+val stream_rows_buffer : ?only_sheet:int -> sw:Switch.t -> feed:Zip.feed -> 'a cell_parser -> 'a row Seq.t
 
 (**
   Same as [stream_rows] but returns raw XML elements instead of parsed XLSX rows.
@@ -79,9 +85,11 @@ val stream_rows_buffer :
 val stream_rows_unparsed :
   ?only_sheet:int ->
   ?skip_sst:bool ->
+  sw:Switch.t ->
   feed:Zip.feed ->
+  ?domain_mgr:#Eio.Domain_manager.t ->
   unit ->
-  Xml.DOM.element row Lwt_stream.t * SST.t Lwt.t * unit Lwt.t
+  Xml.DOM.element row option Eio.Stream.t * SST.t Promise.or_exn
 
 (** Convenience cell_parser to read rows as JSON (Yojson) *)
 val yojson_cell_parser : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_parser

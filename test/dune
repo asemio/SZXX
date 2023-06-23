@@ -3,6 +3,8 @@
   (libraries
     SZXX
     angstrom-lwt-unix
+    angstrom-eio
+    lwt_eio
 
     alcotest-lwt
     core

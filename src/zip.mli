@@ -1,4 +1,5 @@
 open! Core
+open Eio.Std
 
 type methd =
   | Stored
@@ -59,15 +60,9 @@ module Data : sig
     | Parse of ('a, string) result
 end
 
-type 'a slice = {
-  buf: 'a;
-  pos: int;
-  len: int;
-}
-
 type feed =
-  | String of (unit -> string option Lwt.t)
-  | Bigstring of (unit -> Bigstring.t slice option Lwt.t)
+  | String of (unit -> string option)
+  | Bigstring of (unit -> Bigstring.t option)
 
 (**
    Stream files.
@@ -93,4 +88,9 @@ type feed =
 
    See README.md for examples on how to use it.
 *)
-val stream_files : feed:feed -> (entry -> 'a Action.t) -> (entry * 'a Data.t) Lwt_stream.t * unit Lwt.t
+val stream_files :
+  sw:Switch.t ->
+  feed:feed ->
+  ?domain_mgr:#Eio.Domain_manager.t ->
+  (entry -> 'a Action.t) ->
+  (entry * 'a Data.t) option Eio.Stream.t

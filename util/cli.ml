@@ -1,9 +1,5 @@
-let flags_read = Unix.[ O_RDONLY; O_NONBLOCK ]
-
-let flags_overwrite = Unix.[ O_WRONLY; O_NONBLOCK; O_CREAT; O_TRUNC ]
-
 open! Core
-open Lwt.Syntax
+open Eio.Std
 open SZXX
 
 let string_readers : string Xlsx.cell_parser =
@@ -17,123 +13,113 @@ let string_readers : string Xlsx.cell_parser =
     null = "";
   }
 
-let feed_bigstring ic =
-  let open Lwt.Infix in
+let feed_flow src =
   let open SZXX.Zip in
-  let len = Lwt_io.buffer_size ic in
-  let buf = Bigstring.create len in
+  let buf = Cstruct.create 4096 in
   Bigstring
     (fun () ->
-      Lwt_io.read_into_bigstring ic buf 0 len >|= function
-      | 0 -> None
-      | len -> Some { buf; pos = 0; len })
+      match Eio.Flow.single_read src buf with
+      | len -> Some (Bigstring.sub_shared ~pos:0 ~len buf.buffer)
+      | exception End_of_file -> None)
 
-let count xlsx_path =
-  Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-    let t0 = Time_now.nanoseconds_since_unix_epoch () in
-    let stream, _sst_p, processed =
-      Xlsx.stream_rows_unparsed ~feed:(feed_bigstring ic) ~skip_sst:false ()
-    in
-
-    let* n = Lwt_stream.fold (fun _x acc -> acc + 1) stream 0 in
-    let t1 = Time_now.nanoseconds_since_unix_epoch () in
-
-    let* () = Lwt_io.printlf "Row count: %d (%Ldms)" n Int63.((t1 - t0) / of_int 1_000_000 |> to_int64) in
-
-    processed )
-
-let length xlsx_path =
-  Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-    let stream, p = Zip.stream_files ~feed:(feed_bigstring ic) (const Zip.Action.String) in
-    let* () =
-      Lwt_stream.iter
-        (function
-          | ({ filename; _ } : Zip.entry), Zip.Data.String raw ->
-            print_endline (sprintf "%s: %d" filename (String.length raw))
-          | _ -> failwith "Expected Zip.Data.String")
-        stream
-    in
-    p )
-
-let extract_sst xlsx_path =
-  Lwt_io.with_file ~flags:flags_overwrite ~mode:Output (sprintf "%s.sst.xml" xlsx_path) (fun oc ->
-    Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-      let files, files_p =
-        Zip.stream_files ~feed:(feed_bigstring ic) (function
-          | { filename = "xl/sharedStrings.xml"; _ } -> Zip.Action.String
-          | _ -> Zip.Action.Skip )
-      in
-      let* () =
-        Lwt_stream.iter_s
-          (function
-            | _, Zip.Data.String s -> Lwt_io.write oc s
-            | _ -> Lwt.return_unit)
-          files
-      in
-      files_p ) )
-
-let show_json xlsx_path =
-  Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-    let stream, success =
-      SZXX.Xlsx.stream_rows_buffer ~feed:(feed_bigstring ic) SZXX.Xlsx.yojson_cell_parser
-    in
-    let processed =
-      Lwt_stream.iter_s
-        (fun (row : Yojson.Basic.t SZXX.Xlsx.row) ->
-          `List (Array.to_list row.data) |> Yojson.Basic.pretty_to_string |> Lwt_io.printl)
-        stream
-    in
-    let* () = success in
-    let* () = processed in
-    Lwt.return_unit )
-
-let count_types xlsx_path =
-  Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-    let string = ref 0 in
-    let ss = ref 0 in
-    let formula = ref 0 in
-    let error = ref 0 in
-    let boolean = ref 0 in
-    let number = ref 0 in
-    let date = ref 0 in
-    let cell_parser =
-      Xlsx.
-        {
-          string = (fun _location _s -> incr string);
-          formula = (fun _location ~formula:_ _s -> incr formula);
-          error = (fun _location _s -> incr error);
-          boolean = (fun _location _s -> incr boolean);
-          number = (fun _location _s -> incr number);
-          date = (fun _location _s -> incr date);
-          null = ();
-        }
-    in
-    let stream, _sst_p, success = Xlsx.stream_rows ~feed:(feed_bigstring ic) cell_parser in
-    let processed =
-      Lwt_stream.iter
-        (fun Xlsx.{ data; _ } ->
-          Array.iter data ~f:(function
-            | Xlsx.Available _ -> ()
-            | Delayed _ -> incr ss ))
-        stream
-    in
-    let* () = success in
-    let* () = processed in
-    print_endline
-      (sprintf
-         "%s\nstring: %d\nshared_string: %d\nformula: %d\nerror: %d\nboolean: %d\nnumber: %d\ndate: %d"
-         xlsx_path !string !ss !formula !error !boolean !number !date );
-    Lwt.return_unit )
-
-let count_total_string_length xlsx_path =
+let count env xlsx_path =
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
   let t0 = Time_now.nanoseconds_since_unix_epoch () in
-  let* sst =
-    Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-      Xlsx.SST.from_zip ~feed:(feed_bigstring ic) )
+  let stream, _sst_p =
+    Xlsx.stream_rows_unparsed ~sw
+      ~feed:(feed_flow src) (* ~domain_mgr:env#domain_mgr *)
+      ~skip_sst:false ()
+  in
+
+  let n = Xlsx.to_seq stream |> Seq.fold_left (fun acc _x -> acc + 1) 0 in
+  let t1 = Time_now.nanoseconds_since_unix_epoch () in
+
+  Eio.Flow.copy_string
+    (sprintf "Row count: %d (%Ldms)\n" n Int63.((t1 - t0) / of_int 1_000_000 |> to_int64))
+    env#stdout
+
+let length env xlsx_path =
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  let stream = Zip.stream_files ~sw ~feed:(feed_flow src) (const Zip.Action.String) in
+  Xlsx.to_seq stream
+  |> Seq.iter (function
+       | ({ filename; _ } : Zip.entry), Zip.Data.String raw ->
+         Eio.Flow.copy_string (sprintf "%s: %d\n" filename (String.length raw)) env#stdout
+       | _ -> failwith "Expected Zip.Data.String" )
+
+let extract_sst env xlsx_path =
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  let sink =
+    Eio.Path.open_out ~sw ~create:(`Or_truncate 0o644) Eio.Path.(env#fs / sprintf "%s.sst.xml" xlsx_path)
+  in
+  let stream =
+    Zip.stream_files ~sw ~feed:(feed_flow src) (function
+      | { filename = "xl/sharedStrings.xml"; _ } -> Zip.Action.String
+      | _ -> Zip.Action.Skip )
+  in
+  Xlsx.to_seq stream
+  |> Seq.iter (function
+       | _, Zip.Data.String s -> Eio.Flow.copy_string s sink
+       | _ -> () )
+
+let show_json env xlsx_path =
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  Eio.Buf_write.with_flow env#stdout @@ fun w ->
+  SZXX.Xlsx.stream_rows_buffer ~sw ~feed:(feed_flow src) SZXX.Xlsx.yojson_cell_parser
+  |> Seq.iter (fun (row : Yojson.Basic.t SZXX.Xlsx.row) ->
+       let s = `List (Array.to_list row.data) |> Yojson.Basic.pretty_to_string in
+       Eio.Buf_write.string w s;
+       Eio.Buf_write.char w '\n' )
+
+let count_types env xlsx_path =
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  let string = ref 0 in
+  let ss = ref 0 in
+  let formula = ref 0 in
+  let error = ref 0 in
+  let boolean = ref 0 in
+  let number = ref 0 in
+  let date = ref 0 in
+  let cell_parser =
+    Xlsx.
+      {
+        string = (fun _location _s -> incr string);
+        formula = (fun _location ~formula:_ _s -> incr formula);
+        error = (fun _location _s -> incr error);
+        boolean = (fun _location _s -> incr boolean);
+        number = (fun _location _s -> incr number);
+        date = (fun _location _s -> incr date);
+        null = ();
+      }
+  in
+  let stream, _sst_p = Xlsx.stream_rows ~sw ~feed:(feed_flow src) cell_parser in
+  Xlsx.to_seq stream
+  |> Seq.iter (fun Xlsx.{ data; _ } ->
+       Array.iter data ~f:(function
+         | Xlsx.Available _ -> ()
+         | Delayed _ -> incr ss ) );
+  Eio.Flow.copy_string
+    (sprintf
+       "%s\nstring: %d\nshared_string: %d\nformula: %d\nerror: %d\nboolean: %d\nnumber: %d\ndate: %d\n"
+       xlsx_path !string !ss !formula !error !boolean !number !date )
+    env#stdout
+
+let count_total_string_length env xlsx_path =
+  let t0 = Time_now.nanoseconds_since_unix_epoch () in
+  let sst =
+    Eio.Path.with_open_in Eio.Path.(env#fs / xlsx_path) @@ fun src ->
+    Xlsx.SST.from_zip ~feed:(feed_flow src)
   in
   let t1 = Time_now.nanoseconds_since_unix_epoch () in
-  print_endline
-    (sprintf !"%s" (Int63.(t1 - t0 |> to_float) |> Time.Span.of_ns |> Time.Span.to_string_hum));
+  Eio.Flow.copy_string
+    (sprintf "Parse SST: %s\n"
+       (Int63.(t1 - t0 |> to_float) |> Time.Span.of_ns |> Time.Span.to_string_hum) )
+    env#stdout;
   let num_rows = ref 0 in
   let num_strings = ref 0 in
   let total_length = ref 0 in
@@ -152,26 +138,20 @@ let count_total_string_length xlsx_path =
         null = ();
       }
   in
-  let* () =
-    Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-      let stream, _sst, success = Xlsx.stream_rows_unparsed ~skip_sst:true ~feed:(feed_bigstring ic) () in
-      let processed =
-        Lwt_stream.iter
-          (fun el ->
-            let _row = Xlsx.parse_row_with_sst sst cell_parser el in
-            incr num_rows)
-          stream
-      in
-      let* () = success in
-      processed )
-  in
-  print_endline
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  let stream, _sst = Xlsx.stream_rows_unparsed ~sw ~skip_sst:true ~feed:(feed_flow src) () in
+  Xlsx.to_seq stream
+  |> Seq.iter (fun el ->
+       let _row = Xlsx.parse_row_with_sst sst cell_parser el in
+       incr num_rows );
+  Eio.Flow.copy_string
     (sprintf
-       !"Rows: %d\nStrings: %d\nTotal string length: %{Int.to_string_hum}"
-       !num_rows !num_strings !total_length );
-  Lwt.return_unit
+       !"Rows: %{Int#hum}\nStrings: %{Int#hum}\nTotal string length: %{Int#hum}\n"
+       !num_rows !num_strings !total_length )
+    env#stdout
 
-let count_tokens xlsx_path =
+let count_tokens env xlsx_path =
   let num_prologue = ref 0 in
   let num_open = ref 0 in
   let num_close = ref 0 in
@@ -187,42 +167,37 @@ let count_tokens xlsx_path =
     | Nothing -> incr num_nothing
     | Many ll -> List.iter ll ~f:on_parse
   in
-  let* () =
-    Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
-      let files, success =
-        Zip.stream_files ~feed:(feed_bigstring ic) (function
-          | { filename = "xl/sharedStrings.xml"; _ } ->
-            Zip.Action.Parse Angstrom.(skip_many (Xml.parser >>| on_parse))
-          | _ -> Zip.Action.Skip )
-      in
-      let p =
-        Lwt_stream.iter
-          (function
-            | _, Zip.Data.Parse result -> Result.ok_or_failwith result
-            | _ -> ())
-          files
-      in
-      let* () = success in
-      p )
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  let files =
+    Zip.stream_files ~sw ~feed:(feed_flow src) (function
+      | { filename = "xl/sharedStrings.xml"; _ } ->
+        Zip.Action.Parse Angstrom.(skip_many (Xml.parser >>| on_parse))
+      | _ -> Zip.Action.Skip )
   in
-  print_endline
+  Xlsx.to_seq files
+  |> Seq.iter (function
+       | _, Zip.Data.Parse result -> Result.ok_or_failwith result
+       | _ -> () );
+  Eio.Flow.copy_string
     (sprintf
        !"Prologue: %{Int#hum}\n\
          Element open: %{Int#hum}\n\
          Element close: %{Int#hum}\n\
          Text: %{Int#hum}\n\
          Cdata: %{Int#hum}\n\
-         Nothing: %{Int#hum}"
-       !num_prologue !num_open !num_close !num_text !num_cdata !num_nothing );
-  Lwt.return_unit
+         Nothing: %{Int#hum}\n"
+       !num_prologue !num_open !num_close !num_text !num_cdata !num_nothing )
+    env#stdout
 
 let () =
+  Eio_main.run @@ fun env ->
   Sys.get_argv () |> function
-  | [| _; "extract_sst"; file |] -> Lwt_main.run (extract_sst file)
-  | [| _; "count"; file |] -> Lwt_main.run (count file)
-  | [| _; "length"; file |] -> Lwt_main.run (length file)
-  | [| _; "show_json"; file |] -> Lwt_main.run (show_json file)
-  | [| _; "count_types"; file |] -> Lwt_main.run (count_types file)
-  | [| _; "count_length"; file |] -> Lwt_main.run (count_total_string_length file)
-  | [| _; "count_tokens"; file |] -> Lwt_main.run (count_tokens file)
+  | [| _; "extract_sst"; file |] -> extract_sst env file
+  | [| _; "count"; file |] -> count env file
+  | [| _; "length"; file |] -> length env file
+  | [| _; "show_json"; file |] -> show_json env file
+  | [| _; "count_types"; file |] -> count_types env file
+  | [| _; "count_length"; file |] -> count_total_string_length env file
+  | [| _; "count_tokens"; file |] -> count_tokens env file
   | _ -> failwith "Invalid arguments"

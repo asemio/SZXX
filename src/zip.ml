@@ -61,12 +61,12 @@ end
 
 let slice_size = Parsing.slice_size
 
-let slice_bits = 10
+let slice_bits = Parsing.slice_bits
 
 module Storage = struct
-  type t = Parsing.storage = {
-    add: Bigstring.t -> int -> unit;
-    finalize: unit -> unit;
+  type t = Parsing.Storage.t = {
+    add: Bigstring.t -> len:int -> unit Angstrom.t;
+    finalize: unit -> unit Angstrom.t;
   }
 
   let deflated flush =
@@ -79,11 +79,11 @@ module Storage = struct
       | `Await -> false
       | `End ->
         let len = slice_size - De.Inf.dst_rem decoder in
-        if len > 0 then flush outbs len;
+        if len > 0 then flush outbs ~len;
         true
       | `Flush ->
         let len = slice_size - De.Inf.dst_rem decoder in
-        flush outbs len;
+        flush outbs ~len;
         De.Inf.flush decoder;
         do_uncompress ()
       | `Malformed err -> failwith err
@@ -92,26 +92,35 @@ module Storage = struct
       De.Inf.src decoder bs 0 len;
       do_uncompress ()
     in
-    let add bs len = finished := uncompress bs len in
-    let finalize () = if not !finished then ignore (uncompress outbs 0 : bool) in
+    let add bs ~len =
+      finished := uncompress bs len;
+      Angstrom.commit
+    in
+    let finalize () =
+      if not !finished then ignore (uncompress outbs 0 : bool);
+      Angstrom.commit
+    in
     { add; finalize }
 
   let stored flush =
-    let add = flush in
-    let finalize () = () in
+    let add bs ~len =
+      flush bs ~len;
+      Angstrom.return ()
+    in
+    let finalize () = Angstrom.return () in
     { add; finalize }
 end
 
 module Mode = struct
   type 'a t = {
-    flush: Bigstring.t -> int -> unit;
+    flush: Bigstring.t -> len:int -> unit;
     complete: unit -> 'a Data.t * int * Optint.t;
   }
 
   let skip () =
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
-    let flush bs len =
+    let flush bs ~len =
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc
     in
@@ -120,7 +129,7 @@ module Mode = struct
 
   let string ~buffer_size =
     let res = Bigbuffer.create buffer_size in
-    let flush bs len = Bigbuffer.add_bigstring res (Bigstring.sub_shared bs ~pos:0 ~len) in
+    let flush bs ~len = Bigbuffer.add_bigstring res (Bigstring.sub_shared bs ~pos:0 ~len) in
     let complete () =
       let str = Bigbuffer.contents res in
       let len = String.length str in
@@ -132,7 +141,7 @@ module Mode = struct
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
     let acc = ref init in
-    let flush bs len =
+    let flush bs ~len =
       let s = Bigstring.to_string bs ~pos:0 ~len in
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_string s 0 len !crc;
@@ -145,7 +154,7 @@ module Mode = struct
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
     let acc = ref init in
-    let flush bs len =
+    let flush bs ~len =
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc;
       acc := f entry bs ~len !acc
@@ -158,7 +167,7 @@ module Mode = struct
     let bytes_processed = ref 0 in
     let open Angstrom.Buffered in
     let state = ref (parse angstrom) in
-    let flush bs len =
+    let flush bs ~len =
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc;
       match !state with
@@ -184,27 +193,27 @@ let fixed_size_reader size Storage.{ add; finalize } =
   let open Angstrom in
   let rec loop = function
     | n when n > slice_size ->
-      take_bigstring slice_size >>= fun bs ->
-      add bs slice_size;
+      let* bs = take_bigstring slice_size in
+      let* () = add bs ~len:slice_size in
       (loop [@tailcall]) (n - slice_size)
     | 0 ->
-      finalize ();
+      let* () = finalize () in
       commit
-    | n ->
-      take_bigstring n <* commit >>= fun bs ->
-      add bs n;
+    | len ->
+      let* bs = take_bigstring len <* commit in
+      let* () = add bs ~len in
       (loop [@tailcall]) 0
   in
   loop size
 
 let ( << ) = Int64.( lsl )
 
-let ( ||* ) = Int64.( lor )
+let ( ||| ) = Int64.( lor )
 
 let ( .*[] ) s i = s.[i] |> Char.to_int |> Int64.of_int_exn
 
 let parse_le_uint64 ?(offset = 0) s =
-  (1, s.*[offset]) |> Fn.apply_n_times ~n:7 (fun (i, x) -> i + 1, s.*[i + offset] << i * 8 ||* x) |> snd
+  (1, s.*[offset]) |> Fn.apply_n_times ~n:7 (fun (i, x) -> i + 1, s.*[i + offset] << i * 8 ||| x) |> snd
 
 let parser cb =
   let open Angstrom in
@@ -253,7 +262,7 @@ let parser cb =
       | _ -> None )
   in
   let entry_parser =
-    Parsing.skip_until_pattern ~pattern:"PK\003\004"
+    Parsing.bounded_file_reader ~pattern:"PK\003\004" Parsing.Storage.dummy
     *> (LE.any_uint16 >>| function
         | 20 -> Zip_2_0
         | 45 -> Zip_4_5
@@ -327,50 +336,42 @@ let parser cb =
     failwithf "%s: CRC mismatch" entry.filename ()
   | (data, _size, _crc), entry -> entry, data
 
-type 'a slice = {
-  buf: 'a;
-  pos: int;
-  len: int;
-}
-
 type feed =
-  | String of (unit -> string option Lwt.t)
-  | Bigstring of (unit -> Bigstring.t slice option Lwt.t)
+  | String of (unit -> string option)
+  | Bigstring of (unit -> Bigstring.t option)
 
-let stream_files ~feed:read cb =
-  let open Lwt.Syntax in
-  let open Lwt.Infix in
+let stream_files ~sw ~feed:read ?domain_mgr cb =
+  let open Eio.Std in
   let read =
     match read with
-    | String f -> (fun () -> f () >|= Option.map ~f:(fun s -> `String s))
-    | Bigstring f ->
-      fun () ->
-        f () >|= Option.map ~f:(fun { buf; pos; len } -> `Bigstring (Bigstring.sub_shared buf ~pos ~len))
+    | String f -> (fun () -> f () |> Option.map ~f:(fun s -> `String s))
+    | Bigstring f -> (fun () -> f () |> Option.map ~f:(fun buf -> `Bigstring buf))
   in
-  let stream, bounded = Lwt_stream.create_bounded 1 in
-  let mutex = Lwt_mutex.create () in
+  let stream = Eio.Stream.create 0 in
   let open Angstrom.Buffered in
   let rec loop = function
     | Fail (_, [], err) -> failwith err
     | Fail (_, marks, err) -> failwithf "%s: %s" (String.concat ~sep:" > " marks) err ()
     | Done ({ buf; off = pos; len }, pair) -> (
-      let* () = Lwt_mutex.with_lock mutex (fun () -> bounded#push pair) in
+      Eio.Stream.add stream (Some pair);
       match parse (parser cb) with
       | Partial feed -> (loop [@tailcall]) (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len)))
       | state -> (loop [@tailcall]) state )
     | Partial feed -> (
-      read () >>= function
+      match read () with
       | None -> (
         match feed `Eof with
-        | Done (_, pair) -> Lwt_mutex.with_lock mutex (fun () -> bounded#push pair)
-        | _ -> Lwt.return_unit )
+        | Done (_, pair) -> Eio.Stream.add stream (Some pair)
+        | _ -> () )
       | Some chunk -> (loop [@tailcall]) (feed chunk) )
   in
-  let p =
-    Lwt.finalize
-      (fun () -> loop (parse (parser cb)))
-      (fun () ->
-        bounded#close;
-        Lwt.return_unit)
-  in
-  stream, p
+  Fiber.fork_daemon ~sw (fun () ->
+    let do_work () =
+      loop (parse (parser cb));
+      Eio.Stream.add stream None
+    in
+    (match domain_mgr with
+    | None -> do_work ()
+    | Some domain_mgr -> Eio.Domain_manager.run domain_mgr do_work);
+    `Stop_daemon );
+  stream

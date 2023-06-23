@@ -1,4 +1,3 @@
-module STR = String
 open! Core
 open Angstrom
 
@@ -353,7 +352,7 @@ let make_string_parser ~separator = char separator *> take_till (Char.( = ) sepa
 
 let ws = skip_while SAX.is_ws
 
-let comment = string "<!--" *> Parsing.skip_until_pattern ~pattern:"-->"
+let comment = string "<!--" *> Parsing.bounded_file_reader ~pattern:"-->" Parsing.Storage.dummy
 
 let blank = skip_many (ws *> comment) *> ws
 

@@ -1,14 +1,16 @@
 (library
   (name SZXX)
   (public_name SZXX)
+  (inline_tests) ; TODO
   (libraries
     core
     angstrom
     checkseum.ocaml
     decompress.de
-    lwt
+    eio_main
   )
   (preprocess (pps
+    ppx_jane ; TODO
     ppx_sexp_conv
   ))
 )

@@ -2,8 +2,7 @@
   (name cli)
   (libraries
     SZXX
-    angstrom-lwt-unix
-    lwt.unix
+    eio_main
     yojson
   )
   (preprocess (pps

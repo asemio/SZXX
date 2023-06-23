@@ -1,6 +1,5 @@
 open! Core
-open Lwt.Syntax
-open Lwt.Infix
+open Eio.Std
 
 type location = {
   sheet_number: int;
@@ -97,17 +96,14 @@ let parse_string_cell el =
   | Some { text; _ } -> text
   | None -> filter_map "r" el ~f:(dot_text "t") |> String.concat_array
 
+let to_seq stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream)
+
 let flush_zip_stream zip_stream =
-  Lwt_stream.filter_map
-    (function
-      | Zip.{ filename; _ }, Zip.Data.Fold_bigstring (_, Error msg) ->
-        Some (sprintf "XLSX Parsing error in %s: %s" filename msg)
-      | _ -> None)
-    zip_stream
-  |> Lwt_stream.to_list
-  >>= function
-  | [] -> Lwt.return_unit
-  | errors -> failwith (String.concat ~sep:". " errors)
+  to_seq zip_stream
+  |> Seq.iter (function
+       | Zip.{ filename; _ }, Zip.Data.Fold_bigstring (_, Error msg) ->
+         failwithf "XLSX Parsing error in %s: %s" filename msg ()
+       | _ -> () )
 
 module SST = struct
   type t = string Lazy.t array
@@ -117,26 +113,27 @@ module SST = struct
   let zip_entry_filename = "xl/sharedStrings.xml"
 
   let from_zip ~feed =
-    let q = Queue.create () in
-    let zip_stream, zip_success =
-      Zip.stream_files ~feed (function
-        | { filename = "xl/sharedStrings.xml"; _ } ->
-          let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
-          fold_angstrom ~filter_path ~on_match
-        | _ -> Zip.Action.Skip )
+    let q =
+      Switch.run @@ fun sw ->
+      let q = Queue.create () in
+      let zip_stream =
+        Zip.stream_files ~sw ~feed (function
+          | { filename = "xl/sharedStrings.xml"; _ } ->
+            let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
+            fold_angstrom ~filter_path ~on_match
+          | _ -> Zip.Action.Skip )
+      in
+      flush_zip_stream zip_stream;
+      q
     in
-    let sst_p =
-      let+ () = flush_zip_stream zip_stream in
-      Queue.to_array q
-    in
-    let* () = zip_success in
-    sst_p
+
+    Queue.to_array q
 end
 
-let process_file ?only_sheet ~skip_sst ~feed push finalize =
+let process_file ?only_sheet ~skip_sst ~sw ~feed ?domain_mgr push finalize =
   let q = Queue.create () in
-  let zip_stream, zip_success =
-    Zip.stream_files ~feed (function
+  let zip_stream =
+    Zip.stream_files ~sw ~feed ?domain_mgr (function
       | { filename = "xl/workbook.xml"; _ } -> Skip
       | { filename = "xl/sharedStrings.xml"; _ } when skip_sst -> Skip
       | { filename = "xl/sharedStrings.xml"; _ } ->
@@ -151,22 +148,12 @@ let process_file ?only_sheet ~skip_sst ~feed push finalize =
         >>| (fun sheet_number -> parse_sheet ~sheet_number push)
         |> Option.value ~default:Zip.Action.Skip )
   in
-  let result_p =
-    Lwt.finalize
-      (fun () -> flush_zip_stream zip_stream)
-      (fun () ->
-        finalize ();
-        Lwt.return_unit)
-  in
-  let success =
-    let* () = zip_success in
-    result_p
-  in
-  let sst_p =
-    let+ () = result_p in
-    Queue.to_array q
-  in
-  sst_p, success
+  Fiber.fork_promise ~sw (fun () ->
+    (* [flush_zip_stream] fails the Switch if it encounters an error
+       so we don't need it to be in a try/catch to always call [finalize ()] *)
+    flush_zip_stream zip_stream;
+    finalize ();
+    Queue.to_array q )
 
 let resolve_sst_index (sst : SST.t) ~sst_index =
   let index = Int.of_string sst_index in
@@ -230,16 +217,13 @@ let extract_cell_sst, extract_cell_status =
   in
   extract_cell_sst, extract_cell_status
 
-let col_cache = String.Table.create ()
-
 let index_of_column s =
   let key =
     String.take_while s ~f:(function
       | 'A' .. 'Z' -> true
       | _ -> false )
   in
-  Hashtbl.find_or_add col_cache key ~default:(fun () ->
-    String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1 )
+  String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1
 
 let row_width num_cells data =
   let open Xml.DOM in
@@ -273,36 +257,52 @@ let parse_row_without_sst cell_parser ({ data; sheet_number; row_number } as row
       new_data.(col_index) <- v );
     { row with data = new_data }
 
-let stream_rows ?only_sheet ?(skip_sst = false) ~feed cell_parser =
-  let stream, push = Lwt_stream.create () in
-  let finalize () = push None in
+let stream_rows ?only_sheet ?(skip_sst = false) ~sw ~feed cell_parser =
+  let stream = Eio.Stream.create 0 in
+  let push x = Eio.Stream.add stream (Some (parse_row_without_sst cell_parser x)) in
+  let finalize () = Eio.Stream.add stream None in
 
-  let sst_p, processed_p =
-    process_file ?only_sheet ~skip_sst ~feed
-      (fun x -> push (Some (parse_row_without_sst cell_parser x)))
-      finalize
+  let sst_p = process_file ?only_sheet ~skip_sst ~sw ~feed push finalize in
+  stream, sst_p
+
+let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~sw ~feed ?domain_mgr () =
+  let stream = Eio.Stream.create 0 in
+  let push x = Eio.Stream.add stream (Some x) in
+  let finalize () = Eio.Stream.add stream None in
+
+  let sst_p = process_file ?only_sheet ~skip_sst ~sw ~feed ?domain_mgr push finalize in
+  stream, sst_p
+
+let with_minimal_buffering stream sst_p ~parse =
+  let seq = to_seq stream in
+  let unparsed = Queue.create () in
+  let has_more =
+    Fiber.first
+      (fun () ->
+        Seq.iter
+          (fun x ->
+            Queue.enqueue unparsed x;
+            Fiber.yield ())
+          seq;
+        false)
+      (fun () ->
+        let _sst = Promise.await_exn sst_p in
+        true)
   in
-  stream, sst_p, processed_p
+  let sst = Promise.await_exn sst_p in
+  let seq1 = Seq.of_dispenser (fun () -> Queue.dequeue unparsed |> Option.map ~f:(parse ~sst)) in
+  let seq2 = if has_more then Seq.map (parse ~sst) seq else Seq.empty in
+  Seq.append seq1 seq2
 
-let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~feed () =
-  let stream, push = Lwt_stream.create () in
-  let finalize () = push None in
+let stream_rows_buffer ?only_sheet ~sw ~feed cell_parser =
+  let stream = Eio.Stream.create 0 in
+  let push x = Eio.Stream.add stream (Some x) in
+  let finalize () = Eio.Stream.add stream None in
 
-  let sst_p, processed_p = process_file ?only_sheet ~skip_sst ~feed (fun x -> push (Some x)) finalize in
-  stream, sst_p, processed_p
+  let sst_p = process_file ?only_sheet ~skip_sst:false ~sw ~feed push finalize in
 
-let stream_rows_buffer ?only_sheet ~feed cell_parser =
-  let stream, push = Lwt_stream.create () in
-  let finalize () = push None in
-  let sst_p, processed_p =
-    process_file ?only_sheet ~skip_sst:false ~feed (fun x -> push (Some x)) finalize
-  in
-  let parsed_stream =
-    Lwt_stream.map_s
-      (fun row -> sst_p |> Lwt.map (fun sst -> parse_row_with_sst sst cell_parser row))
-      stream
-  in
-  parsed_stream, processed_p
+  let parse ~sst row = parse_row_with_sst sst cell_parser row in
+  with_minimal_buffering stream sst_p ~parse
 
 let yojson_cell_parser : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_parser =
   {
