@@ -45,23 +45,43 @@ module Action = struct
       }
     | Fold_bigstring of {
         init: 'a;
-        f: entry -> Bigstring.t -> len:int -> 'a -> 'a;
+        f: entry -> Bigstring.t -> 'a -> 'a;
       }
     | Parse of 'a Angstrom.t
+    | Parse_many of {
+        parser: 'a Angstrom.t;
+        on_parse: 'a -> unit;
+      }
 end
 
 module Data = struct
+  type 'a parser_state =
+    | Success of 'a
+    | Failed of {
+        error: string;
+        unconsumed: string;
+      }
+    | Terminated_early of { unconsumed: string }
+    | Incomplete
+
+  let parser_state_to_result = function
+  | Success x -> Ok x
+  | Failed { error; unconsumed = _ } -> Error (sprintf "Parsing error: %s" error)
+  | Terminated_early { unconsumed = _ } -> Error "Could not parse all input"
+  | Incomplete -> Error "File incomplete, encountered EOF too early"
+
   type 'a t =
     | Skip
     | String of string
     | Fold_string of 'a
     | Fold_bigstring of 'a
-    | Parse of ('a, string) result
+    | Parse of 'a parser_state
+    | Parse_many of unit parser_state
 end
 
-let slice_size = Parsing.slice_size
+let slice_bits = 13
 
-let slice_bits = Parsing.slice_bits
+let slice_size = Int.(2 ** slice_bits)
 
 module Storage = struct
   type t = Parsing.Storage.t = {
@@ -72,7 +92,7 @@ module Storage = struct
   let deflated flush =
     let finished = ref true in
     let w = De.make_window ~bits:slice_bits in
-    let outbs = Bigstring.create slice_size in
+    let outbs = De.bigstring_create slice_size in
     let decoder = De.Inf.decoder `Manual ~o:outbs ~w in
     let rec do_uncompress () =
       match De.Inf.decode decoder with
@@ -105,9 +125,9 @@ module Storage = struct
   let stored flush =
     let add bs ~len =
       flush bs ~len;
-      Angstrom.return ()
+      Angstrom.commit
     in
-    let finalize () = Angstrom.return () in
+    let finalize () = Angstrom.commit in
     { add; finalize }
 end
 
@@ -129,7 +149,7 @@ module Mode = struct
 
   let string ~buffer_size =
     let res = Bigbuffer.create buffer_size in
-    let flush bs ~len = Bigbuffer.add_bigstring res (Bigstring.sub_shared bs ~pos:0 ~len) in
+    let flush bs ~len = Bigbuffer.add_bigstring res (Bigstringaf.sub bs ~off:0 ~len) in
     let complete () =
       let str = Bigbuffer.contents res in
       let len = String.length str in
@@ -157,54 +177,95 @@ module Mode = struct
     let flush bs ~len =
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc;
-      acc := f entry bs ~len !acc
+      acc := f entry (Bigstringaf.sub bs ~off:0 ~len) !acc
     in
     let complete () = Data.Fold_bigstring !acc, !bytes_processed, !crc in
     { flush; complete }
 
-  let parse angstrom =
+  let handle_parse_result state : 'a Data.parser_state =
+    let final =
+      match state with
+      | Angstrom.Buffered.Partial feed -> feed `Eof
+      | x -> x
+    in
+    let unconsumed Angstrom.Buffered.{ buf; off; len } = Bigstringaf.substring buf ~off ~len in
+    match final with
+    | Done ({ len = 0; _ }, x) -> Success x
+    | Done (u, _) -> Terminated_early { unconsumed = unconsumed u }
+    | Fail (u, ll, msg) ->
+      Failed { error = sprintf "%s: %s" (String.concat ~sep:" > " ll) msg; unconsumed = unconsumed u }
+    | Partial _ -> Incomplete
+
+  let parse parser =
     let crc = ref Optint.zero in
     let bytes_processed = ref 0 in
     let open Angstrom.Buffered in
-    let state = ref (parse angstrom) in
+    let state = ref (parse parser) in
     let flush bs ~len =
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc;
       match !state with
+      | Done ({ len = 0; _ }, x) -> state := Done ({ buf = Bigstring.copy bs; len; off = 0 }, x)
+      | Fail ({ len = 0; _ }, x, y) -> state := Fail ({ buf = Bigstring.copy bs; len; off = 0 }, x, y)
       | Done _
        |Fail _ ->
         ()
-      | Partial feed -> state := feed (`Bigstring (Bigstring.sub_shared bs ~pos:0 ~len))
+      | Partial feed -> state := feed (`Bigstring (Bigstringaf.sub bs ~off:0 ~len))
     in
-    let complete () =
-      let final_state =
-        match !state with
-        | (Done _ as x)
-         |(Fail _ as x) ->
-          x
-        | Partial feed -> feed `Eof
-      in
-      Data.Parse (state_to_result final_state), !bytes_processed, !crc
+    let complete () = Data.Parse (handle_parse_result !state), !bytes_processed, !crc in
+    { flush; complete }
+
+  let parse_many parser on_parse =
+    let crc = ref Optint.zero in
+    let bytes_processed = ref 0 in
+    let open Angstrom.Buffered in
+    let async_many p f = Parsing.skip_many Angstrom.(p <* commit >>| f) in
+    let wait = ref () in
+    let k x = wait := on_parse x in
+    let pushback () = !wait in
+    let state = ref (parse (async_many parser k)) in
+
+    let flush bs ~len =
+      bytes_processed := !bytes_processed + len;
+      crc := Checkseum.Crc32.digest_bigstring bs 0 len !crc;
+      match !state with
+      | Done ({ len = 0; _ }, ()) -> state := Done ({ buf = Bigstring.copy bs; len; off = 0 }, ())
+      | Fail ({ len = 0; _ }, x, y) -> state := Fail ({ buf = Bigstring.copy bs; len; off = 0 }, x, y)
+      | Done _
+       |Fail _ ->
+        ()
+      | Partial feed ->
+        let next = feed (`Bigstring (Bigstring.sub_shared bs ~pos:0 ~len)) in
+        pushback ();
+        state := next
     in
+    let complete () = Data.Parse_many (handle_parse_result !state), !bytes_processed, !crc in
     { flush; complete }
 end
 
 let fixed_size_reader size Storage.{ add; finalize } =
   let open Angstrom in
-  let rec loop = function
-    | n when n > slice_size ->
+  let acc = ref size in
+  let read_slice =
+    let* () = return () in
+    if !acc < slice_size
+    then fail "Done"
+    else
       let* bs = take_bigstring slice_size in
+      acc := !acc - slice_size;
       let* () = add bs ~len:slice_size in
-      (loop [@tailcall]) (n - slice_size)
-    | 0 ->
-      let* () = finalize () in
       commit
-    | len ->
-      let* bs = take_bigstring len <* commit in
-      let* () = add bs ~len in
-      (loop [@tailcall]) 0
   in
-  loop size
+  let* () = Parsing.skip_many read_slice in
+  let* () =
+    match !acc with
+    | 0 -> return ()
+    | len ->
+      let* bs = take_bigstring len in
+      add bs ~len
+  in
+  let* () = finalize () in
+  commit
 
 let ( << ) = Int64.( lsl )
 
@@ -215,9 +276,9 @@ let ( .*[] ) s i = s.[i] |> Char.to_int |> Int64.of_int_exn
 let parse_le_uint64 ?(offset = 0) s =
   (1, s.*[offset]) |> Fn.apply_n_times ~n:7 (fun (i, x) -> i + 1, s.*[i + offset] << i * 8 ||| x) |> snd
 
-let parser cb =
+let parse_one cb =
   let open Angstrom in
-  let local_file_header_signature = string "PK\003\004" in
+  let local_file_header_signature = string "PK\003\004" *> return () in
   let descriptor_parser =
     lift3
       (fun crc compressed_size uncompressed_size -> { crc; compressed_size; uncompressed_size })
@@ -225,7 +286,8 @@ let parser cb =
   in
   let rec extra_fields_parser acc = function
     | 0 -> return acc
-    | left when left < 0 -> failwith "Mismatch between reported and actual extra fields size"
+    | left when left < 0 ->
+      failwith "SZXX: Corrupted file. Mismatch between reported and actual extra fields size"
     | left ->
       lift2 Tuple2.create LE.any_uint16 LE.any_uint16 >>= fun (id, size) ->
       take size >>= fun data ->
@@ -238,12 +300,12 @@ let parser cb =
   let flags_methd_parser =
     lift2
       (fun flags methd ->
-        if flags land 0x001 <> 0 then failwith "Encrypted entries not supported";
+        if flags land 0x001 <> 0 then failwith "SZXX: Encrypted ZIP entries not supported";
         let methd =
           match methd with
           | 0 -> Stored
           | 8 -> Deflated
-          | x -> failwithf "Unsupported compression method %d" x ()
+          | x -> failwithf "SZXX: Unsupported ZIP compression method %d" x ()
         in
         flags, methd)
       LE.any_uint16 LE.any_uint16
@@ -258,43 +320,45 @@ let parser cb =
             compressed_size = parse_le_uint64 ~offset:8 data;
           }
       | { id = 1; size; _ } ->
-        failwithf "Expected 16 bytes for ZIP64 extra field length but found %d" size ()
+        failwithf "SZXX: Corrupted file. Expected 16 bytes for ZIP64 extra field length but found %d" size
+          ()
       | _ -> None )
   in
   let entry_parser =
-    Parsing.bounded_file_reader ~pattern:"PK\003\004" Parsing.Storage.dummy
-    *> (LE.any_uint16 >>| function
-        | 20 -> Zip_2_0
-        | 45 -> Zip_4_5
-        | x -> failwithf "Unsupported version: %d. Please report this bug." x () )
-    >>= fun version_needed ->
-    lift3
-      (fun (flags, methd) descriptor (filename, extra_fields) ->
-        let descriptor =
-          match version_needed with
-          | Zip_2_0 -> descriptor
-          | Zip_4_5 ->
-            Option.value_exn ~message:"Missing ZIP64 extra field"
-              (get_zip64_descriptor ~crc:descriptor.crc extra_fields)
-        in
-        {
-          version_needed;
-          flags;
-          trailing_descriptor_present =
-            ( flags land 0x008 <> 0
-            || Int64.(descriptor.compressed_size = 0L)
-            || Int64.(descriptor.uncompressed_size = 0L) );
-          methd;
-          descriptor;
-          filename;
-          extra_fields;
-        })
-      ( flags_methd_parser
+    let* () = Parsing.bounded_file_reader ~pattern:"PK\003\004" Parsing.Storage.noop in
+    let* version_needed =
+      LE.any_uint16 >>| function
+      | 20 -> Zip_2_0
+      | 45 -> Zip_4_5
+      | x -> failwithf "SZXX: Unsupported ZIP version: %d. Please report this bug." x ()
+    in
+    let+ flags, methd =
+      flags_methd_parser
       <* LE.any_uint16 (* last modified time *)
-      <* LE.any_uint16 (* last modified date *) )
-      descriptor_parser dynamic_len_fields_parser
+      <* LE.any_uint16 (* last modified date *)
+    and+ descriptor = descriptor_parser
+    and+ filename, extra_fields = dynamic_len_fields_parser in
+    let descriptor =
+      match version_needed with
+      | Zip_2_0 -> descriptor
+      | Zip_4_5 ->
+        Option.value_exn ~message:"Missing ZIP64 extra field"
+          (get_zip64_descriptor ~crc:descriptor.crc extra_fields)
+    in
+    {
+      version_needed;
+      flags;
+      trailing_descriptor_present =
+        ( flags land 0x008 <> 0
+        || Int64.(descriptor.compressed_size = 0L)
+        || Int64.(descriptor.uncompressed_size = 0L) );
+      methd;
+      descriptor;
+      filename;
+      extra_fields;
+    }
   in
-  lift2 const entry_parser commit >>= fun entry ->
+  let* entry = entry_parser <* commit in
   let reader ~buffer_size () =
     let Mode.{ flush; complete } =
       match cb entry with
@@ -302,7 +366,8 @@ let parser cb =
       | Action.String -> Mode.string ~buffer_size
       | Action.Fold_string { init; f } -> Mode.fold_string ~init ~f entry
       | Action.Fold_bigstring { init; f } -> Mode.fold_bigstring ~init ~f entry
-      | Action.Parse angstrom -> Mode.parse angstrom
+      | Action.Parse parser -> Mode.parse parser
+      | Action.Parse_many { parser; on_parse } -> Mode.parse_many parser on_parse
     in
     let storage_method, zipped_length =
       match entry.methd with
@@ -316,31 +381,39 @@ let parser cb =
     in
     file_reader storage_method >>| complete
   in
-  let file =
+  let+ (data, size, crc), entry =
     match entry.trailing_descriptor_present with
     | false ->
-      reader ~buffer_size:(Int64.to_int_exn entry.descriptor.uncompressed_size) () >>| fun x -> x, entry
+      let+ data_size_crc = reader ~buffer_size:(Int64.to_int_exn entry.descriptor.uncompressed_size) () in
+      data_size_crc, entry
     | true ->
-      lift3
-        (fun data_size_crc _header descriptor -> data_size_crc, { entry with descriptor })
-        (reader ~buffer_size:(slice_size * 4) ())
-        (option "" local_file_header_signature)
-        descriptor_parser
+      let+ data_size_crc = reader ~buffer_size:slice_size ()
+      and+ () = option () local_file_header_signature
+      and+ descriptor = descriptor_parser in
+      data_size_crc, { entry with descriptor }
   in
-  file >>| fun data ->
-  match data with
-  | (_data, size, _crc), entry when Int64.(entry.descriptor.uncompressed_size <> of_int size) ->
-    failwithf "%s: Size mismatch: %d but expected %Ld" entry.filename size
+  let valid_length = Int64.(entry.descriptor.uncompressed_size = of_int size) in
+  let valid_crc = Int32.(entry.descriptor.crc = Optint.to_int32 crc) in
+  match valid_length, valid_crc with
+  | false, false ->
+    failwithf "SZXX: File '%s': Size and CRC mismatch: %d bytes but expected %Ld bytes" entry.filename
+      size entry.descriptor.uncompressed_size ()
+  | false, true ->
+    failwithf "SZXX: File '%s': Size mismatch: %d bytes but expected %Ld bytes" entry.filename size
       entry.descriptor.uncompressed_size ()
-  | (_data, _size, crc), entry when Int32.(entry.descriptor.crc <> Optint.to_int32 crc) ->
-    failwithf "%s: CRC mismatch" entry.filename ()
-  | (data, _size, _crc), entry -> entry, data
+  | true, false -> failwithf "SZXX: File '%s': CRC mismatch" entry.filename ()
+  | true, true -> entry, data
+
+let parse_trailing_central_directory =
+  let open Angstrom in
+  let* () = Parsing.bounded_file_reader ~pattern:"PK\005\006" Parsing.Storage.noop in
+  take 18 *> end_of_input
 
 type feed =
   | String of (unit -> string option)
   | Bigstring of (unit -> Bigstring.t option)
 
-let stream_files ~sw ~feed:read ?domain_mgr cb =
+let stream_files ~sw ~feed:read ?dispatcher cb =
   let open Eio.Std in
   let read =
     match read with
@@ -348,30 +421,30 @@ let stream_files ~sw ~feed:read ?domain_mgr cb =
     | Bigstring f -> (fun () -> f () |> Option.map ~f:(fun buf -> `Bigstring buf))
   in
   let stream = Eio.Stream.create 0 in
+  let parser =
+    let open Angstrom in
+    Parsing.skip_many (parse_one cb >>| fun pair -> Eio.Stream.add stream (Some pair))
+    *> parse_trailing_central_directory
+  in
   let open Angstrom.Buffered in
   let rec loop = function
-    | Fail (_, [], err) -> failwith err
-    | Fail (_, marks, err) -> failwithf "%s: %s" (String.concat ~sep:" > " marks) err ()
-    | Done ({ buf; off = pos; len }, pair) -> (
-      Eio.Stream.add stream (Some pair);
-      match parse (parser cb) with
-      | Partial feed -> (loop [@tailcall]) (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len)))
-      | state -> (loop [@tailcall]) state )
+    | Fail _ as state -> state_to_result state |> Result.ok_or_failwith
+    | Done (_, ()) -> failwith "SZXX: ZIP processing completed before reaching end of input"
     | Partial feed -> (
       match read () with
       | None -> (
         match feed `Eof with
-        | Done (_, pair) -> Eio.Stream.add stream (Some pair)
+        | Fail _ as state -> state_to_result state |> Result.ok_or_failwith
         | _ -> () )
       | Some chunk -> (loop [@tailcall]) (feed chunk) )
   in
   Fiber.fork_daemon ~sw (fun () ->
     let do_work () =
-      loop (parse (parser cb));
+      loop (parse parser);
       Eio.Stream.add stream None
     in
-    (match domain_mgr with
+    (match dispatcher with
     | None -> do_work ()
-    | Some domain_mgr -> Eio.Domain_manager.run domain_mgr do_work);
+    | Some d -> Dispatcher.run_exn d ~f:do_work);
     `Stop_daemon );
   stream

@@ -61,6 +61,7 @@ val to_seq : 'a option Eio.Stream.t -> 'a Seq.t
    See README.md for examples.
 *)
 val stream_rows :
+  ?dispatcher:Dispatcher.t ->
   ?only_sheet:int ->
   ?skip_sst:bool ->
   sw:Switch.t ->
@@ -76,18 +77,24 @@ val with_minimal_buffering :
   Warning: This function can result in linear (as opposed to constant) memory usage.
   See README for more information.
 *)
-val stream_rows_buffer : ?only_sheet:int -> sw:Switch.t -> feed:Zip.feed -> 'a cell_parser -> 'a row Seq.t
+val stream_rows_buffer :
+  ?dispatcher:Dispatcher.t ->
+  ?only_sheet:int ->
+  sw:Switch.t ->
+  feed:Zip.feed ->
+  'a cell_parser ->
+  'a row Seq.t
 
 (**
   Same as [stream_rows] but returns raw XML elements instead of parsed XLSX rows.
   This function can be useful to filter out uninteresting rows at a lower cost.
 *)
 val stream_rows_unparsed :
+  ?dispatcher:Dispatcher.t ->
   ?only_sheet:int ->
   ?skip_sst:bool ->
   sw:Switch.t ->
   feed:Zip.feed ->
-  ?domain_mgr:#Eio.Domain_manager.t ->
   unit ->
   Xml.DOM.element row option Eio.Stream.t * SST.t Promise.or_exn
 

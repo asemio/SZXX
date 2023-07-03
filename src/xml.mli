@@ -111,7 +111,10 @@ type parser_options = {
       When [accept_html_boolean_attributes] is [true], [attr2] will be [""] *)
   accept_unquoted_attributes: bool;
     (** Invalid XML but valid HTML: [<div attr1="foo" attr2=bar>]
-          When [accept_unquoted_attributes] is [true], [attr2] will be ["bar"] *)
+      When [accept_unquoted_attributes] is [true], [attr2] will be ["bar"] *)
+  accept_single_quoted_attributes: bool;
+    (** Invalid XML but valid HTML: [<div attr1="foo" attr2=bar>]
+         When [accept_unquoted_attributes] is [true], [attr2] will be ["bar"] *)
 }
 
 val default_parser_options : parser_options

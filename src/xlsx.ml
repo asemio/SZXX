@@ -47,29 +47,20 @@ let parse_datetime ~zone f =
   let ofday = Time.Ofday.of_span_since_start_of_day_exn frac in
   Time.of_date_ofday ~zone date ofday
 
-let xml_parser =
-  Xml.make_parser Xml.{ accept_html_boolean_attributes = false; accept_unquoted_attributes = false }
+let xml_parser_options =
+  Xml.
+    {
+      accept_html_boolean_attributes = false;
+      accept_unquoted_attributes = false;
+      accept_single_quoted_attributes = false;
+    }
 
-let fold_angstrom ~filter_path ~on_match =
-  let open Angstrom.Buffered in
-  let rec loop state acc =
-    match state, acc with
-    | Done ({ buf; off = pos; len }, node), acc -> (
-      let acc = Xml.SAX.Stream.folder ~filter_path ~on_match acc node in
-      match parse xml_parser with
-      | Partial feed -> (loop [@tailcall]) (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len))) acc
-      | state -> (loop [@tailcall]) state acc )
-    | state -> state
-  in
-  let f _entry bs ~len = function
-    | (_, Error _) as x -> x
-    | (Fail (_, [], err) as parse), _ -> parse, Error err
-    | (Fail (_, marks, err) as parse), _ ->
-      parse, Error (sprintf "%s: %s" (String.concat ~sep:" > " marks) err)
-    | (Done _ as parse), Ok _ -> parse, Error "Impossible case Done. Please report this bug."
-    | Partial feed, (Ok _ as acc) -> loop (feed (`Bigstring (Bigstring.sub_shared bs ~pos:0 ~len))) acc
-  in
-  Zip.Action.Fold_bigstring { init = parse xml_parser, Ok Xml.SAX.Stream.init; f }
+let xml_parser = Xml.make_parser xml_parser_options
+
+let fold_angstrom ~filter_path ~on_match () =
+  let sax = ref (Ok Xml.SAX.Stream.init) in
+  let on_parse node = sax := Xml.SAX.Stream.folder ~filter_path ~on_match !sax node in
+  Zip.Action.Parse_many { parser = xml_parser; on_parse }
 
 let parse_sheet ~sheet_number push =
   let num = ref 0 in
@@ -88,7 +79,7 @@ let parse_sheet ~sheet_number push =
       | _ -> incr num ));
     push { sheet_number; row_number = !num; data = el.children }
   in
-  fold_angstrom ~filter_path:[ "worksheet"; "sheetData"; "row" ] ~on_match
+  fold_angstrom ~filter_path:[ "worksheet"; "sheetData"; "row" ] ~on_match ()
 
 let parse_string_cell el =
   let open Xml.DOM in
@@ -101,9 +92,11 @@ let to_seq stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream)
 let flush_zip_stream zip_stream =
   to_seq zip_stream
   |> Seq.iter (function
-       | Zip.{ filename; _ }, Zip.Data.Fold_bigstring (_, Error msg) ->
-         failwithf "XLSX Parsing error in %s: %s" filename msg ()
-       | _ -> () )
+       | (_ : Zip.entry), Zip.Data.(Skip | String _ | Fold_string _ | Fold_bigstring _ | Parse _) -> ()
+       | { filename; _ }, Parse_many state -> (
+         match Zip.Data.parser_state_to_result state with
+         | Ok x -> x
+         | Error msg -> failwithf "SZXX: File '%s': %s" filename msg () ) )
 
 module SST = struct
   type t = string Lazy.t array
@@ -120,7 +113,7 @@ module SST = struct
         Zip.stream_files ~sw ~feed (function
           | { filename = "xl/sharedStrings.xml"; _ } ->
             let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
-            fold_angstrom ~filter_path ~on_match
+            fold_angstrom ~filter_path ~on_match ()
           | _ -> Zip.Action.Skip )
       in
       flush_zip_stream zip_stream;
@@ -130,15 +123,15 @@ module SST = struct
     Queue.to_array q
 end
 
-let process_file ?only_sheet ~skip_sst ~sw ~feed ?domain_mgr push finalize =
+let process_file ?dispatcher ?only_sheet ~skip_sst ~sw ~feed push finalize =
   let q = Queue.create () in
   let zip_stream =
-    Zip.stream_files ~sw ~feed ?domain_mgr (function
+    Zip.stream_files ~sw ~feed ?dispatcher (function
       | { filename = "xl/workbook.xml"; _ } -> Skip
       | { filename = "xl/sharedStrings.xml"; _ } when skip_sst -> Skip
       | { filename = "xl/sharedStrings.xml"; _ } ->
         let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
-        fold_angstrom ~filter_path:SST.filter_path ~on_match
+        fold_angstrom ~filter_path:SST.filter_path ~on_match ()
       | { filename; _ } ->
         let open Option.Monad_infix in
         String.chop_prefix ~prefix:"xl/worksheets/sheet" filename
@@ -257,20 +250,20 @@ let parse_row_without_sst cell_parser ({ data; sheet_number; row_number } as row
       new_data.(col_index) <- v );
     { row with data = new_data }
 
-let stream_rows ?only_sheet ?(skip_sst = false) ~sw ~feed cell_parser =
+let stream_rows ?dispatcher ?only_sheet ?(skip_sst = false) ~sw ~feed cell_parser =
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some (parse_row_without_sst cell_parser x)) in
   let finalize () = Eio.Stream.add stream None in
 
-  let sst_p = process_file ?only_sheet ~skip_sst ~sw ~feed push finalize in
+  let sst_p = process_file ?dispatcher ?only_sheet ~skip_sst ~sw ~feed push finalize in
   stream, sst_p
 
-let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~sw ~feed ?domain_mgr () =
+let stream_rows_unparsed ?dispatcher ?only_sheet ?(skip_sst = false) ~sw ~feed () =
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some x) in
   let finalize () = Eio.Stream.add stream None in
 
-  let sst_p = process_file ?only_sheet ~skip_sst ~sw ~feed ?domain_mgr push finalize in
+  let sst_p = process_file ?dispatcher ?only_sheet ~skip_sst ~sw ~feed push finalize in
   stream, sst_p
 
 let with_minimal_buffering stream sst_p ~parse =
@@ -294,12 +287,12 @@ let with_minimal_buffering stream sst_p ~parse =
   let seq2 = if has_more then Seq.map (parse ~sst) seq else Seq.empty in
   Seq.append seq1 seq2
 
-let stream_rows_buffer ?only_sheet ~sw ~feed cell_parser =
+let stream_rows_buffer ?dispatcher ?only_sheet ~sw ~feed cell_parser =
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some x) in
   let finalize () = Eio.Stream.add stream None in
 
-  let sst_p = process_file ?only_sheet ~skip_sst:false ~sw ~feed push finalize in
+  let sst_p = process_file ?dispatcher ?only_sheet ~skip_sst:false ~sw ~feed push finalize in
 
   let parse ~sst row = parse_row_with_sst sst cell_parser row in
   with_minimal_buffering stream sst_p ~parse

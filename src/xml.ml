@@ -336,8 +336,6 @@ let is_token = function
  |'['
  |']'
  |'\x20'
- |'\x0d'
- |'\x09'
  |'\x0a' ->
   false
 | _ -> true
@@ -346,90 +344,103 @@ let is_text = function
 | '<' -> false
 | _ -> true
 
-let drop p = p >>| const ()
+let drop p = p *> return ()
 
 let make_string_parser ~separator = char separator *> take_till (Char.( = ) separator) <* char separator
 
 let ws = skip_while SAX.is_ws
 
-let comment = string "<!--" *> Parsing.bounded_file_reader ~pattern:"-->" Parsing.Storage.dummy
+let comment = string "<!--" *> Parsing.bounded_file_reader ~pattern:"-->" Parsing.Storage.noop
 
-let blank = skip_many (ws *> comment) *> ws
+let blank = Parsing.skip_many (ws *> comment) *> ws
 
 let token_parser = take_while1 is_token
 
 type parser_options = {
   accept_html_boolean_attributes: bool;
   accept_unquoted_attributes: bool;
+  accept_single_quoted_attributes: bool;
 }
 
-let default_parser_options = { accept_html_boolean_attributes = true; accept_unquoted_attributes = false }
+let default_parser_options =
+  {
+    accept_html_boolean_attributes = true;
+    accept_unquoted_attributes = false;
+    accept_single_quoted_attributes = false;
+  }
 
-let make_parser { accept_html_boolean_attributes; accept_unquoted_attributes } =
-  let xml_string_parser =
-    let dq_string = make_string_parser ~separator:'"' in
-    let sq_string = make_string_parser ~separator:'\'' in
-    if accept_unquoted_attributes
-    then (
-      let uq_string =
-        take_while1 (function
-          | ' '
-           |'"'
-           |'\''
-           |'='
-           |'<'
-           |'>'
-           |'`' ->
-            false
-          | _ -> true )
-      in
-      choice [ dq_string; sq_string; uq_string ] )
-    else choice [ dq_string; sq_string ]
+let xml_string_parser options =
+  let dq_string = make_string_parser ~separator:'"' in
+  let sq_string () = make_string_parser ~separator:'\'' in
+  let uq_string () =
+    take_while1 (function
+      | ' '
+       |'"'
+       |'\''
+       |'='
+       |'<'
+       |'>'
+       |'`' ->
+        false
+      | _ -> true )
   in
-  let attr_parser =
-    let value_parser = ws *> char '=' *> ws *> xml_string_parser in
-    lift2 Tuple2.create token_parser
-      (if accept_html_boolean_attributes then option "" value_parser else value_parser)
-  in
-  let doctype_parser =
-    let declaration =
-      string "<!" *> token_parser *> ws *> skip_many (ws *> (token_parser <|> xml_string_parser))
-      <* ws
-      <* char '>'
-    in
-    let declarations = char '[' *> skip_many (blank *> declaration) <* blank <* char ']' in
-    (string "<!DOCTYPE" <|> string "<!doctype")
-    *> ( skip_many (blank *> choice [ drop token_parser; drop xml_string_parser; declarations ])
-       <* blank
-       <* char '>' )
-    >>| const SAX.Nothing
-  in
-  let comment_parser = comment >>| const SAX.Nothing in
-  let prologue_parser =
-    (* UTF-8 BOM *)
-    option "" (string "\xEF\xBB\xBF")
-    *> blank
-    *> string "<?xml "
-    *> (many (ws *> attr_parser) >>| fun attrs -> SAX.Prologue attrs)
+  match options.accept_unquoted_attributes, options.accept_single_quoted_attributes with
+  | true, true -> choice [ dq_string; sq_string (); uq_string () ]
+  | true, false -> choice [ dq_string; uq_string () ]
+  | false, true -> choice [ dq_string; sq_string () ]
+  | false, false -> dq_string
+
+let attr_parser ~xml_string_parser options =
+  let value_parser = ws *> char '=' *> ws *> xml_string_parser in
+  lift2 Tuple2.create token_parser
+    (if options.accept_html_boolean_attributes then option "" value_parser else value_parser)
+
+let doctype_parser ~xml_string_parser =
+  let declaration =
+    string "<!" *> token_parser *> ws *> Parsing.skip_many (ws *> (token_parser <|> xml_string_parser))
     <* ws
-    <* string "?>"
+    <* char '>'
   in
-  let cdata_parser =
-    string "<![CDATA[" *> Parsing.take_until_pattern ~pattern:"]]>" >>| fun s -> SAX.Cdata s
-  in
-  let element_open_parser =
-    lift3
-      (fun tag attrs self_closing ->
-        let eopen = SAX.Element_open { tag; attrs } in
-        if self_closing then SAX.Many [ eopen; Element_close tag ] else eopen)
-      (char '<' *> ws *> token_parser)
-      (many (ws *> attr_parser) <* ws)
-      (option false (char '/' >>| const true) <* char '>')
-  in
-  let element_close_parser =
-    string "</" *> ws *> (token_parser >>| fun s -> SAX.Element_close s) <* (ws <* char '>')
-  in
-  let text_parser = take_while1 is_text >>| fun s -> SAX.Text s in
+  let declarations = char '[' *> Parsing.skip_many (blank *> declaration) <* blank <* char ']' in
+  (string "<!DOCTYPE" <|> string "<!doctype")
+  *> ( Parsing.skip_many (blank *> choice [ declarations; drop token_parser; drop xml_string_parser ])
+     <* blank
+     <* char '>' )
+  *> return SAX.Nothing
+
+let comment_parser = comment *> return SAX.Nothing
+
+let prologue_parser ~attr_parser =
+  (* UTF-8 BOM *)
+  option "" (string "\xEF\xBB\xBF")
+  *> blank
+  *> string "<?xml "
+  *> (many (ws *> attr_parser) >>| fun attrs -> SAX.Prologue attrs)
+  <* ws
+  <* string "?>"
+
+let cdata_parser =
+  string "<![CDATA[" *> Parsing.take_until_pattern ~pattern:"]]>" >>| fun s -> SAX.Cdata s
+
+let element_open_parser ~attr_parser =
+  let+ tag = char '<' *> ws *> token_parser
+  and+ attrs = many (ws *> attr_parser) <* ws
+  and+ self_closing = option false (char '/' *> return true) <* char '>' in
+
+  let eopen = SAX.Element_open { tag; attrs } in
+  if self_closing then SAX.Many [ eopen; Element_close tag ] else eopen
+
+let element_close_parser =
+  string "</" *> ws *> (token_parser >>| fun s -> SAX.Element_close s) <* (ws <* char '>')
+
+let text_parser = take_while1 is_text >>| fun s -> SAX.Text s
+
+let make_parser options =
+  let xml_string_parser = xml_string_parser options in
+  let attr_parser = attr_parser ~xml_string_parser options in
+  let element_open_parser = element_open_parser ~attr_parser in
+  let prologue_parser = prologue_parser ~attr_parser in
+  let doctype_parser = doctype_parser ~xml_string_parser in
   let slow_path =
     choice
       [

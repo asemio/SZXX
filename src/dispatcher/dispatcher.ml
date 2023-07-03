@@ -73,9 +73,13 @@ let create ~sw ~num_domains ~domain_concurrency ?(capacity = 0) ?(transient = tr
   done;
   instance
 
-let run { stream; _ } ~f =
+let run_promise { stream; _ } ~f =
   let p, w = Promise.create () in
   Eio.Stream.add stream (Process (Pack (f, w)));
+  p
+
+let run instance ~f =
+  let p = run_promise instance ~f in
   Promise.await p
 
 let run_exn instance ~f =

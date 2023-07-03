@@ -21,7 +21,7 @@ let feed_flow src =
   Bigstring
     (fun () ->
       match Eio.Flow.single_read src buf with
-      | len -> Some (Bigstring.sub_shared ~pos:0 ~len buf.buffer)
+      | len -> Some (Bigstringaf.sub ~off:0 ~len buf.buffer)
       | exception End_of_file -> None)
 
 let readme_example1 env filename () =

@@ -21,6 +21,8 @@ val run : t -> f:(unit -> 'a) -> ('a, exn) result
 
 val run_exn : t -> f:(unit -> 'a) -> 'a
 
+val run_promise : t -> f:(unit -> 'a) -> ('a, exn) result Eio.Promise.t
+
 (** Waits for all running jobs to complete, then returns.
     No new jobs are started, even if they were already enqueued.
     To abort all running jobs instead of waiting for them, call [Switch.fail] on the Switch used to create this workpool *)

@@ -2,14 +2,10 @@
   (names xlsx xml zip)
   (libraries
     SZXX
-    angstrom-lwt-unix
     angstrom-eio
-    lwt_eio
 
-    alcotest-lwt
+    alcotest
     core
-    lwt
-    lwt.unix
     yojson
   )
   (preprocess (pps

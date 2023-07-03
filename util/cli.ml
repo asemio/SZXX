@@ -19,18 +19,18 @@ let feed_flow src =
   Bigstring
     (fun () ->
       match Eio.Flow.single_read src buf with
-      | len -> Some (Bigstring.sub_shared ~pos:0 ~len buf.buffer)
+      | len -> Some (Bigstringaf.sub ~off:0 ~len buf.buffer)
       | exception End_of_file -> None)
+
+let make_dispatcher ~sw domain_mgr =
+  Dispatcher.create ~sw ~num_domains:1 ~domain_concurrency:1 ~capacity:0 domain_mgr
 
 let count env xlsx_path =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  (* let dispatcher = make_dispatcher ~sw env#domain_mgr in *)
   let t0 = Time_now.nanoseconds_since_unix_epoch () in
-  let stream, _sst_p =
-    Xlsx.stream_rows_unparsed ~sw
-      ~feed:(feed_flow src) (* ~domain_mgr:env#domain_mgr *)
-      ~skip_sst:false ()
-  in
+  let stream, _sst_p = Xlsx.stream_rows_unparsed ~sw ~feed:(feed_flow src) ~skip_sst:true () in
 
   let n = Xlsx.to_seq stream |> Seq.fold_left (fun acc _x -> acc + 1) 0 in
   let t1 = Time_now.nanoseconds_since_unix_epoch () in
@@ -117,8 +117,7 @@ let count_total_string_length env xlsx_path =
   in
   let t1 = Time_now.nanoseconds_since_unix_epoch () in
   Eio.Flow.copy_string
-    (sprintf "Parse SST: %s\n"
-       (Int63.(t1 - t0 |> to_float) |> Time.Span.of_ns |> Time.Span.to_string_hum) )
+    (sprintf !"Parse SST: %{Time.Span#hum}\n" (Int63.(t1 - t0 |> to_float) |> Time.Span.of_ns))
     env#stdout;
   let num_rows = ref 0 in
   let num_strings = ref 0 in
@@ -145,10 +144,12 @@ let count_total_string_length env xlsx_path =
   |> Seq.iter (fun el ->
        let _row = Xlsx.parse_row_with_sst sst cell_parser el in
        incr num_rows );
+  let t2 = Time_now.nanoseconds_since_unix_epoch () in
   Eio.Flow.copy_string
     (sprintf
-       !"Rows: %{Int#hum}\nStrings: %{Int#hum}\nTotal string length: %{Int#hum}\n"
-       !num_rows !num_strings !total_length )
+       !"Rows: %{Int#hum}\nStrings: %{Int#hum}\nTotal string length: %{Int#hum}\n%{Time.Span#hum}\n"
+       !num_rows !num_strings !total_length
+       (Int63.(t2 - t0 |> to_float) |> Time.Span.of_ns) )
     env#stdout
 
 let count_tokens env xlsx_path =
@@ -172,12 +173,12 @@ let count_tokens env xlsx_path =
   let files =
     Zip.stream_files ~sw ~feed:(feed_flow src) (function
       | { filename = "xl/sharedStrings.xml"; _ } ->
-        Zip.Action.Parse Angstrom.(skip_many (Xml.parser >>| on_parse))
+        Zip.Action.Parse Angstrom.(SZXX__Parsing.skip_many (Xml.parser >>| on_parse))
       | _ -> Zip.Action.Skip )
   in
   Xlsx.to_seq files
   |> Seq.iter (function
-       | _, Zip.Data.Parse result -> Result.ok_or_failwith result
+       | _, Zip.Data.Parse state -> Zip.Data.parser_state_to_result state |> Result.ok_or_failwith
        | _ -> () );
   Eio.Flow.copy_string
     (sprintf

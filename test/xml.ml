@@ -491,7 +491,14 @@ type buffer = Buffer.t
 
 let sexp_of_buffer buf = Sexp.List [ Atom "Buffer"; Atom (Buffer.contents buf) ]
 
-let xml_to_dom ?(options = SZXX.Xml.default_parser_options) ?strict test data () =
+let xml_to_dom
+  ?(options =
+    SZXX.Xml.
+      {
+        accept_html_boolean_attributes = true;
+        accept_unquoted_attributes = true;
+        accept_single_quoted_attributes = true;
+      }) ?strict test data () =
   match
     Angstrom.parse_string ~consume:Angstrom.Consume.All
       (Angstrom.many SZXX.Xml.(make_parser options))
@@ -509,8 +516,7 @@ let xml_to_dom ?(options = SZXX.Xml.default_parser_options) ?strict test data ()
       | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.To_DOM.state}" state ()
       | Error msg -> failwith msg
     in
-    Json_diff.check (doc_to_yojson doc) data;
-    Lwt.return_unit
+    Json_diff.check (doc_to_yojson doc) data
   | Error msg -> failwith msg
 
 let xml_stream ?(options = SZXX.Xml.default_parser_options) ?strict test data filter_path () =
@@ -527,8 +533,7 @@ let xml_stream ?(options = SZXX.Xml.default_parser_options) ?strict test data fi
         SZXX.Xml.SAX.Stream.folder ?strict ~filter_path ~on_match (Ok acc) x )
     in
     let streamed = `Assoc [ "data", [%to_yojson: element array] (Queue.to_array queue) ] in
-    Json_diff.check streamed data;
-    Lwt.return_unit
+    Json_diff.check streamed data
   | Error msg -> failwith msg
 
 let readme_example1 () =
@@ -551,26 +556,16 @@ let readme_example1 () =
     |> Result.ok_or_failwith
   in
   (* Do something with `xml` *)
-  Lwt_io.printl
-    (Option.value_map xml.top ~default:"--" ~f:(fun el -> Xml.DOM.sexp_of_element el |> Sexp.to_string))
+  Option.value_map xml.top ~default:"--" ~f:(fun el -> Xml.DOM.sexp_of_element el |> Sexp.to_string)
+  |> print_endline
 
 let readme_example2 () =
-  let open Lwt.Syntax in
   let open SZXX in
-  let input_channel, output_channel = Lwt_io.pipe () in
-  let* () = Lwt_io.write output_channel Test1.raw in
-  let* () = Lwt_io.close output_channel in
+  let src = Eio.Flow.string_source Test1.raw in
 
   let state = ref (Ok Xml.SAX.To_DOM.init) in
-  let on_parse node =
-    state := Xml.SAX.To_DOM.folder !state node;
-    Lwt.return_unit
-  in
-  let* _rest, result =
-    Lwt.finalize
-      (fun () -> Angstrom_lwt_unix.parse_many Xml.parser on_parse input_channel)
-      (fun () -> Lwt_io.close input_channel)
-  in
+  let on_parse node = state := Xml.SAX.To_DOM.folder !state node in
+  let _rest, result = Angstrom_eio.parse_many Xml.parser on_parse src in
 
   match result, !state with
   | Error msg, _
@@ -578,19 +573,14 @@ let readme_example2 () =
     failwith msg
   | Ok (), Ok parsed_xml ->
     (* Do something with parsed_xml *)
-    let* () =
-      Option.value_map parsed_xml.top ~default:"--" ~f:(fun el ->
-        Xml.DOM.sexp_of_element el |> Sexp.to_string )
-      |> Lwt_io.print
-    in
-    Lwt.return_unit
+    Option.value_map parsed_xml.top ~default:"--" ~f:(fun el ->
+      Xml.DOM.sexp_of_element el |> Sexp.to_string )
+    |> print_endline
 
 let readme_example3 () =
-  let open Lwt.Syntax in
   let open SZXX in
-  let input_channel, output_channel = Lwt_io.pipe () in
-  let* () =
-    Lwt_io.write output_channel
+  let src =
+    Eio.Flow.string_source
       {|
 <html>
   <head></head>
@@ -602,7 +592,6 @@ let readme_example3 () =
 </html>
 |}
   in
-  let* () = Lwt_io.close output_channel in
 
   let state = ref (Ok Xml.SAX.Stream.init) in
   let filter_path = [ "html"; "body"; "div" ] in
@@ -610,15 +599,8 @@ let readme_example3 () =
     (* Do something with `div` *)
     print_endline (Xml.DOM.sexp_of_element div |> Sexp.to_string)
   in
-  let on_parse node =
-    state := Xml.SAX.Stream.folder ~filter_path ~on_match !state node;
-    Lwt.return_unit
-  in
-  let* _rest, result =
-    Lwt.finalize
-      (fun () -> Angstrom_lwt_unix.parse_many Xml.parser on_parse input_channel)
-      (fun () -> Lwt_io.close input_channel)
-  in
+  let on_parse node = state := Xml.SAX.Stream.folder ~filter_path ~on_match !state node in
+  let _rest, result = Angstrom_eio.parse_many Xml.parser on_parse src in
 
   match result, !state with
   | Error msg, _
@@ -626,35 +608,42 @@ let readme_example3 () =
     failwith msg
   | Ok (), Ok shallow_tree ->
     (* Do something with `shallow_tree` or `acc_top_level_divs` *)
-    let* () =
-      Lwt_io.printl
-        (Option.value_map shallow_tree.decl_attrs ~default:"--" ~f:(fun x ->
-           Xml.sexp_of_attr_list x |> Sexp.to_string ) )
-    in
-    Lwt.return_unit
+    Option.value_map shallow_tree.decl_attrs ~default:"--" ~f:(fun x ->
+      Xml.sexp_of_attr_list x |> Sexp.to_string )
+    |> print_endline
 
 let () =
-  Lwt_main.run
-  @@ Alcotest_lwt.run ~verbose:true "SZXX XML"
-       [
-         ( "XML",
-           [
-             "To DOM 1", `Quick, xml_to_dom Test1.raw Test1.data;
-             "To DOM 2", `Quick, xml_to_dom Test2.raw Test2.data;
-             "Stream 2", `Quick, xml_stream Test2.raw Test2.data_streamed [ "sst"; "si"; "t" ];
-             "To DOM 3", `Quick, xml_to_dom Test3.raw Test3.data;
-             ( "To DOM 4",
-               `Quick,
-               xml_to_dom ~strict:false
-                 ~options:{ accept_html_boolean_attributes = true; accept_unquoted_attributes = true }
-                 Test4.raw Test4.data );
-             ( "Stream 4",
-               `Quick,
-               xml_stream ~strict:false
-                 ~options:{ accept_html_boolean_attributes = true; accept_unquoted_attributes = true }
-                 Test4.raw Test4.data_streamed [ "html"; "head"; "meta" ] );
-             "Sync To_DOM", `Quick, readme_example1;
-             "Async To_DOM", `Quick, readme_example2;
-             "Async Stream", `Quick, readme_example3;
-           ] );
-       ]
+  Eio_main.run @@ fun _env ->
+  Alcotest.run ~verbose:true "SZXX XML"
+    [
+      ( "XML",
+        [
+          (* "To DOM 1", `Quick, xml_to_dom Test1.raw Test1.data; *)
+          "To DOM 2", `Quick, xml_to_dom Test2.raw Test2.data;
+          "Stream 2", `Quick, xml_stream Test2.raw Test2.data_streamed [ "sst"; "si"; "t" ];
+          "To DOM 3", `Quick, xml_to_dom Test3.raw Test3.data;
+          ( "To DOM 4",
+            `Quick,
+            xml_to_dom ~strict:false
+              ~options:
+                {
+                  accept_html_boolean_attributes = true;
+                  accept_unquoted_attributes = true;
+                  accept_single_quoted_attributes = false;
+                }
+              Test4.raw Test4.data );
+          ( "Stream 4",
+            `Quick,
+            xml_stream ~strict:false
+              ~options:
+                {
+                  accept_html_boolean_attributes = true;
+                  accept_unquoted_attributes = true;
+                  accept_single_quoted_attributes = false;
+                }
+              Test4.raw Test4.data_streamed [ "html"; "head"; "meta" ] );
+          "Sync To_DOM", `Quick, readme_example1;
+          "Async To_DOM", `Quick, readme_example2;
+          "Async Stream", `Quick, readme_example3;
+        ] );
+    ]

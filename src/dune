@@ -3,8 +3,10 @@
   (public_name SZXX)
   (inline_tests) ; TODO
   (libraries
+    SZXX.dispatcher
     core
     angstrom
+    angstrom-eio
     checkseum.ocaml
     decompress.de
     eio_main

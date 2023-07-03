@@ -46,18 +46,34 @@ module Action : sig
       }
     | Fold_bigstring of {
         init: 'a;
-        f: entry -> Bigstring.t -> len:int -> 'a -> 'a;
+        f: entry -> Bigstring.t -> 'a -> 'a;
       }
     | Parse of 'a Angstrom.t
+    | Parse_many of {
+        parser: 'a Angstrom.t;
+        on_parse: 'a -> unit;
+      }
 end
 
 module Data : sig
+  type 'a parser_state =
+    | Success of 'a
+    | Failed of {
+        error: string;
+        unconsumed: string;
+      }
+    | Terminated_early of { unconsumed: string }
+    | Incomplete
+
+  val parser_state_to_result : 'a parser_state -> ('a, string) result
+
   type 'a t =
     | Skip
     | String of string
     | Fold_string of 'a
     | Fold_bigstring of 'a
-    | Parse of ('a, string) result
+    | Parse of 'a parser_state
+    | Parse_many of unit parser_state
 end
 
 type feed =
@@ -91,6 +107,6 @@ type feed =
 val stream_files :
   sw:Switch.t ->
   feed:feed ->
-  ?domain_mgr:#Eio.Domain_manager.t ->
+  ?dispatcher:Dispatcher.t ->
   (entry -> 'a Action.t) ->
   (entry * 'a Data.t) option Eio.Stream.t
