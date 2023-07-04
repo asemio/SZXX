@@ -1,27 +1,107 @@
 open! Core
 open Angstrom
 
+let ( .*{} ) bs pos = Bigstring.unsafe_get_uint8 bs ~pos
+
+let return_true = return true
+
+let return_false = return false
+
+let return_none = return None
+
+let return_unit = return ()
+
+let fail_pattern = fail "pattern"
+
+let fail_backtrack = fail "backtrack"
+
 (** More efficient than [Angstrom.skip_many]. See https://github.com/inhabitedtype/angstrom/pull/219 *)
 let skip_many p =
   fix (fun m ->
-    p >>| (fun _ -> true) <|> return false >>= function
+    p >>= (fun _ -> return_true) <|> return_false >>= function
     | true -> m
-    | false -> return () )
+    | false -> return_unit )
+
+let skip_find p =
+  fix (fun m ->
+    let found = ref None in
+    p
+    >>= (function
+          | None -> return_true
+          | Some _ as x ->
+            found := x;
+            fail_backtrack)
+    <|> return_false
+    >>= function
+    | true -> m
+    | false -> return !found )
+
+let skip_n_times n p =
+  if n <= 0
+  then return_unit
+  else
+    fix (fun m ->
+      let count = ref 0 in
+      let* _ = p in
+      incr count;
+      if !count < n then m else return_unit )
+
+let peek_with len f =
+  Unsafe.peek len f <|> (advance len *> fail_backtrack <|> return_unit) *> Unsafe.peek len f
+
+let equal_sub buf1 ~pos1 buf2 ~pos2 ~len =
+  let i = ref 0 in
+  while !i < len && buf1.*{pos1 + !i} = buf2.*{pos2 + !i} do
+    incr i
+  done;
+  !i = len
+
+let string s =
+  let len = String.length s in
+  let bs = Bigstringaf.of_string s ~off:0 ~len in
+  Unsafe.take len (fun buf ~off ~len ->
+    if equal_sub buf ~pos1:off bs ~pos2:0 ~len then return_unit else fail_pattern )
+  >>= Fn.id
+
+let bigstring bs =
+  Unsafe.take (Bigstring.length bs) (fun buf ~off ~len ->
+    if equal_sub buf ~pos1:off bs ~pos2:0 ~len then return_unit else fail_pattern )
+  >>= Fn.id
+
+let drop p = p *> return_unit
+
+(** Fastest benchmarked way to do this. Inspired by [Cstruct.ffind_sub] *)
+let sub_index ~pattern ~patlen bs ~off ~len =
+  if patlen > len
+  then None
+  else (
+    let max_zidx_sub = patlen - 1 in
+    let max_zidx_s = off + len - patlen in
+    let rec loop i k =
+      if i > max_zidx_s
+      then None
+      else if k > max_zidx_sub
+      then Some (i - off)
+      else if k > 0
+      then if pattern.*{k} = bs.*{i + k} then loop i (k + 1) else loop (i + 1) 0
+      else if pattern.*{0} = bs.*{i}
+      then loop i 1
+      else loop (i + 1) 0
+    in
+    loop off 0 )
 
 module Storage = struct
   type t = {
-    add: Bigstring.t -> len:int -> unit Angstrom.t;
-    finalize: unit -> unit Angstrom.t;
+    add: Bigstring.t -> off:int -> len:int -> unit;
+    finalize: unit -> unit;
+    commit: unit Angstrom.t;
   }
 
-  let noop = { add = (fun _ ~len:_ -> return ()); finalize = (fun () -> return ()) }
+  let noop_backtrack =
+    { add = (fun _ ~off:_ ~len:_ -> ()); finalize = (fun () -> ()); commit = return_unit }
+
+  let noop = { add = (fun _ ~off:_ ~len:_ -> ()); finalize = (fun () -> ()); commit }
 end
-
-(* let slice_size = Int.(2 ** 10) *)
-
-let slice_size = 2000
-
-let ( .*{} ) bs pos = Bigstring.unsafe_get_uint8 bs ~pos
 
 (* Boyer–Moore–Horspool algorithm *)
 module BMH = struct
@@ -37,144 +117,76 @@ module BMH = struct
     done;
     table
 
-  let bmh_exact ~pattern ~patlen table bs =
+  let run ~pattern ~patlen table bs =
     let rec loop = function
       | -1 -> Found
       | i when bs.*{i} = pattern.*{i} -> (loop [@tailcall]) (i - 1)
       | _ -> table.(bs.*{patlen - 1})
     in
     loop (patlen - 1)
-
-  let bmh_index ~pattern ~patlen table bs ~pos =
-    let rec loop = function
-      | -1 -> Found
-      | i when bs.*{pos + i} = pattern.*{i} -> (loop [@tailcall]) (i - 1)
-      | _ -> table.(bs.*{pos + patlen - 1})
-    in
-    loop (patlen - 1)
 end
 
-(** [~pos2] is always 0 *)
-let equal_sub buf1 ~pos1 buf2 ~len =
-  let rec aux acc = function
-    | -1 -> acc
-    | i -> (aux [@tailcall]) (acc && buf1.*{pos1 + i} = buf2.*{i}) (i - 1)
-  in
-  aux true (len - 1)
-  [@@hot]
-
-(** Fastest benchmarked way to do this. Inspired by [Cstruct.is_infix] *)
-let is_sub ~pattern ~patlen bs =
-  let len = Bigstring.length bs in
-  if patlen > len
-  then false
-  else (
-    let max_zidx_a = patlen - 1 in
-    let max_zidx_s = len - patlen in
-    let rec loop i k =
-      if i > max_zidx_s
-      then false
-      else if k > max_zidx_a
-      then true
-      else if k > 0
-      then if pattern.*{k} = bs.*{i + k} then loop i (succ k) else loop (succ i) 0
-      else if pattern.*{0} = bs.*{i}
-      then loop i 1
-      else loop (succ i) 0
-    in
-    loop 0 0 )
-
-let%expect_test "is_sub" =
-  let bos = Bigstring.of_string in
-  let test pattern s =
-    let patlen = String.length pattern in
-    let pattern = bos pattern in
-    is_sub ~pattern ~patlen (bos s) |> Bool.to_string |> print_endline
-  in
-  test "abc" "def";
-  [%expect {| false |}];
-  test "abc" "abcdef";
-  [%expect {| true |}];
-  test "abc" "defabc";
-  [%expect {| true |}];
-  test "abc" "defasabdillceabbabbcabczz";
-  [%expect {| true |}];
-  test "abc" "defasabdillceabbabbccbczz";
-  [%expect {| false |}];
-  test "]]>" "a]]>";
-  [%expect {| true |}];
-  test "]]>" "ab]]>";
-  [%expect {| true |}];
-  test "]]>" "abc]]>";
-  [%expect {| true |}]
-
-let bounded_file_reader ~pattern Storage.{ add; finalize } =
-  let pattern = Bigstring.of_string pattern in
-  (* let cpattern = Cstruct.of_bigarray pattern in *)
-  let patlen = Bigstring.length pattern in
-  let table = BMH.make_table ~pattern ~patlen in
-  let rec slow_path window =
-    match BMH.bmh_exact ~pattern ~patlen table window with
-    | Found -> finalize ()
+let bounded_file_reader ~slice_size ~pattern Storage.{ add; finalize; commit } =
+  let patlen = String.length pattern in
+  let pattern = Bigstringaf.of_string pattern ~off:0 ~len:patlen in
+  let rec slow_path table window =
+    match BMH.run ~pattern ~patlen table window with
+    | Found ->
+      finalize ();
+      commit
     | Shift by ->
-      let* more = take by in
-      let* () = add ~len:by window in
+      add ~off:0 ~len:by window;
       let diff = patlen - by in
-      Bigstring.unsafe_blit ~src:window ~src_pos:by ~dst:window ~dst_pos:0 ~len:diff;
-      Bigstring.From_string.unsafe_blit ~src:more ~src_pos:0 ~dst:window ~dst_pos:diff ~len:by;
-      (slow_path [@tailcall]) window
+      Bigstringaf.unsafe_blit window ~src_off:by window ~dst_off:0 ~len:diff;
+      let* () =
+        Unsafe.take by (fun buf ~off ~len ->
+          Bigstringaf.unsafe_blit buf ~src_off:off window ~dst_off:diff ~len )
+      in
+      (slow_path [@tailcall]) table window
     | Restart ->
-      let* more = take_bigstring patlen in
-      let* () = add ~len:patlen window in
-      (slow_path [@tailcall]) more
+      add ~off:0 ~len:patlen window;
+      let* () =
+        Unsafe.take patlen (fun buf ~off ~len ->
+          Bigstringaf.unsafe_blit buf ~src_off:off window ~dst_off:0 ~len )
+      in
+      (slow_path [@tailcall]) table window
   in
 
-  let do_fast_path = function
-    | window when is_sub ~pattern ~patlen window -> fail "Switch to slow path (1)"
-    | window -> (
-      match BMH.bmh_index ~pattern ~patlen table window ~pos:(slice_size - patlen) with
-      | Found -> fail "Impossible case: bounded_file_reader do_fast_path found"
-      | Shift by when equal_sub window ~pos1:(slice_size - (patlen - by)) pattern ~len:(patlen - by) -> (
-        let* more = take_bigstring by in
-        match equal_sub pattern ~pos1:(patlen - by) more ~len:by with
-        | true -> fail "Switch to slow path (2)"
-        | false ->
-          let* () = add ~len:slice_size window in
-          add ~len:by more )
-      | Shift _
-       |Restart ->
-        add ~len:slice_size window )
+  let fast_path =
+    peek_with (slice_size + patlen) (sub_index ~pattern ~patlen) >>= function
+    | Some _ as x -> return x
+    | None -> Unsafe.take slice_size add *> commit *> return_none
   in
 
-  let fast_path = take_bigstring slice_size >>= do_fast_path in
+  skip_find fast_path >>= function
+  | None ->
+    (* This branch is hit when the fast path fails due to the remaining
+       length being less than the slice_size. That's why the slow_path
+       cannot be using a large Unsafe.peek/take: we don't know how much
+       is left. *)
+    take_bigstring patlen >>= slow_path (BMH.make_table ~pattern ~patlen)
+  | Some at ->
+    ((if at > 0 then Unsafe.take at add else return_unit) >>| finalize) *> commit *> bigstring pattern
 
-  let* () = skip_many fast_path in
-  (* let* xx = pos in
-     Eio.Std.traceln !"ON SLOW PATH after: %d (%d)" !nfast xx; *)
-  take_bigstring patlen >>= slow_path
-
-let take_until_pattern ~pattern =
+let take_until_pattern ~slice_size ~pattern =
   let storage buf partial staged =
     Storage.
       {
         add =
-          (fun bs ~len ->
+          (fun bs ~off ~len ->
             if !staged + len > slice_size
             then (
               Buffer.add_subbytes buf partial ~pos:0 ~len:!staged;
               staged := 0 );
-            Bigstring.To_bytes.unsafe_blit ~src:bs ~src_pos:0 ~dst:partial ~dst_pos:!staged ~len;
-            staged := !staged + len;
-            return ());
-        finalize =
-          (fun () ->
-            if !staged > 0 then Buffer.add_subbytes buf partial ~pos:0 ~len:!staged;
-            return ());
+            Bigstringaf.unsafe_blit_to_bytes bs ~src_off:off partial ~dst_off:!staged ~len;
+            staged := !staged + len);
+        finalize = (fun () -> if !staged > 0 then Buffer.add_subbytes buf partial ~pos:0 ~len:!staged);
+        commit;
       }
   in
-  let* () = return () in
+  let* () = return_unit in
   let buf = Buffer.create 32 in
   let partial = Bytes.create slice_size in
   let staged = ref 0 in
-  let+ () = bounded_file_reader ~pattern (storage buf partial staged) in
+  let+ () = bounded_file_reader ~slice_size ~pattern (storage buf partial staged) in
   Buffer.contents buf

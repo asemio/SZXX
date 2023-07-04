@@ -1,5 +1,4 @@
 open! Core
-open Angstrom
 
 type attr_list = (string * string) list [@@deriving sexp_of]
 
@@ -325,6 +324,9 @@ let unescape original =
     loop buf start;
     Buffer.contents buf
 
+open Angstrom
+open Parsing
+
 let is_token = function
 | '"'
  |'='
@@ -344,15 +346,14 @@ let is_text = function
 | '<' -> false
 | _ -> true
 
-let drop p = p *> return ()
-
 let make_string_parser ~separator = char separator *> take_till (Char.( = ) separator) <* char separator
 
 let ws = skip_while SAX.is_ws
 
-let comment = string "<!--" *> Parsing.bounded_file_reader ~pattern:"-->" Parsing.Storage.noop
+let comment =
+  string "<!--" *> bounded_file_reader ~slice_size:Int.(2 ** 8) ~pattern:"-->" Storage.noop_backtrack
 
-let blank = Parsing.skip_many (ws *> comment) *> ws
+let blank = skip_many (ws *> comment) *> ws
 
 let token_parser = take_while1 is_token
 
@@ -397,13 +398,13 @@ let attr_parser ~xml_string_parser options =
 
 let doctype_parser ~xml_string_parser =
   let declaration =
-    string "<!" *> token_parser *> ws *> Parsing.skip_many (ws *> (token_parser <|> xml_string_parser))
+    string "<!" *> token_parser *> ws *> skip_many (ws *> (token_parser <|> xml_string_parser))
     <* ws
     <* char '>'
   in
-  let declarations = char '[' *> Parsing.skip_many (blank *> declaration) <* blank <* char ']' in
+  let declarations = char '[' *> skip_many (blank *> declaration) <* blank <* char ']' in
   (string "<!DOCTYPE" <|> string "<!doctype")
-  *> ( Parsing.skip_many (blank *> choice [ declarations; drop token_parser; drop xml_string_parser ])
+  *> ( skip_many (blank *> choice [ declarations; drop token_parser; drop xml_string_parser ])
      <* blank
      <* char '>' )
   *> return SAX.Nothing
@@ -412,7 +413,7 @@ let comment_parser = comment *> return SAX.Nothing
 
 let prologue_parser ~attr_parser =
   (* UTF-8 BOM *)
-  option "" (string "\xEF\xBB\xBF")
+  option () (string "\xEF\xBB\xBF")
   *> blank
   *> string "<?xml "
   *> (many (ws *> attr_parser) >>| fun attrs -> SAX.Prologue attrs)
@@ -420,13 +421,13 @@ let prologue_parser ~attr_parser =
   <* string "?>"
 
 let cdata_parser =
-  string "<![CDATA[" *> Parsing.take_until_pattern ~pattern:"]]>" >>| fun s -> SAX.Cdata s
+  string "<![CDATA[" *> take_until_pattern ~slice_size:Int.(2 ** 10) ~pattern:"]]>" >>| fun s ->
+  SAX.Cdata s
 
 let element_open_parser ~attr_parser =
   let+ tag = char '<' *> ws *> token_parser
   and+ attrs = many (ws *> attr_parser) <* ws
-  and+ self_closing = option false (char '/' *> return true) <* char '>' in
-
+  and+ self_closing = option false (char '/' *> return_true) <* char '>' in
   let eopen = SAX.Element_open { tag; attrs } in
   if self_closing then SAX.Many [ eopen; Element_close tag ] else eopen
 
@@ -436,6 +437,7 @@ let element_close_parser =
 let text_parser = take_while1 is_text >>| fun s -> SAX.Text s
 
 let make_parser options =
+  let ( .*{} ) = Bigstringaf.unsafe_get in
   let xml_string_parser = xml_string_parser options in
   let attr_parser = attr_parser ~xml_string_parser options in
   let element_open_parser = element_open_parser ~attr_parser in
@@ -454,14 +456,18 @@ let make_parser options =
       ]
   in
   let fast_path =
-    peek_string 2 >>= function
-    | "</" -> element_close_parser
-    | "<!" -> choice [ comment_parser; cdata_parser; doctype_parser ]
-    | "<?"
-     |"\xEF\xBB" ->
-      prologue_parser
-    | s when Char.(s.[0] = '<') -> element_open_parser
-    | _ -> text_parser
+    Unsafe.peek 2 (fun buf ~off ~len:_ ->
+      if Char.(buf.*{off} = '<')
+      then (
+        match buf.*{off + 1} with
+        | '/' -> element_close_parser
+        | '!' -> choice [ comment_parser; cdata_parser; doctype_parser ]
+        | '?' -> prologue_parser
+        | _ -> element_open_parser )
+      else if Char.(buf.*{off} = '\xEF' && buf.*{off + 1} = '\xBB')
+      then prologue_parser
+      else text_parser )
+    >>= Fn.id
   in
   fast_path <|> slow_path
 
