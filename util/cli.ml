@@ -234,7 +234,7 @@ let count_tokens xlsx_path =
   Lwt.return_unit
 
 let () =
-  Sys.argv |> function
+  Sys.get_argv () |> function
   | [| _; "extract_sst"; file |] -> Lwt_main.run (extract_sst file)
   | [| _; "count"; file |] -> Lwt_main.run (count file)
   | [| _; "length"; file |] -> Lwt_main.run (length file)

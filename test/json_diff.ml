@@ -14,12 +14,12 @@ let flatten (json : Yojson.Safe.t) =
   let rec loop json prefix acc =
     match json with
     | `Assoc pairs ->
-      String.Table.add_exn acc ~key:prefix ~data:(`Assoc []);
+      Hashtbl.add_exn acc ~key:prefix ~data:(`Assoc []);
       List.iter pairs ~f:(fun (key, value) -> loop value (sprintf "%s.%s" prefix key) acc)
     | `List values ->
-      String.Table.add_exn acc ~key:prefix ~data:(`List []);
+      Hashtbl.add_exn acc ~key:prefix ~data:(`List []);
       List.iteri values ~f:(fun key value -> loop value (sprintf "%s[%d]" prefix key) acc)
-    | x -> String.Table.add_exn acc ~key:prefix ~data:x
+    | x -> Hashtbl.add_exn acc ~key:prefix ~data:x
   in
   match json with
   | `Assoc _ ->
@@ -36,7 +36,7 @@ let check left right =
   in
   let stringify = Yojson.Safe.to_string in
   let _merged =
-    String.Table.merge (flatten left) (flatten right) ~f:(fun ~key -> function
+    Hashtbl.merge (flatten left) (flatten right) ~f:(fun ~key -> function
       | `Left x -> sprintf "%s: %s" (color (sprintf "+++ %s" key) `Green) (stringify x) |> mismatch
       | `Right y -> sprintf "%s: %s" (color (sprintf "--- %s" key) `Red) (stringify y) |> mismatch
       | `Both (x, y) when Yojson.Safe.equal x y -> None
