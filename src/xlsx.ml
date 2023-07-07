@@ -238,7 +238,7 @@ let index_of_column s =
       | 'A' .. 'Z' -> true
       | _ -> false)
   in
-  String.Table.find_or_add col_cache key ~default:(fun () ->
+  Hashtbl.find_or_add col_cache key ~default:(fun () ->
       String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1)
 
 let row_width num_cells data =
