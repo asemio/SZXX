@@ -1,6 +1,6 @@
 open! Core
 
-type attr_list = (string * string) list [@@deriving sexp_of]
+type attr_list = (string * string) list [@@deriving sexp_of, compare, equal]
 
 let get_attr attrs name = List.find_map attrs ~f:(fun (x, y) -> Option.some_if String.(x = name) y)
 
@@ -16,7 +16,7 @@ module DOM = struct
     text: string;
     children: element array;
   }
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   let dot tag node = Array.find node.children ~f:(fun x -> String.(x.tag = tag))
 
@@ -52,13 +52,13 @@ module SAX = struct
     | Cdata of string
     | Nothing
     | Many of node list
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   type partial_text = {
     literal: bool;
     raw: string;
   }
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   type partial = {
     tag: string;
@@ -67,7 +67,7 @@ module SAX = struct
     children: DOM.element Queue.t;
     staged: DOM.element Queue.t;
   }
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   let make_partial tag attrs =
     {
@@ -102,13 +102,14 @@ module SAX = struct
     match Queue.length text with
     | 0 -> ""
     | 1 when (Queue.get text 0).literal -> (Queue.get text 0).raw
-    | _ ->
-      let final = Buffer.create 16 in
-      let preserve_space = lazy (preserve_space attrs) in
+    | len ->
+      let final = Buffer.create (len * 8) in
       let _prev_ws =
         Queue.fold text ~init:(false, false) ~f:(fun ((after_first, prev_ws) as acc) -> function
-          | { raw = ""; _ } -> acc
-          | { literal; raw } when literal || force preserve_space ->
+          | { literal = true; raw } ->
+            Buffer.add_string final raw;
+            true, true
+          | { raw; _ } when preserve_space attrs ->
             if after_first && not prev_ws then Buffer.add_char final ' ';
             Buffer.add_string final raw;
             true, is_ws raw.[String.length raw - 1]
@@ -125,7 +126,7 @@ module SAX = struct
       stack: partial list;
       top: DOM.element option;
     }
-    [@@deriving sexp_of]
+    [@@deriving sexp_of, compare, equal]
 
     let init = { decl_attrs = None; stack = []; top = None }
 
@@ -177,7 +178,7 @@ module SAX = struct
       path_stack: string list;
       top: DOM.element option;
     }
-    [@@deriving sexp_of]
+    [@@deriving sexp_of, compare, equal]
 
     let init = { decl_attrs = None; stack = []; path_stack = [ "" ]; top = None }
 
@@ -427,7 +428,7 @@ let cdata_parser =
 let element_open_parser ~attr_parser =
   let+ tag = char '<' *> ws *> token_parser
   and+ attrs = many (ws *> attr_parser) <* ws
-  and+ self_closing = option false (char '/' *> return_true) <* char '>' in
+  and+ self_closing = option false (char '/' *> ws *> return_true) <* char '>' in
   let eopen = SAX.Element_open { tag; attrs } in
   if self_closing then SAX.Many [ eopen; Element_close tag ] else eopen
 
@@ -472,3 +473,30 @@ let make_parser options =
   fast_path <|> slow_path
 
 let parser = make_parser default_parser_options
+
+module Easy = struct
+  type document = {
+    decl_attrs: attr_list;
+    top: DOM.element;
+  }
+  [@@deriving sexp_of, compare, equal]
+
+  let of_string ?parser:(node_parser = parser) ?strict raw =
+    let state = ref (Ok SAX.To_DOM.init) in
+    let parser =
+      skip_many
+        ( node_parser >>| fun raw_node ->
+          let node =
+            match raw_node with
+            | Text s -> SAX.Text (unescape s)
+            | x -> x
+          in
+          state := SAX.To_DOM.folder ?strict !state node )
+    in
+    let open Result.Monad_infix in
+    parse_string ~consume:All parser raw >>= fun () ->
+    !state >>= function
+    | { top = None; _ } -> Error "No XML element found"
+    | { top = Some top; decl_attrs = None; _ } -> Ok { top; decl_attrs = [] }
+    | { top = Some top; decl_attrs = Some decl_attrs; _ } -> Ok { top; decl_attrs }
+end

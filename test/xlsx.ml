@@ -15,21 +15,12 @@ let extractors =
       null = `Null;
     }
 
-let feed_flow src =
-  let open SZXX.Zip in
-  let buf = Cstruct.create 4096 in
-  Bigstring
-    (fun () ->
-      match Eio.Flow.single_read src buf with
-      | len -> Some (Bigstringaf.sub ~off:0 ~len buf.buffer)
-      | exception End_of_file -> None)
-
 let readme_example1 env filename () =
   let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
   (* yojson_cell_parser is an easy way to quickly inspect a file by mapping XLSX's data types to JSON *)
-  let seq = SZXX.Xlsx.stream_rows_buffer ~sw ~feed:(feed_flow src) SZXX.Xlsx.yojson_cell_parser in
+  let seq = SZXX.Xlsx.stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src) SZXX.Xlsx.yojson_cell_parser in
   Seq.iter
     (fun (row : Yojson.Basic.t SZXX.Xlsx.row) ->
       `List (Array.to_list row.data) |> Yojson.Basic.to_string |> print_endline)
@@ -42,7 +33,7 @@ let readme_example2 env filename () =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
   let open SZXX.Xlsx in
-  let stream, sst_p = stream_rows ~sw ~feed:(feed_flow src) yojson_cell_parser in
+  let stream, sst_p = stream_rows ~sw ~feed:(SZXX.Feed.of_flow src) yojson_cell_parser in
   let get_filtered () =
     to_seq stream
     |> Seq.filter (fun row ->
@@ -73,7 +64,7 @@ let xlsx env filename () =
     Switch.run @@ fun sw ->
     let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
     let open SZXX.Xlsx in
-    let seq = stream_rows_buffer ~sw ~feed:(feed_flow src) extractors in
+    let seq = stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src) extractors in
     let json = Seq.fold_left (fun acc row -> `List (Array.to_list row.data) :: acc) [] seq in
     `Assoc [ "data", `List (List.rev json) ]
   in
@@ -91,7 +82,7 @@ let xlsx_unparsed env filename () =
     Switch.run @@ fun sw ->
     let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
     let open SZXX.Xlsx in
-    let stream, sst_p = stream_rows_unparsed ~sw ~feed:(feed_flow src) () in
+    let stream, sst_p = stream_rows_unparsed ~sw ~feed:(SZXX.Feed.of_flow src) () in
     let parsed =
       with_minimal_buffering stream sst_p ~parse:(fun ~sst element ->
         let row = parse_row_with_sst sst yojson_cell_parser element in
@@ -113,7 +104,7 @@ let stream_rows env filename () =
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
   let parsed =
     let open SZXX.Xlsx in
-    let stream, sst_p = stream_rows ~sw ~feed:(feed_flow src) yojson_cell_parser in
+    let stream, sst_p = stream_rows ~sw ~feed:(SZXX.Feed.of_flow src) yojson_cell_parser in
     let seq = to_seq stream in
     let unparsed = Queue.create () in
     let has_more =
@@ -147,7 +138,7 @@ let sst_from_zip env filename () =
   let open SZXX in
   let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
   Eio.Path.with_open_in Eio.Path.(env#fs / xlsx_path) @@ fun src ->
-  let sst = Xlsx.SST.from_zip ~feed:(feed_flow src) in
+  let sst = Xlsx.SST.from_zip ~feed:(SZXX.Feed.of_flow src) in
   match Xlsx.resolve_sst_index sst ~sst_index:"30" with
   | Some "October" -> ()
   | Some x -> failwithf "Invalid SST index 30: '%s'" x ()

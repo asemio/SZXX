@@ -3,23 +3,6 @@ let flags = Unix.[ O_RDONLY; O_NONBLOCK ]
 open! Core
 open Eio.Std
 
-let feed_string src =
-  let buf = Cstruct.create 4096 in
-  SZXX.Zip.String
-    (fun () ->
-      match Eio.Flow.single_read src buf with
-      | len -> Some (Cstruct.to_string ~len buf)
-      | exception End_of_file -> None)
-
-let feed_bigstring src =
-  let open SZXX.Zip in
-  let buf = Cstruct.create 4096 in
-  Bigstring
-    (fun () ->
-      match Eio.Flow.single_read src buf with
-      | len -> Some (Bigstringaf.sub ~off:0 ~len buf.buffer)
-      | exception End_of_file -> None)
-
 let fold env xlsx_filename json_filename () =
   let xlsx_path = sprintf "../../../test/files/%s" xlsx_filename in
   let json_path = sprintf "../../../test/files/%s" json_filename in
@@ -29,7 +12,7 @@ let fold env xlsx_filename json_filename () =
   Switch.run (fun sw ->
     let src = Eio.Path.(open_in ~sw (env#fs / xlsx_path)) in
     let stream =
-      SZXX.Zip.stream_files ~sw ~feed:(feed_bigstring src) (fun _ ->
+      SZXX.Zip.stream_files ~sw ~feed:(SZXX.Feed.of_flow src) (fun _ ->
         Fold_string { init = (); f = (fun _entry s () -> Queue.enqueue queue (`String s)) } )
     in
     let rec loop () =
@@ -49,7 +32,7 @@ let fold env xlsx_filename json_filename () =
 let readme_example extract_filename src =
   let open SZXX in
   (* 1. Create a `feed` function. This README contains examples of this towards the end. *)
-  let feed = feed_string src in
+  let feed = SZXX.Feed.of_flow src in
 
   (* 2. Create a callback function. Here we skip all files except the one we're interested in.
       If you deem the file(s) too large for `Action.String`,
@@ -95,7 +78,7 @@ let () =
     [
       ( "ZIP",
         [
-          (* "financial.xlsx", `Quick, fold env "financial.xlsx" "chunks.json"; *)
+          "financial.xlsx", `Quick, fold env "financial.xlsx" "chunks.json";
           "Readme example", `Quick, test_readme_example env "financial.xlsx";
         ] );
     ]

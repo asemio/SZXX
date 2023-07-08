@@ -2,7 +2,7 @@
   (names xlsx xml zip)
   (libraries
     SZXX
-    angstrom-eio
+    angstrom
 
     alcotest
     core

@@ -1,6 +1,6 @@
 open! Core
 
-type attr_list = (string * string) list [@@deriving sexp_of]
+type attr_list = (string * string) list [@@deriving sexp_of, compare, equal]
 
 (** Convenience function to access attributes by name *)
 val get_attr : attr_list -> string -> string option
@@ -15,7 +15,7 @@ module DOM : sig
     text: string;
     children: element array;
   }
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   (** [el |> dot "row"] returns the first immediate [<row>] child of element [el] *)
   val dot : string -> element -> element option
@@ -48,13 +48,13 @@ module SAX : sig
     | Cdata of string
     | Nothing
     | Many of node list
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   type partial_text = {
     literal: bool;
     raw: string;
   }
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   type partial = {
     tag: string;
@@ -63,7 +63,7 @@ module SAX : sig
     children: DOM.element Queue.t;
     staged: DOM.element Queue.t;
   }
-  [@@deriving sexp_of]
+  [@@deriving sexp_of, compare, equal]
 
   module To_DOM : sig
     type state = {
@@ -71,7 +71,7 @@ module SAX : sig
       stack: partial list;
       top: DOM.element option;
     }
-    [@@deriving sexp_of]
+    [@@deriving sexp_of, compare, equal]
 
     val init : state
 
@@ -87,7 +87,7 @@ module SAX : sig
       path_stack: string list;
       top: DOM.element option;
     }
-    [@@deriving sexp_of]
+    [@@deriving sexp_of, compare, equal]
 
     val init : state
 
@@ -105,6 +105,17 @@ module SAX : sig
   end
 end
 
+module Easy : sig
+  type document = {
+    decl_attrs: attr_list;
+    top: DOM.element;
+  }
+  [@@deriving sexp_of, compare, equal]
+
+  (** Returns a fully formed, fully unescaped document, or a (sometimes) helpful error in case of failure. *)
+  val of_string : ?parser:SAX.node Angstrom.t -> ?strict:bool -> string -> (document, string) result
+end
+
 type parser_options = {
   accept_html_boolean_attributes: bool;
     (** Invalid XML but valid HTML: [<div attr1="foo" attr2>]
@@ -117,6 +128,7 @@ type parser_options = {
          When [accept_unquoted_attributes] is [true], [attr2] will be ["bar"] *)
 }
 
+(** HTML boolean attributes: [true]. Anything else: [false]. *)
 val default_parser_options : parser_options
 
 val make_parser : parser_options -> SAX.node Angstrom.t

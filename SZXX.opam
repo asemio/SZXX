@@ -15,24 +15,16 @@ homepage: "https://github.com/asemio/SZXX"
 dev-repo: "git://github.com/asemio/SZXX"
 doc: "https://github.com/asemio/SZXX"
 bug-reports: "https://github.com/asemio/SZXX/issues"
-pin-depends: [
-  [ "angstrom-eio.0.15.0.custom" "git+https://github.com/SGrondin/angstrom.git#137d5ba2bb55f99b5278c11ab0c967669f2b998a" ]
-  [ "angstrom.0.15.0.custom" "git+https://github.com/SGrondin/angstrom.git#137d5ba2bb55f99b5278c11ab0c967669f2b998a" ]
-]
 depends: [
   "ocaml" { >= "5.0.0" }
   "dune" { >= "1.9.0" }
 
-  "angstrom" { = "0.15.0.custom" }
-  "angstrom-eio" { = "0.15.0.custom" & with-test }
-  "core" { >= "v0.15.0" & < "v0.16.0" }
+  "angstrom"
+  "core" { >= "v0.16.0" & < "v0.18.0" }
   "decompress" { >= "1.4.1" }
   "eio_main"
-  "lwt_eio"
-  "lwt" { >= "5.3.0" }
 
-  "alcotest-lwt" { with-test }
-  "angstrom-lwt-unix" { >= "0.15.0" & with-test }
+  "alcotest" { with-test }
   "yojson" { with-test }
   "ppx_deriving_yojson" { >= "3.5.2" & with-test }
   # "ocamlformat" { = "0.25.1" } # Development

@@ -4,26 +4,26 @@ open Eio.Std
 type methd =
   | Stored
   | Deflated
-[@@deriving sexp_of]
+[@@deriving sexp_of, compare, equal]
 
 type version =
   | Zip_2_0
   | Zip_4_5
-[@@deriving sexp_of]
+[@@deriving sexp_of, compare, equal]
 
 type descriptor = {
   crc: Int32.t;
   compressed_size: Int64.t;
   uncompressed_size: Int64.t;
 }
-[@@deriving sexp_of]
+[@@deriving sexp_of, compare, equal]
 
 type extra_field = {
   id: int;
   size: int;
   data: string;
 }
-[@@deriving sexp_of]
+[@@deriving sexp_of, compare, equal]
 
 type entry = {
   version_needed: version;
@@ -34,25 +34,33 @@ type entry = {
   filename: string;
   extra_fields: extra_field list;
 }
-[@@deriving sexp_of]
+[@@deriving sexp_of, compare, equal]
 
 module Action : sig
   type 'a t =
-    | Skip
-    | String
+    | Skip  (** Skip over the compressed bytes without attempting to decompress them *)
+    | String  (** Collect the whole decompressed file into a single string *)
+    | Bigstring  (** Collect the whole decompressed file into a single bigstring *)
     | Fold_string of {
         init: 'a;
         f: entry -> string -> 'a -> 'a;
-      }
+      }  (** Fold the file into a final state, in string chunks of ~500-8192 bytes *)
     | Fold_bigstring of {
         init: 'a;
         f: entry -> Bigstring.t -> 'a -> 'a;
       }
+        (** Fold the file into a final state, in bigstring chunks of ~500-8192 bytes.
+          IMPORTANT: this [Bigstring.t] is volatile! It's only safe to read from it until the end of function [f].
+          If you need to access the data again later, copy it in some way before the end of function [f]. *)
     | Parse of 'a Angstrom.t
+        (** Apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first.
+           [Parse] expects the parser to consume all bytes and leave no trailing junk bytes after a successful parse. *)
     | Parse_many of {
         parser: 'a Angstrom.t;
         on_parse: 'a -> unit;
       }
+        (** Repeatedly apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first.
+            Call [on_parse] on each parsed value. [Parse_many] expects the file to end with a complete parse, without trailing junk bytes. *)
 end
 
 module Data : sig
@@ -61,52 +69,52 @@ module Data : sig
     | Failed of {
         error: string;
         unconsumed: string;
+          (** This string contains the start of the data not consumed by the parser.
+              More data might have been present but it was not kept to prevent unbounded memory usage. *)
       }
-    | Terminated_early of { unconsumed: string }
+    | Terminated_early of {
+        unconsumed: string;
+          (** This string contains the start of the data not consumed by the parser.
+              More data might have been present but it was not kept to prevent unbounded memory usage. *)
+      }
     | Incomplete
+  [@@deriving sexp_of, compare, equal]
 
   val parser_state_to_result : 'a parser_state -> ('a, string) result
 
   type 'a t =
     | Skip
     | String of string
+    | Bigstring of Bigstring.t
     | Fold_string of 'a
     | Fold_bigstring of 'a
     | Parse of 'a parser_state
     | Parse_many of unit parser_state
+  [@@deriving sexp_of, compare, equal]
 end
 
-type feed =
-  | String of (unit -> string option)
-  | Bigstring of (unit -> Bigstring.t option)
-
 (**
-   Stream files.
+   Stream files from a ZIP archive.
 
-   [SZXX.Zip.stream_files ~feed callback]
+   [SZXX.Zip.stream_files ~sw ~feed callback]
 
-   [feed]: Produces data for the parser. This data can be simple strings or bigstrings. Return [None] to indicate EOF.
+   [sw]: A regular [Eio.Switch.t].
 
-   [callback]: function called on every file found within the ZIP archive.
-   You must choose an Action for SZXX to perform over each file encountered within the ZIP archive.
+   [feed]: A producer of raw data. Create a [feed] by using the [SZXX.Feed] module.
 
-   Return [Action.Skip] to skip over the compressed bytes of this file without attempting to uncompress them.
-   Return [Action.String] to collect the whole uncompressed file into a single string.
-   Return [Action.Fold_string] to fold this file into a final state, in string chunks of ~1k-5k.
-   Return [Action.Fold_bigstring] to fold this file into a final state, in bigstring chunks of ~1k-5k.
-   Return [Action.Parse] to apply an [Angstrom.t] parser to the file while it is being uncompressed without having to fully uncompress it first.
+   [callback]: A function called on every file found within the ZIP archive.
+   You must choose an Action ([SZXX.Zip.Action.t]) to perform over each file encountered within the ZIP archive.
 
-   This function returns [stream * success_promise]
-   [stream] contains all files in the same order they were found in the archive.
-   [success_promise] is a promise that resolves once the entire zip archive has been processed.
+   Return [Action.Skip] to skip over the compressed bytes of this file without attempting to decompress them.
+   Return [Action.String] to collect the whole decompressed file into a single string.
+   Return [Action.Bigstring] to collect the whole decompressed file into a single bigstring. More efficient than [Action.String] if you don't need to convert the result into a string.
+   Return [Action.Fold_string] to fold this file into a final state, in string chunks of ~500-8192 bytes.
+   Return [Action.Fold_bigstring] to fold this file into a final state, in bigstring chunks of ~500-8192 bytes. IMPORTANT: this [Bigstring.t] is volatile! It's only safe to read from it until the end of function [f] (the "folder"). If you need to access the data again later, copy it in some way before the end of function [f].
+   Return [Action.Parse] to apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. [Parse] expects the parser to consume all bytes and leave no trailing junk bytes after a successful parse.
+   Return [Action.Parse_many] to repeatedly apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. Call [on_parse] on each parsed value. [Parse_many] expects the file to end with a complete parse and leave no trailing junk bytes.
 
-   Important: bind to/await [success_promise] in order to capture any errors encountered while processing the file.
-
-   See README.md for examples on how to use it.
+   This function returns a Stream containing all files in the archive.
+   The order of the files passed to the [callback] and on the Stream matches the arrangement of the files within the ZIP.
 *)
 val stream_files :
-  sw:Switch.t ->
-  feed:feed ->
-  ?dispatcher:Dispatcher.t ->
-  (entry -> 'a Action.t) ->
-  (entry * 'a Data.t) option Eio.Stream.t
+  sw:Switch.t -> feed:Feed.t -> (entry -> 'a Action.t) -> (entry * 'a Data.t) option Eio.Stream.t

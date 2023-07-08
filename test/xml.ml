@@ -61,7 +61,7 @@ comment -->
       {
         "tag": "c",
         "attrs": [],
-        "text": "<something /> 234 woo\n          hoo",
+        "text": "<something /> 234woo\n          hoo",
         "children": []
       },
       {
@@ -335,7 +335,7 @@ module Test4 = struct
     Yojson.Safe.from_string
       {json|
 {
-  "decl_attrs": null,
+  "decl_attrs": [],
   "top": {
     "tag": "html",
     "attrs": [ [ "lang", "eng" ] ],
@@ -473,6 +473,19 @@ module Test4 = struct
 |json}
 end
 
+let test_large_cdata () =
+  let buf = Buffer.create 1500 in
+  let random =
+    let s = String.init 256 ~f:Char.of_int_exn in
+    String.concat [ s; s; s; s; s ]
+  in
+  bprintf buf "<![CDATA[%s]]>" random;
+  let node =
+    Angstrom.parse_string ~consume:All SZXX.Xml.parser (Buffer.contents buf) |> Result.ok_or_failwith
+  in
+  if not ([%equal: SZXX.Xml.SAX.node] node (SZXX.Xml.SAX.Cdata random))
+  then failwith "CDATA Strings did not match"
+
 type element = SZXX.Xml.DOM.element = {
   tag: string;
   attrs: (string * string) list;
@@ -481,8 +494,8 @@ type element = SZXX.Xml.DOM.element = {
 }
 [@@deriving sexp_of, to_yojson]
 
-type doc = {
-  decl_attrs: (string * string) list option;
+type doc = SZXX.Xml.Easy.document = {
+  decl_attrs: (string * string) list;
   top: element;
 }
 [@@deriving sexp_of, to_yojson]
@@ -512,7 +525,8 @@ let xml_to_dom
           | Text s -> SZXX.Xml.SAX.To_DOM.folder ?strict (Ok acc) (Text (SZXX.Xml.unescape s))
           | el -> SZXX.Xml.SAX.To_DOM.folder ?strict (Ok acc) el )
       with
-      | Ok { decl_attrs; stack = []; top = Some top; _ } -> { decl_attrs; top }
+      | Ok { decl_attrs; stack = []; top = Some top; _ } ->
+        { decl_attrs = Option.value ~default:[] decl_attrs; top }
       | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.To_DOM.state}" state ()
       | Error msg -> failwith msg
     in
@@ -535,6 +549,9 @@ let xml_stream ?(options = SZXX.Xml.default_parser_options) ?strict test data fi
     let streamed = `Assoc [ "data", [%to_yojson: element array] (Queue.to_array queue) ] in
     Json_diff.check streamed data
   | Error msg -> failwith msg
+
+let test_easy test data () =
+  SZXX.Xml.Easy.of_string test |> Result.ok_or_failwith |> doc_to_yojson |> Fn.flip Json_diff.check data
 
 let readme_example1 () =
   let open SZXX in
@@ -618,7 +635,7 @@ let () =
     [
       ( "XML",
         [
-          (* "To DOM 1", `Quick, xml_to_dom Test1.raw Test1.data; *)
+          "To DOM 1", `Quick, xml_to_dom Test1.raw Test1.data;
           "To DOM 2", `Quick, xml_to_dom Test2.raw Test2.data;
           "Stream 2", `Quick, xml_stream Test2.raw Test2.data_streamed [ "sst"; "si"; "t" ];
           "To DOM 3", `Quick, xml_to_dom Test3.raw Test3.data;
@@ -642,8 +659,10 @@ let () =
                   accept_single_quoted_attributes = false;
                 }
               Test4.raw Test4.data_streamed [ "html"; "head"; "meta" ] );
+          "Large CDATA", `Quick, test_large_cdata;
           "Sync To_DOM", `Quick, readme_example1;
           "Async To_DOM", `Quick, readme_example2;
           "Async Stream", `Quick, readme_example3;
+          "Easy", `Quick, test_easy Test1.raw Test1.data;
         ] );
     ]

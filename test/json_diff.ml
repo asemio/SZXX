@@ -49,6 +49,5 @@ let check left right =
   match Queue.length errors with
   | 0 -> ()
   | n ->
-    printf "%s:\n%s\n" (color "Actual" `Green) (Yojson.Safe.pretty_to_string left);
     eprintf "JSON Mismatch (%d errors):\n%s\n" n (Queue.to_array errors |> String.concat_array ~sep:"\n");
     failwith "JSON Mismatch"

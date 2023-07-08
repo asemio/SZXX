@@ -2,17 +2,16 @@
   (name SZXX)
   (public_name SZXX)
   (libraries
-    SZXX.dispatcher
     core
     angstrom
-    angstrom-eio
     checkseum.ocaml
     decompress.de
     eio_main
   )
   (preprocess (pps
-    ppx_jane ; TODO
     ppx_sexp_conv
+    ppx_compare
+    ppx_jane ; TODO, temp
   ))
 )
 

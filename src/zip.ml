@@ -5,26 +5,26 @@ open Parsing
 type methd =
   | Stored
   | Deflated
-[@@deriving sexp_of]
+[@@deriving sexp_of, compare, equal]
 
 type version =
   | Zip_2_0
   | Zip_4_5
-[@@deriving sexp_of]
+[@@deriving sexp_of, compare, equal]
 
 type descriptor = {
   crc: Int32.t;
   compressed_size: Int64.t;
   uncompressed_size: Int64.t;
 }
-[@@deriving sexp_of]
+[@@deriving sexp_of, compare, equal]
 
 type extra_field = {
   id: int;
   size: int;
   data: string;
 }
-[@@deriving sexp_of]
+[@@deriving sexp_of, compare, equal]
 
 type entry = {
   version_needed: version;
@@ -35,12 +35,13 @@ type entry = {
   filename: string;
   extra_fields: extra_field list;
 }
-[@@deriving sexp_of]
+[@@deriving sexp_of, compare, equal]
 
 module Action = struct
   type 'a t =
     | Skip
     | String
+    | Bigstring
     | Fold_string of {
         init: 'a;
         f: entry -> string -> 'a -> 'a;
@@ -65,6 +66,7 @@ module Data = struct
       }
     | Terminated_early of { unconsumed: string }
     | Incomplete
+  [@@deriving sexp_of, compare, equal]
 
   let parser_state_to_result = function
   | Success x -> Ok x
@@ -75,10 +77,12 @@ module Data = struct
   type 'a t =
     | Skip
     | String of string
+    | Bigstring of Bigstring.t
     | Fold_string of 'a
     | Fold_bigstring of 'a
     | Parse of 'a parser_state
     | Parse_many of unit parser_state
+  [@@deriving sexp_of, compare, equal]
 end
 
 let slice_bits = 13
@@ -97,7 +101,7 @@ module Storage = struct
     let w = De.make_window ~bits:slice_bits in
     let outbs = De.bigstring_create slice_size in
     let decoder = De.Inf.decoder `Manual ~o:outbs ~w in
-    let rec do_uncompress () =
+    let rec do_decompress () =
       match De.Inf.decode decoder with
       | `Await -> false
       | `End ->
@@ -108,15 +112,15 @@ module Storage = struct
         let len = slice_size - De.Inf.dst_rem decoder in
         flush outbs ~off:0 ~len;
         De.Inf.flush decoder;
-        do_uncompress ()
+        do_decompress ()
       | `Malformed err -> failwith err
     in
-    let uncompress bs ~off ~len =
+    let decompress bs ~off ~len =
       De.Inf.src decoder bs off len;
-      do_uncompress ()
+      do_decompress ()
     in
-    let add bs ~off ~len = finished := uncompress bs ~off ~len in
-    let finalize () = if not !finished then ignore (uncompress outbs ~off:0 ~len:0 : bool) in
+    let add bs ~off ~len = finished := decompress bs ~off ~len in
+    let finalize () = if not !finished then ignore (decompress outbs ~off:0 ~len:0 : bool) in
     { add; finalize; commit }
 
   let stored flush =
@@ -145,9 +149,19 @@ module Mode = struct
     let res = Bigbuffer.create buffer_size in
     let flush bs ~off ~len = Bigbuffer.add_bigstring res (Bigstringaf.sub bs ~off ~len) in
     let complete () =
+      let len = Bigbuffer.length res in
       let str = Bigbuffer.contents res in
-      let len = String.length str in
       Data.String str, len, Checkseum.Crc32.digest_string str 0 len Optint.zero
+    in
+    { flush; complete }
+
+  let bigstring ~buffer_size =
+    let res = Bigbuffer.create buffer_size in
+    let flush bs ~off ~len = Bigbuffer.add_bigstring res (Bigstringaf.sub bs ~off ~len) in
+    let complete () =
+      let len = Bigbuffer.length res in
+      let bs = Bigbuffer.volatile_contents res in
+      Data.Bigstring bs, len, Checkseum.Crc32.digest_bigstring bs 0 len Optint.zero
     in
     { flush; complete }
 
@@ -349,6 +363,7 @@ let parse_one cb =
       match cb entry with
       | Action.Skip -> Mode.skip ()
       | Action.String -> Mode.string ~buffer_size
+      | Action.Bigstring -> Mode.bigstring ~buffer_size
       | Action.Fold_string { init; f } -> Mode.fold_string ~init ~f entry
       | Action.Fold_bigstring { init; f } -> Mode.fold_bigstring ~init ~f entry
       | Action.Parse parser -> Mode.parse parser
@@ -392,17 +407,8 @@ let parse_trailing_central_directory =
   let* () = bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:"PK\005\006" Parsing.Storage.noop in
   advance 18 *> end_of_input
 
-type feed =
-  | String of (unit -> string option)
-  | Bigstring of (unit -> Bigstring.t option)
-
-let stream_files ~sw ~feed:read ?dispatcher cb =
+let stream_files ~sw ~feed:(read : Feed.t) cb =
   let open Eio.Std in
-  let read =
-    match read with
-    | String f -> (fun () -> f () |> Option.map ~f:(fun s -> `String s))
-    | Bigstring f -> (fun () -> f () |> Option.map ~f:(fun buf -> `Bigstring buf))
-  in
   let stream = Eio.Stream.create 0 in
   let parser =
     skip_many (parse_one cb >>| fun pair -> Eio.Stream.add stream (Some pair))
@@ -414,19 +420,14 @@ let stream_files ~sw ~feed:read ?dispatcher cb =
     | Done (_, ()) -> failwith "SZXX: ZIP processing completed before reaching end of input"
     | Partial feed -> (
       match read () with
-      | None -> (
-        match feed `Eof with
+      | `Eof as eof -> (
+        match feed eof with
         | Fail _ as state -> state_to_result state |> Result.ok_or_failwith
         | _ -> () )
-      | Some chunk -> (loop [@tailcall]) (feed chunk) )
+      | chunk -> (loop [@tailcall]) (feed chunk) )
   in
   Fiber.fork_daemon ~sw (fun () ->
-    let do_work () =
-      loop (parse parser);
-      Eio.Stream.add stream None
-    in
-    (match dispatcher with
-    | None -> do_work ()
-    | Some d -> Dispatcher.run_exn d ~f:do_work);
+    loop (parse parser);
+    Eio.Stream.add stream None;
     `Stop_daemon );
   stream

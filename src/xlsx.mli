@@ -43,7 +43,7 @@ module SST : sig
 
   val zip_entry_filename : string
 
-  val from_zip : feed:Zip.feed -> t
+  val from_zip : feed:Feed.t -> t
 end
 
 val to_seq : 'a option Eio.Stream.t -> 'a Seq.t
@@ -61,11 +61,10 @@ val to_seq : 'a option Eio.Stream.t -> 'a Seq.t
    See README.md for examples.
 *)
 val stream_rows :
-  ?dispatcher:Dispatcher.t ->
   ?only_sheet:int ->
   ?skip_sst:bool ->
   sw:Switch.t ->
-  feed:Zip.feed ->
+  feed:Feed.t ->
   'a cell_parser ->
   'a status row option Eio.Stream.t * SST.t Promise.or_exn
 
@@ -77,24 +76,17 @@ val with_minimal_buffering :
   Warning: This function can result in linear (as opposed to constant) memory usage.
   See README for more information.
 *)
-val stream_rows_buffer :
-  ?dispatcher:Dispatcher.t ->
-  ?only_sheet:int ->
-  sw:Switch.t ->
-  feed:Zip.feed ->
-  'a cell_parser ->
-  'a row Seq.t
+val stream_rows_buffer : ?only_sheet:int -> sw:Switch.t -> feed:Feed.t -> 'a cell_parser -> 'a row Seq.t
 
 (**
   Same as [stream_rows] but returns raw XML elements instead of parsed XLSX rows.
   This function can be useful to filter out uninteresting rows at a lower cost.
 *)
 val stream_rows_unparsed :
-  ?dispatcher:Dispatcher.t ->
   ?only_sheet:int ->
   ?skip_sst:bool ->
   sw:Switch.t ->
-  feed:Zip.feed ->
+  feed:Feed.t ->
   unit ->
   Xml.DOM.element row option Eio.Stream.t * SST.t Promise.or_exn
 
@@ -122,8 +114,8 @@ val resolve_sst_index : SST.t -> sst_index:string -> string option
 (** XLSX dates are stored as floats. Convert from a [float] to a [Date.t] *)
 val parse_date : float -> Date.t
 
-(** XLSX datetimes are stored as floats. Convert from a [float] to a [Time.t] *)
-val parse_datetime : zone:Time.Zone.t -> float -> Time.t
+(** XLSX datetimes are stored as floats. Convert from a [float] to a [Time_float.t] *)
+val parse_datetime : zone:Time_float.Zone.t -> float -> Time_float.t
 
 (** Convert from a column reference such as ["D7"] or ["AA2"] to a 0-based column index *)
 val index_of_column : string -> int

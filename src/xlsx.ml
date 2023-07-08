@@ -43,9 +43,9 @@ let parse_date f = Float.to_int f |> Date.add_days origin
 let parse_datetime ~zone f =
   let parts = Float.modf f in
   let date = Float.Parts.integral parts |> Float.to_int |> Date.add_days origin in
-  let frac = Float.(Parts.fractional parts * 86400000. |> round) |> Time.Span.of_ms in
-  let ofday = Time.Ofday.of_span_since_start_of_day_exn frac in
-  Time.of_date_ofday ~zone date ofday
+  let frac = Float.(Parts.fractional parts * 86400000. |> round) |> Time_float.Span.of_ms in
+  let ofday = Time_float.Ofday.of_span_since_start_of_day_exn frac in
+  Time_float.of_date_ofday ~zone date ofday
 
 let xml_parser_options =
   Xml.
@@ -92,7 +92,9 @@ let to_seq stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream)
 let flush_zip_stream zip_stream =
   to_seq zip_stream
   |> Seq.iter (function
-       | (_ : Zip.entry), Zip.Data.(Skip | String _ | Fold_string _ | Fold_bigstring _ | Parse _) -> ()
+       | ( (_ : Zip.entry),
+           Zip.Data.(Skip | String _ | Bigstring _ | Fold_string _ | Fold_bigstring _ | Parse _) ) ->
+         ()
        | { filename; _ }, Parse_many state -> (
          match Zip.Data.parser_state_to_result state with
          | Ok x -> x
@@ -123,10 +125,10 @@ module SST = struct
     Queue.to_array q
 end
 
-let process_file ?dispatcher ?only_sheet ~skip_sst ~sw ~feed push finalize =
+let process_file ?only_sheet ~skip_sst ~sw ~feed push finalize =
   let q = Queue.create () in
   let zip_stream =
-    Zip.stream_files ~sw ~feed ?dispatcher (function
+    Zip.stream_files ~sw ~feed (function
       | { filename = "xl/workbook.xml"; _ } -> Skip
       | { filename = "xl/sharedStrings.xml"; _ } when skip_sst -> Skip
       | { filename = "xl/sharedStrings.xml"; _ } ->
@@ -250,20 +252,20 @@ let parse_row_without_sst cell_parser ({ data; sheet_number; row_number } as row
       new_data.(col_index) <- v );
     { row with data = new_data }
 
-let stream_rows ?dispatcher ?only_sheet ?(skip_sst = false) ~sw ~feed cell_parser =
+let stream_rows ?only_sheet ?(skip_sst = false) ~sw ~feed cell_parser =
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some (parse_row_without_sst cell_parser x)) in
   let finalize () = Eio.Stream.add stream None in
 
-  let sst_p = process_file ?dispatcher ?only_sheet ~skip_sst ~sw ~feed push finalize in
+  let sst_p = process_file ?only_sheet ~skip_sst ~sw ~feed push finalize in
   stream, sst_p
 
-let stream_rows_unparsed ?dispatcher ?only_sheet ?(skip_sst = false) ~sw ~feed () =
+let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~sw ~feed () =
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some x) in
   let finalize () = Eio.Stream.add stream None in
 
-  let sst_p = process_file ?dispatcher ?only_sheet ~skip_sst ~sw ~feed push finalize in
+  let sst_p = process_file ?only_sheet ~skip_sst ~sw ~feed push finalize in
   stream, sst_p
 
 let with_minimal_buffering stream sst_p ~parse =
@@ -287,12 +289,12 @@ let with_minimal_buffering stream sst_p ~parse =
   let seq2 = if has_more then Seq.map (parse ~sst) seq else Seq.empty in
   Seq.append seq1 seq2
 
-let stream_rows_buffer ?dispatcher ?only_sheet ~sw ~feed cell_parser =
+let stream_rows_buffer ?only_sheet ~sw ~feed cell_parser =
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some x) in
   let finalize () = Eio.Stream.add stream None in
 
-  let sst_p = process_file ?dispatcher ?only_sheet ~skip_sst:false ~sw ~feed push finalize in
+  let sst_p = process_file ?only_sheet ~skip_sst:false ~sw ~feed push finalize in
 
   let parse ~sst row = parse_row_with_sst sst cell_parser row in
   with_minimal_buffering stream sst_p ~parse
