@@ -23,7 +23,7 @@ let readme_example1 env filename () =
   let seq = SZXX.Xlsx.stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src) SZXX.Xlsx.yojson_cell_parser in
   Seq.iter
     (fun (row : Yojson.Basic.t SZXX.Xlsx.row) ->
-      `List (Array.to_list row.data) |> Yojson.Basic.to_string |> print_endline)
+      `List row.data |> Yojson.Basic.to_string |> print_endline)
     seq
 (* bind to/await the `success` promise to catch any error that may have terminated the stream early *)
 (* ... *)
@@ -37,7 +37,7 @@ let readme_example2 env filename () =
   let get_filtered () =
     to_seq stream
     |> Seq.filter (fun row ->
-         match row.data.(3) with
+         match List.nth_exn row.data 3 with
          | _ when row.row_number > 1000 -> false
          | Available (`Bool x) -> x
          | Available _
@@ -65,7 +65,7 @@ let xlsx env filename () =
     let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
     let open SZXX.Xlsx in
     let seq = stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src) extractors in
-    let json = Seq.fold_left (fun acc row -> `List (Array.to_list row.data) :: acc) [] seq in
+    let json = Seq.fold_left (fun acc row -> `List row.data :: acc) [] seq in
     `Assoc [ "data", `List (List.rev json) ]
   in
 
@@ -86,7 +86,7 @@ let xlsx_unparsed env filename () =
     let parsed =
       with_minimal_buffering stream sst_p ~parse:(fun ~sst element ->
         let row = parse_row_with_sst sst yojson_cell_parser element in
-        `List (Array.to_list row.data) )
+        `List row.data )
     in
     `Assoc [ "data", `List (Sequence.of_seq parsed |> Sequence.to_list) ]
   in
@@ -123,7 +123,7 @@ let stream_rows env filename () =
     let sst = Promise.await_exn sst_p in
     let parse status =
       let row = unwrap_status yojson_cell_parser sst status in
-      `List (Array.to_list row.data)
+      `List row.data
     in
     let q = Queue.map unparsed ~f:parse in
     if has_more then Seq.iter (fun status -> parse status |> Queue.enqueue q) seq;

@@ -58,7 +58,7 @@ let show_json env xlsx_path =
   Eio.Buf_write.with_flow env#stdout @@ fun w ->
   SZXX.Xlsx.stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src) SZXX.Xlsx.yojson_cell_parser
   |> Seq.iter (fun (row : Yojson.Basic.t SZXX.Xlsx.row) ->
-       let s = `List (Array.to_list row.data) |> Yojson.Basic.pretty_to_string in
+       let s = `List row.data |> Yojson.Basic.pretty_to_string in
        Eio.Buf_write.string w s;
        Eio.Buf_write.char w '\n' )
 
@@ -87,7 +87,7 @@ let count_types env xlsx_path =
   let stream, _sst_p = Xlsx.stream_rows ~sw ~feed:(SZXX.Feed.of_flow src) cell_parser in
   Xlsx.to_seq stream
   |> Seq.iter (fun Xlsx.{ data; _ } ->
-       Array.iter data ~f:(function
+       List.iter data ~f:(function
          | Xlsx.Available _ -> ()
          | Delayed _ -> incr ss ) );
   Eio.Flow.copy_string

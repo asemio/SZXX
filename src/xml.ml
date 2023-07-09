@@ -14,23 +14,23 @@ module DOM = struct
     tag: string;
     attrs: attr_list;
     text: string;
-    children: element array;
+    children: element list;
   }
   [@@deriving sexp_of, compare, equal]
 
-  let dot tag node = Array.find node.children ~f:(fun x -> String.(x.tag = tag))
+  let dot tag node = List.find node.children ~f:(fun x -> String.(x.tag = tag))
 
   let dot_text tag node =
-    Array.find_map node.children ~f:(function
+    List.find_map node.children ~f:(function
       | x when String.(x.tag = tag) -> Some x.text
       | _ -> None )
 
   let filter_map tag ~f node =
-    Array.filter_map node.children ~f:(function
+    List.filter_map node.children ~f:(function
       | x when String.(x.tag = tag) -> f x
       | _ -> None )
 
-  let at i node = Option.try_with (fun () -> Int.of_string i |> Array.get node.children)
+  let at i node = Option.try_with (fun () -> Int.of_string i |> List.nth_exn node.children)
 
   let get node (steps : (element -> element option) list) =
     let rec loop node = function
@@ -63,20 +63,13 @@ module SAX = struct
   type partial = {
     tag: string;
     attrs: attr_list;
-    text: partial_text Queue.t;
-    children: DOM.element Queue.t;
-    staged: DOM.element Queue.t;
+    text: partial_text list;
+    children: DOM.element list;
+    staged: DOM.element list;
   }
   [@@deriving sexp_of, compare, equal]
 
-  let make_partial tag attrs =
-    {
-      tag;
-      attrs;
-      text = Queue.create ~capacity:4 ();
-      children = Queue.create ~capacity:4 ();
-      staged = Queue.create ~capacity:2 ();
-    }
+  let make_partial tag attrs = { tag; attrs; text = []; children = []; staged = [] }
 
   let is_ws = function
   | '\x20'
@@ -98,27 +91,26 @@ module SAX = struct
         Buffer.add_char final c;
         true, false )
 
-  let render attrs text =
-    match Queue.length text with
-    | 0 -> ""
-    | 1 when (Queue.get text 0).literal -> (Queue.get text 0).raw
-    | len ->
-      let final = Buffer.create (len * 8) in
-      let _prev_ws =
-        Queue.fold text ~init:(false, false) ~f:(fun ((after_first, prev_ws) as acc) -> function
-          | { literal = true; raw } ->
-            Buffer.add_string final raw;
-            true, true
-          | { raw; _ } when preserve_space attrs ->
-            if after_first && not prev_ws then Buffer.add_char final ' ';
-            Buffer.add_string final raw;
-            true, is_ws raw.[String.length raw - 1]
-          | { raw; _ } -> squish_into raw final (if after_first then true, true else acc) )
-      in
-      Buffer.contents final
+  let render attrs = function
+  | [] -> ""
+  | ll ->
+    let final = Buffer.create 32 in
+    let _prev_ws =
+      List.fold_right ll ~init:(false, false) ~f:(fun partial ((after_first, prev_ws) as acc) ->
+        match partial with
+        | { literal = true; raw } ->
+          Buffer.add_string final raw;
+          true, true
+        | { raw; _ } when preserve_space attrs ->
+          if after_first && not prev_ws then Buffer.add_char final ' ';
+          Buffer.add_string final raw;
+          true, is_ws raw.[String.length raw - 1]
+        | { raw; _ } -> squish_into raw final (if after_first then true, true else acc) )
+    in
+    Buffer.contents final
 
   let partial_to_element { tag; attrs; text; children; _ } =
-    DOM.{ tag; attrs; text = render attrs text; children = Queue.to_array children }
+    DOM.{ tag; attrs; text = render attrs text; children = List.rev children }
 
   module To_DOM = struct
     type state = {
@@ -147,25 +139,52 @@ module SAX = struct
       | Text _, Ok { stack = []; top = Some _; _ }
        |Cdata _, Ok { stack = []; top = Some _; _ } ->
         acc
-      | Text s, Ok { stack = current :: _; _ } ->
-        Queue.enqueue current.text { raw = s; literal = false };
-        acc
-      | Cdata s, Ok { stack = current :: _; _ } ->
-        Queue.enqueue current.text { raw = s; literal = true };
-        acc
-      | Element_close tag, Ok ({ stack = current :: (parent :: _ as rest); _ } as acc)
+      | Text s, Ok ({ stack = current :: rest; _ } as acc) ->
+        Ok
+          {
+            acc with
+            stack = { current with text = { raw = s; literal = false } :: current.text } :: rest;
+          }
+      | Cdata s, Ok ({ stack = current :: rest; _ } as acc) ->
+        Ok
+          { acc with stack = { current with text = { raw = s; literal = true } :: current.text } :: rest }
+      | Element_close tag, Ok ({ stack = current :: parent :: rest; _ } as acc)
         when String.( = ) tag current.tag ->
-        Queue.enqueue parent.children (partial_to_element current);
-        Queue.blit_transfer ~src:parent.staged ~dst:parent.children ();
-        Ok { acc with stack = rest }
+        (* Queue.enqueue parent.children (partial_to_element current); *)
+        (* Queue.blit_transfer ~src:parent.staged ~dst:parent.children (); *)
+        Ok
+          {
+            acc with
+            stack =
+              {
+                parent with
+                children = parent.staged @ (partial_to_element current :: parent.children);
+                staged = [];
+              }
+              :: rest;
+          }
       | Element_close tag, Ok ({ stack = [ current ]; top = None; _ } as acc)
         when String.( = ) tag current.tag ->
         Ok { acc with stack = []; top = Some (partial_to_element current) }
       | Element_close tag, Ok { stack = current :: _ :: _; _ } when strict ->
         Error (sprintf "Invalid document. Closing element '%s' before element '%s'" tag current.tag)
-      | (Element_close _ as tried), Ok { stack = current :: parent :: _; _ } ->
-        Queue.blit_transfer ~src:current.children ~dst:parent.staged ();
-        Queue.blit_transfer ~src:current.text ~dst:parent.text ();
+      | (Element_close _ as tried), Ok ({ stack = current :: parent :: rest; _ } as acc) ->
+        (* Queue.blit_transfer ~src:current.children ~dst:parent.staged (); *)
+        (* Queue.blit_transfer ~src:current.text ~dst:parent.text (); *)
+        let acc =
+          Ok
+            {
+              acc with
+              stack =
+                { current with text = []; children = [] }
+                :: {
+                     parent with
+                     text = current.text @ parent.text;
+                     staged = current.children @ parent.staged;
+                   }
+                :: rest;
+            }
+        in
         folder ~strict acc (Many [ Element_close current.tag; tried ])
       | Element_close tag, Ok _ ->
         Error (sprintf "Invalid document. Closing tag without a matching opening tag: '%s'" tag)
@@ -204,38 +223,64 @@ module SAX = struct
       | Text _, Ok { stack = []; top = None; _ }
        |Cdata _, Ok { stack = []; top = None; _ } ->
         acc
-      | Text s, Ok { stack = current :: _; path_stack = path :: _; _ }
+      | Text s, Ok ({ stack = current :: rest; path_stack = path :: _; _ } as acc)
         when String.is_prefix path ~prefix:filter_path ->
-        Queue.enqueue current.text { raw = s; literal = false };
-        acc
-      | Cdata s, Ok { stack = current :: _; path_stack = path :: _; _ }
+        Ok
+          {
+            acc with
+            stack = { current with text = { raw = s; literal = false } :: current.text } :: rest;
+          }
+      | Cdata s, Ok ({ stack = current :: rest; path_stack = path :: _; _ } as acc)
         when String.is_prefix path ~prefix:filter_path ->
-        Queue.enqueue current.text { raw = s; literal = true };
-        acc
+        Ok
+          { acc with stack = { current with text = { raw = s; literal = true } :: current.text } :: rest }
       | Text _, Ok _
        |Cdata _, Ok _ ->
         acc
       | ( Element_close tag,
-          Ok ({ stack = current :: (parent :: _ as rest); path_stack = path :: path_rest; _ } as acc) )
+          Ok ({ stack = current :: parent :: rest; path_stack = path :: path_rest; _ } as acc) )
         when String.( = ) tag current.tag ->
-        (match String.is_prefix path ~prefix:filter_path with
-        | true when String.length path = String.length filter_path ->
-          (* Exactly filter_path *)
-          on_match (partial_to_element current)
-        | true ->
-          (* Children of filter_path *)
-          Queue.enqueue parent.children (partial_to_element current)
-        | false -> ());
-        Queue.blit_transfer ~src:parent.staged ~dst:parent.children ();
-        Ok { acc with stack = rest; path_stack = path_rest }
+        let parent_children =
+          match String.is_prefix path ~prefix:filter_path with
+          | true when String.length path = String.length filter_path ->
+            (* Exactly filter_path *)
+            on_match (partial_to_element current);
+            parent.children
+          | true ->
+            (* Children of filter_path *)
+            (* Queue.enqueue parent.children (partial_to_element current) *)
+            partial_to_element current :: parent.children
+          | false -> parent.children
+        in
+        (* Queue.blit_transfer ~src:parent.staged ~dst:parent.children (); *)
+        Ok
+          {
+            acc with
+            stack = { parent with staged = []; children = parent.staged @ parent_children } :: rest;
+            path_stack = path_rest;
+          }
       | Element_close tag, Ok ({ stack = [ current ]; top = None; _ } as acc)
         when String.( = ) tag current.tag ->
         Ok { acc with stack = []; top = Some (partial_to_element current) }
       | Element_close tag, Ok { stack = current :: _ :: _; _ } when strict ->
         Error (sprintf "Invalid document. Closing element '%s' before element '%s'" tag current.tag)
-      | (Element_close _ as tried), Ok { stack = current :: parent :: _; _ } ->
-        Queue.blit_transfer ~src:current.children ~dst:parent.staged ();
-        Queue.blit_transfer ~src:current.text ~dst:parent.text ();
+      | (Element_close _ as tried), Ok ({ stack = current :: parent :: rest; _ } as acc) ->
+        (* Queue.blit_transfer ~src:current.children ~dst:parent.staged (); *)
+        (* Queue.blit_transfer ~src:current.text ~dst:parent.text (); *)
+        let acc =
+          Ok
+            {
+              acc with
+              stack =
+                { current with text = []; children = [] }
+                :: {
+                     parent with
+                     text = current.text @ parent.text;
+                     staged = current.children @ parent.staged;
+                   }
+                :: rest;
+            }
+        in
         folder ~filter_path ~on_match ~strict acc (Many [ Element_close current.tag; tried ])
       | Element_close tag, Ok _ ->
         Error (sprintf "Invalid document. Closing tag without a matching opening tag: '%s'" tag)

@@ -32,7 +32,7 @@ type 'a status =
 type 'a row = {
   sheet_number: int;
   row_number: int;
-  data: 'a array;
+  data: 'a list;
 }
 [@@deriving sexp_of]
 
@@ -72,7 +72,7 @@ let parse_sheet ~sheet_number push =
         let i = Int.of_string s in
         (* Insert blank rows *)
         for row_number = !num to i - 2 do
-          push { sheet_number; row_number; data = [||] }
+          push { sheet_number; row_number; data = [] }
         done;
         num := i
       with
@@ -85,7 +85,7 @@ let parse_string_cell el =
   let open Xml.DOM in
   match el |> dot "t" with
   | Some { text; _ } -> text
-  | None -> filter_map "r" el ~f:(dot_text "t") |> String.concat_array
+  | None -> filter_map "r" el ~f:(dot_text "t") |> String.concat
 
 let to_seq stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream)
 
@@ -158,7 +158,7 @@ let resolve_sst_index (sst : SST.t) ~sst_index =
 
 let unwrap_status cell_parser (sst : SST.t) (row : 'a status row) =
   let data =
-    Array.map row.data ~f:(function
+    List.map row.data ~f:(function
       | Available x -> x
       | Delayed { location; sst_index } -> (
         match resolve_sst_index sst ~sst_index with
@@ -220,37 +220,35 @@ let index_of_column s =
   in
   String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1
 
-let row_width num_cells data =
-  let open Xml.DOM in
-  Xml.get_attr (Array.last data).attrs "r" |> function
-  | None -> num_cells
-  | Some r -> max num_cells (index_of_column r + 1)
-
 let parse_row_with_sst sst cell_parser ({ data; sheet_number; row_number } as row) =
   let open Xml.DOM in
-  match Array.length data with
-  | 0 -> { row with data = [||] }
-  | num_cells ->
-    let num_cols = row_width num_cells data in
-    let new_data = Array.create ~len:num_cols cell_parser.null in
-    Array.iteri data ~f:(fun i el ->
-      let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
-      let v = extract_cell_sst sst cell_parser { col_index; sheet_number; row_number } el in
-      new_data.(col_index) <- v );
-    { row with data = new_data }
+  match data with
+  | [] -> { row with data = [] }
+  | _ ->
+    let rec loop i acc = function
+      | [] -> List.rev acc
+      | el :: rest ->
+        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
+        let v = extract_cell_sst sst cell_parser { col_index; sheet_number; row_number } el in
+        let acc = Fn.apply_n_times ~n:(col_index - i) (List.cons cell_parser.null) acc in
+        (loop [@tailcall]) (col_index + 1) (v :: acc) rest
+    in
+    { row with data = loop 0 [] data }
 
 let parse_row_without_sst cell_parser ({ data; sheet_number; row_number } as row) =
   let open Xml.DOM in
-  match Array.length data with
-  | 0 -> { row with data = [||] }
-  | num_cells ->
-    let num_cols = row_width num_cells data in
-    let new_data = Array.create ~len:num_cols (Available cell_parser.null) in
-    Array.iteri data ~f:(fun i el ->
-      let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
-      let v = extract_cell_status cell_parser { col_index; sheet_number; row_number } el in
-      new_data.(col_index) <- v );
-    { row with data = new_data }
+  match data with
+  | [] -> { row with data = [] }
+  | _ ->
+    let rec loop i acc = function
+      | [] -> List.rev acc
+      | el :: rest ->
+        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
+        let v = extract_cell_status cell_parser { col_index; sheet_number; row_number } el in
+        let acc = Fn.apply_n_times ~n:(col_index - i) (List.cons (Available cell_parser.null)) acc in
+        (loop [@tailcall]) (col_index + 1) (v :: acc) rest
+    in
+    { row with data = loop 0 [] data }
 
 let stream_rows ?only_sheet ?(skip_sst = false) ~sw ~feed cell_parser =
   let stream = Eio.Stream.create 0 in

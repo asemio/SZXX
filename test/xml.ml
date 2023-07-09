@@ -490,7 +490,7 @@ type element = SZXX.Xml.DOM.element = {
   tag: string;
   attrs: (string * string) list;
   text: string;
-  children: element array;
+  children: element list;
 }
 [@@deriving sexp_of, to_yojson]
 

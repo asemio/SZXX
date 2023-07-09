@@ -13,7 +13,7 @@ module DOM : sig
     tag: string;
     attrs: attr_list;
     text: string;
-    children: element array;
+    children: element list;
   }
   [@@deriving sexp_of, compare, equal]
 
@@ -24,7 +24,7 @@ module DOM : sig
   val dot_text : string -> element -> string option
 
   (** [el |> filter_map "row" ~f] returns all filtered [f <row>] children of element [el] *)
-  val filter_map : string -> f:(element -> 'a option) -> element -> 'a array
+  val filter_map : string -> f:(element -> 'a option) -> element -> 'a list
 
   (** [el |> at "3"] returns the nth (0-based indexing) immediate child of element [el]. The first argument is a string. *)
   val at : string -> element -> element option
@@ -59,9 +59,9 @@ module SAX : sig
   type partial = {
     tag: string;
     attrs: attr_list;
-    text: partial_text Queue.t;
-    children: DOM.element Queue.t;
-    staged: DOM.element Queue.t;
+    text: partial_text list;
+    children: DOM.element list;
+    staged: DOM.element list;
   }
   [@@deriving sexp_of, compare, equal]
 

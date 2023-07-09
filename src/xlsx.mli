@@ -32,7 +32,7 @@ type 'a status =
 type 'a row = {
   sheet_number: int;
   row_number: int;
-  data: 'a array;
+  data: 'a list;
 }
 [@@deriving sexp_of]
 
