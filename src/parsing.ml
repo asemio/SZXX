@@ -22,7 +22,7 @@ let skip_many p =
     | true -> m
     | false -> return_unit )
 
-let skip_find p =
+let skip_find_backtrack p =
   fix (fun m ->
     let found = ref None in
     p
@@ -31,6 +31,20 @@ let skip_find p =
           | Some _ as x ->
             found := x;
             fail_backtrack)
+    <|> return_false
+    >>= function
+    | true -> m
+    | false -> return !found )
+
+let skip_find p =
+  fix (fun m ->
+    let found = ref None in
+    p
+    >>= (function
+          | None -> return_true
+          | Some _ as x ->
+            found := x;
+            return_false)
     <|> return_false
     >>= function
     | true -> m
@@ -158,7 +172,7 @@ let bounded_file_reader ~slice_size ~pattern Storage.{ add; finalize; commit } =
     | None -> Unsafe.take slice_size add *> commit *> return_none
   in
 
-  skip_find fast_path >>= function
+  skip_find_backtrack fast_path >>= function
   | None ->
     (* This branch is hit when the fast path fails due to the remaining
        length being less than the slice_size. That's why the slow_path

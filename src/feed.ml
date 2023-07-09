@@ -11,6 +11,21 @@ let of_flow (src : #Eio.Flow.source) : t =
     | len -> `Bigstring (Bigstringaf.sub ~off:0 ~len buf.buffer)
     | exception End_of_file -> `Eof
 
+(** Same as [of_flow], but the resulting [Feed.t] does not advance the file cursor.
+    In other words, even after processing, the flow will still appear to be "unread".
+    Note: this function requires a flow that supports seeking, such as files. *)
+let of_flow_non_seeking (src : #Eio.File.ro) : t =
+  let buf = Cstruct.create 4096 in
+  let pos = ref Optint.Int63.zero in
+  fun () ->
+    (* TODO: Use [Eio.File.pread] once https://github.com/ocaml-multicore/eio/issues/579 is fixed *)
+    match src#pread [ buf ] ~file_offset:!pos with
+    | 0 -> `Eof
+    | len ->
+      (pos := Optint.Int63.(add !pos (of_int len)));
+      `Bigstring (Bigstringaf.sub ~off:0 ~len buf.buffer)
+    | exception End_of_file -> `Eof
+
 (** Return None to indicate End Of File *)
 let of_string_dispenser f : t =
  fun () ->

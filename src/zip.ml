@@ -55,6 +55,7 @@ module Action = struct
         parser: 'a Angstrom.t;
         on_parse: 'a -> unit;
       }
+    | Terminate
 end
 
 module Data = struct
@@ -82,6 +83,7 @@ module Data = struct
     | Fold_bigstring of 'a
     | Parse of 'a parser_state
     | Parse_many of unit parser_state
+    | Terminate
   [@@deriving sexp_of, compare, equal]
 end
 
@@ -358,9 +360,9 @@ let parse_entry =
 let parse_one cb =
   let local_file_header_signature = string "PK\003\004" in
   let* entry = parse_entry in
-  let reader ~buffer_size () =
+  let reader ~buffer_size (action : 'a Action.t) =
     let Mode.{ flush; complete } =
-      match cb entry with
+      match action with
       | Action.Skip -> Mode.skip ()
       | Action.String -> Mode.string ~buffer_size
       | Action.Bigstring -> Mode.bigstring ~buffer_size
@@ -368,6 +370,7 @@ let parse_one cb =
       | Action.Fold_bigstring { init; f } -> Mode.fold_bigstring ~init ~f entry
       | Action.Parse parser -> Mode.parse parser
       | Action.Parse_many { parser; on_parse } -> Mode.parse_many parser on_parse
+      | Action.Terminate -> assert false
     in
     let storage_method, zipped_length =
       match entry.methd with
@@ -381,27 +384,32 @@ let parse_one cb =
     in
     file_reader storage_method >>| complete
   in
-  let+ (data, size, crc), entry =
-    match entry.trailing_descriptor_present with
-    | false ->
-      let+ data_size_crc = reader ~buffer_size:(Int64.to_int_exn entry.descriptor.uncompressed_size) () in
-      data_size_crc, entry
-    | true ->
-      let+ data_size_crc = reader ~buffer_size:slice_size ()
-      and+ descriptor = option () local_file_header_signature *> parse_descriptor in
-      data_size_crc, { entry with descriptor }
-  in
-  let valid_length = Int64.(entry.descriptor.uncompressed_size = of_int size) in
-  let valid_crc = Int32.(entry.descriptor.crc = Optint.to_int32 crc) in
-  match valid_length, valid_crc with
-  | false, false ->
-    failwithf "SZXX: File '%s': Size and CRC mismatch: %d bytes but expected %Ld bytes" entry.filename
-      size entry.descriptor.uncompressed_size ()
-  | false, true ->
-    failwithf "SZXX: File '%s': Size mismatch: %d bytes but expected %Ld bytes" entry.filename size
-      entry.descriptor.uncompressed_size ()
-  | true, false -> failwithf "SZXX: File '%s': CRC mismatch" entry.filename ()
-  | true, true -> entry, data
+  match cb entry with
+  | Action.Terminate -> return (entry, Data.Terminate)
+  | action -> (
+    let+ (data, size, crc), entry =
+      match entry.trailing_descriptor_present with
+      | false ->
+        let+ data_size_crc =
+          reader ~buffer_size:(Int64.to_int_exn entry.descriptor.uncompressed_size) action
+        in
+        data_size_crc, entry
+      | true ->
+        let+ data_size_crc = reader ~buffer_size:slice_size action
+        and+ descriptor = option () local_file_header_signature *> parse_descriptor in
+        data_size_crc, { entry with descriptor }
+    in
+    let valid_length = Int64.(entry.descriptor.uncompressed_size = of_int size) in
+    let valid_crc = Int32.(entry.descriptor.crc = Optint.to_int32 crc) in
+    match valid_length, valid_crc with
+    | false, false ->
+      failwithf "SZXX: File '%s': Size and CRC mismatch: %d bytes but expected %Ld bytes" entry.filename
+        size entry.descriptor.uncompressed_size ()
+    | false, true ->
+      failwithf "SZXX: File '%s': Size mismatch: %d bytes but expected %Ld bytes" entry.filename size
+        entry.descriptor.uncompressed_size ()
+    | true, false -> failwithf "SZXX: File '%s': CRC mismatch" entry.filename ()
+    | true, true -> entry, data )
 
 let parse_trailing_central_directory =
   let* () = bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:"PK\005\006" Parsing.Storage.noop in
@@ -411,13 +419,23 @@ let stream_files ~sw ~feed:(read : Feed.t) cb =
   let open Eio.Std in
   let stream = Eio.Stream.create 0 in
   let parser =
-    skip_many (parse_one cb >>| fun pair -> Eio.Stream.add stream (Some pair))
-    *> parse_trailing_central_directory
+    skip_find
+      (parse_one cb >>= function
+       | (_, Terminate) as pair ->
+         Eio.Stream.add stream (Some pair);
+         return (Some ())
+       | pair ->
+         Eio.Stream.add stream (Some pair);
+         return_none )
+    >>= function
+    | None -> parse_trailing_central_directory *> return `Reached_end
+    | Some () -> return `Terminated
   in
   let open Buffered in
   let rec loop = function
     | Fail _ as state -> state_to_result state |> Result.ok_or_failwith
-    | Done (_, ()) -> failwith "SZXX: ZIP processing completed before reaching end of input"
+    | Done (_, `Reached_end) -> failwith "SZXX: ZIP processing completed before reaching end of input"
+    | Done (_, `Terminated) -> ()
     | Partial feed -> (
       match read () with
       | `Eof as eof -> (

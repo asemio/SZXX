@@ -68,6 +68,9 @@ val stream_rows :
   'a cell_parser ->
   'a status row option Eio.Stream.t * SST.t Promise.or_exn
 
+val stream_rows_double_pass :
+  ?only_sheet:int -> sw:Switch.t -> #Eio.File.ro -> 'a cell_parser -> 'a row option Eio.Stream.t
+
 val with_minimal_buffering :
   'a option Eio.Stream.t -> SST.t Promise.or_exn -> parse:(sst:SST.t -> 'a -> 'c) -> 'c Seq.t
 

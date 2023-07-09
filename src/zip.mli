@@ -61,6 +61,10 @@ module Action : sig
       }
         (** Repeatedly apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first.
             Call [on_parse] on each parsed value. [Parse_many] expects the file to end with a complete parse, without trailing junk bytes. *)
+    | Terminate
+        (** Terminate processing of the ZIP archive.
+            The output stream will finish with a [Data.Terminate] element (and the obligatory [None] to indicate end of stream).
+            SZXX stops reading from the [Feed.t] immediately, without even skipping over the bytes of that entry. *)
 end
 
 module Data : sig
@@ -90,6 +94,7 @@ module Data : sig
     | Fold_bigstring of 'a
     | Parse of 'a parser_state
     | Parse_many of unit parser_state
+    | Terminate
   [@@deriving sexp_of, compare, equal]
 end
 
@@ -111,6 +116,7 @@ end
     Return [Action.Fold_bigstring] to fold this file into a final state, in bigstring chunks of ~500-8192 bytes. IMPORTANT: this [Bigstring.t] is volatile! It's only safe to read from it until the end of function [f] (the "folder"). If you need to access the data again later, copy it in some way before the end of function [f].
     Return [Action.Parse] to apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. [Parse] expects the parser to consume all bytes and leave no trailing junk bytes after a successful parse.
     Return [Action.Parse_many] to repeatedly apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. Call [on_parse] on each parsed value. [Parse_many] expects the file to end with a complete parse and leave no trailing junk bytes.
+    Return [Action.Terminate] to terminate processing of the ZIP archive. The output stream will finish with a [Data.Terminate] element (and the obligatory [None] to indicate end of stream). SZXX stops reading from the [Feed.t] immediately, without even skipping over the bytes of that entry.
 
     This function returns a Stream containing all files in the archive.
     The order of the files passed to the [callback] and on the Stream matches the arrangement of the files within the ZIP. *)

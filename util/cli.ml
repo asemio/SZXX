@@ -13,6 +13,35 @@ let string_readers : string Xlsx.cell_parser =
     null = "";
   }
 
+let read env xlsx_path =
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  let t0 = Time_now.nanoseconds_since_unix_epoch () in
+  let feed = Feed.of_flow_non_seeking src in
+  let slices = ref 0 in
+
+  let rec loop = function
+    | `Eof -> ()
+    | `String _ as x ->
+      incr slices;
+      Eio.Flow.copy_string (sprintf !"%{Yojson.Basic}" x) (Eio.Stdenv.stdout env);
+      incr slices;
+      loop (feed ())
+    | `Bigstring bs ->
+      incr slices;
+      Eio.Flow.copy_string
+        (sprintf !"%{Yojson.Basic}" (`String (Bigstring.to_string bs)))
+        (Eio.Stdenv.stdout env);
+      loop (feed ())
+  in
+  loop (feed ());
+
+  let t1 = Time_now.nanoseconds_since_unix_epoch () in
+
+  Eio.Flow.copy_string
+    (sprintf "Slice count: %d (%Ldms)\n" !slices Int63.((t1 - t0) / of_int 1_000_000 |> to_int64))
+    env#stdout
+
 let count env xlsx_path =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
@@ -183,6 +212,7 @@ let count_tokens env xlsx_path =
 let () =
   Eio_main.run @@ fun env ->
   Sys.get_argv () |> function
+  | [| _; "cat"; file |] -> read env file
   | [| _; "extract_sst"; file |] -> extract_sst env file
   | [| _; "count"; file |] -> count env file
   | [| _; "length"; file |] -> length env file

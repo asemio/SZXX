@@ -145,6 +145,27 @@ let sst_from_zip env filename () =
   | Some x -> failwithf "Invalid SST index 30: '%s'" x ()
   | None -> failwith "Failed to resolve SST index 30"
 
+let double_pass env filename () =
+  let open SZXX in
+  let xlsx_path = sprintf "../../../test/files/%s.xlsx" filename in
+  let json_path = sprintf "../../../test/files/%s.json" filename in
+  Eio.Path.with_open_in Eio.Path.(env#fs / xlsx_path) @@ fun src ->
+  Switch.run @@ fun sw ->
+  let stream = Xlsx.stream_rows_double_pass ~sw src Xlsx.yojson_cell_parser in
+  let parsed =
+    `Assoc
+      [
+        ( "data",
+          `List
+            ( Xlsx.to_seq stream
+            |> Sequence.of_seq
+            |> Sequence.map ~f:(fun { data; _ } -> `List data)
+            |> Sequence.to_list ) );
+      ]
+  in
+  let against = Eio.Path.(load (env#fs / json_path)) |> Yojson.Safe.from_string in
+  Json_diff.check parsed against
+
 let () =
   Eio_main.run @@ fun env ->
   Alcotest.run "SZXX XLSX"
@@ -160,5 +181,6 @@ let () =
           "Readme example 1", `Quick, readme_example1 env "financial";
           "Readme example 2", `Quick, readme_example2 env "financial";
           "Unbuffed stream", `Quick, stream_rows env "financial";
+          "Double pass", `Quick, double_pass env "financial";
         ] );
     ]

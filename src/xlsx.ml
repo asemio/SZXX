@@ -92,8 +92,8 @@ let to_seq stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream)
 let flush_zip_stream zip_stream =
   to_seq zip_stream
   |> Seq.iter (function
-       | ( (_ : Zip.entry),
-           Zip.Data.(Skip | String _ | Bigstring _ | Fold_string _ | Fold_bigstring _ | Parse _) ) ->
+       | ((_, (Skip | String _ | Bigstring _ | Fold_string _ | Fold_bigstring _ | Parse _ | Terminate)) :
+           Zip.entry * 'a Zip.Data.t ) ->
          ()
        | { filename; _ }, Parse_many state -> (
          match Zip.Data.parser_state_to_result state with
@@ -108,20 +108,19 @@ module SST = struct
   let zip_entry_filename = "xl/sharedStrings.xml"
 
   let from_zip ~feed =
-    let q =
-      Switch.run @@ fun sw ->
-      let q = Queue.create () in
-      let zip_stream =
-        Zip.stream_files ~sw ~feed (function
-          | { filename = "xl/sharedStrings.xml"; _ } ->
-            let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
-            fold_angstrom ~filter_path ~on_match ()
-          | _ -> Zip.Action.Skip )
-      in
-      flush_zip_stream zip_stream;
-      q
+    Switch.run @@ fun sw ->
+    let q = Queue.create () in
+    let seen = ref false in
+    let zip_stream =
+      Zip.stream_files ~sw ~feed (function
+        | { filename = "xl/sharedStrings.xml"; _ } ->
+          seen := true;
+          let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
+          fold_angstrom ~filter_path ~on_match ()
+        | _ when !seen -> Zip.Action.Terminate
+        | _ -> Zip.Action.Skip )
     in
-
+    flush_zip_stream zip_stream;
     Queue.to_array q
 end
 
@@ -265,6 +264,24 @@ let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~sw ~feed () =
 
   let sst_p = process_file ?only_sheet ~skip_sst ~sw ~feed push finalize in
   stream, sst_p
+
+let stream_rows_double_pass ?only_sheet ~sw src cell_parser =
+  let sst =
+    let feed = Feed.of_flow_non_seeking src in
+    SST.from_zip ~feed
+  in
+  let stream = Eio.Stream.create 0 in
+  let push x = Eio.Stream.add stream (Some (parse_row_with_sst sst cell_parser x)) in
+  let finalize () = Eio.Stream.add stream None in
+
+  let sst_p =
+    let feed = Feed.of_flow src in
+    process_file ?only_sheet ~skip_sst:true ~sw ~feed push finalize
+  in
+  Fiber.fork_daemon ~sw (fun () ->
+    let _empty_sst = Eio.Promise.await_exn sst_p in
+    `Stop_daemon );
+  stream
 
 let with_minimal_buffering stream sst_p ~parse =
   let seq = to_seq stream in
