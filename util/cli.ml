@@ -162,7 +162,7 @@ let count_tokens env xlsx_path =
   let files =
     Zip.stream_files ~sw ~feed:(SZXX.Feed.of_flow src) (function
       | { filename = "xl/sharedStrings.xml"; _ } ->
-        Zip.Action.Parse Angstrom.(SZXX__Parsing.skip_many (Xml.parser >>| on_parse))
+        Zip.Action.Parse Angstrom.(SZXX__Parsing.skip_many (Xml.SAX.parser >>| on_parse))
       | _ -> Zip.Action.Skip )
   in
   Xlsx.to_seq files

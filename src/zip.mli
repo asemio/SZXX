@@ -93,28 +93,26 @@ module Data : sig
   [@@deriving sexp_of, compare, equal]
 end
 
-(**
-   Stream files from a ZIP archive.
+(** Stream files from a ZIP archive.
 
-   [SZXX.Zip.stream_files ~sw ~feed callback]
+    [SZXX.Zip.stream_files ~sw ~feed callback]
 
-   [sw]: A regular [Eio.Switch.t].
+    [sw]: A regular [Eio.Switch.t].
 
-   [feed]: A producer of raw data. Create a [feed] by using the [SZXX.Feed] module.
+    [feed]: A producer of raw data. Create a [feed] by using the [SZXX.Feed] module.
 
-   [callback]: A function called on every file found within the ZIP archive.
-   You must choose an Action ([SZXX.Zip.Action.t]) to perform over each file encountered within the ZIP archive.
+    [callback]: A function called on every file found within the ZIP archive.
+    You must choose an Action ([SZXX.Zip.Action.t]) to perform over each file encountered within the ZIP archive.
 
-   Return [Action.Skip] to skip over the compressed bytes of this file without attempting to decompress them.
-   Return [Action.String] to collect the whole decompressed file into a single string.
-   Return [Action.Bigstring] to collect the whole decompressed file into a single bigstring. More efficient than [Action.String] if you don't need to convert the result into a string.
-   Return [Action.Fold_string] to fold this file into a final state, in string chunks of ~500-8192 bytes.
-   Return [Action.Fold_bigstring] to fold this file into a final state, in bigstring chunks of ~500-8192 bytes. IMPORTANT: this [Bigstring.t] is volatile! It's only safe to read from it until the end of function [f] (the "folder"). If you need to access the data again later, copy it in some way before the end of function [f].
-   Return [Action.Parse] to apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. [Parse] expects the parser to consume all bytes and leave no trailing junk bytes after a successful parse.
-   Return [Action.Parse_many] to repeatedly apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. Call [on_parse] on each parsed value. [Parse_many] expects the file to end with a complete parse and leave no trailing junk bytes.
+    Return [Action.Skip] to skip over the compressed bytes of this file without attempting to decompress them.
+    Return [Action.String] to collect the whole decompressed file into a single string.
+    Return [Action.Bigstring] to collect the whole decompressed file into a single bigstring. More efficient than [Action.String] if you don't need to convert the result into a string.
+    Return [Action.Fold_string] to fold this file into a final state, in string chunks of ~500-8192 bytes.
+    Return [Action.Fold_bigstring] to fold this file into a final state, in bigstring chunks of ~500-8192 bytes. IMPORTANT: this [Bigstring.t] is volatile! It's only safe to read from it until the end of function [f] (the "folder"). If you need to access the data again later, copy it in some way before the end of function [f].
+    Return [Action.Parse] to apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. [Parse] expects the parser to consume all bytes and leave no trailing junk bytes after a successful parse.
+    Return [Action.Parse_many] to repeatedly apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. Call [on_parse] on each parsed value. [Parse_many] expects the file to end with a complete parse and leave no trailing junk bytes.
 
-   This function returns a Stream containing all files in the archive.
-   The order of the files passed to the [callback] and on the Stream matches the arrangement of the files within the ZIP.
-*)
+    This function returns a Stream containing all files in the archive.
+    The order of the files passed to the [callback] and on the Stream matches the arrangement of the files within the ZIP. *)
 val stream_files :
   sw:Switch.t -> feed:Feed.t -> (entry -> 'a Action.t) -> (entry * 'a Data.t) option Eio.Stream.t

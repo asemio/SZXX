@@ -48,24 +48,24 @@ let parse_datetime ~zone f =
   Time_float.of_date_ofday ~zone date ofday
 
 let xml_parser_options =
-  Xml.
+  Xml.SAX.
     {
       accept_html_boolean_attributes = false;
       accept_unquoted_attributes = false;
       accept_single_quoted_attributes = false;
     }
 
-let xml_parser = Xml.make_parser xml_parser_options
+let xml_parser = Xml.SAX.make_parser xml_parser_options
 
 let fold_angstrom ~filter_path ~on_match () =
-  let sax = ref (Ok Xml.SAX.Stream.init) in
-  let on_parse node = sax := Xml.SAX.Stream.folder ~filter_path ~on_match !sax node in
+  let sax = ref (Ok Xml.SAX.Expert.Stream.init) in
+  let on_parse node = sax := Xml.SAX.Expert.Stream.folder ~filter_path ~on_match !sax node in
   Zip.Action.Parse_many { parser = xml_parser; on_parse }
 
 let parse_sheet ~sheet_number push =
   let num = ref 0 in
   let on_match (el : Xml.DOM.element) =
-    (match Xml.get_attr el.attrs "r" with
+    (match Xml.DOM.get_attr el.attrs "r" with
     | None -> incr num
     | Some s -> (
       try
@@ -192,7 +192,7 @@ let extract_cell_sst, extract_cell_status =
     | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
   in
   let extract_cell_sst sst cell_parser location el =
-    match Xml.get_attr el.attrs "t" with
+    match Xml.DOM.get_attr el.attrs "t" with
     | Some "s" -> (
       match el |> dot "v" with
       | None -> cell_parser.null
@@ -203,7 +203,7 @@ let extract_cell_sst, extract_cell_status =
     | ty -> extract_cell_base cell_parser location el ty
   in
   let extract_cell_status cell_parser location el =
-    match Xml.get_attr el.attrs "t" with
+    match Xml.DOM.get_attr el.attrs "t" with
     | Some "s" -> (
       match el |> dot "v" with
       | None -> Available cell_parser.null
@@ -228,7 +228,7 @@ let parse_row_with_sst sst cell_parser ({ data; sheet_number; row_number } as ro
     let rec loop i acc = function
       | [] -> List.rev acc
       | el :: rest ->
-        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
+        let col_index = Xml.DOM.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
         let v = extract_cell_sst sst cell_parser { col_index; sheet_number; row_number } el in
         let acc = Fn.apply_n_times ~n:(col_index - i) (List.cons cell_parser.null) acc in
         (loop [@tailcall]) (col_index + 1) (v :: acc) rest
@@ -243,7 +243,7 @@ let parse_row_without_sst cell_parser ({ data; sheet_number; row_number } as row
     let rec loop i acc = function
       | [] -> List.rev acc
       | el :: rest ->
-        let col_index = Xml.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
+        let col_index = Xml.DOM.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
         let v = extract_cell_status cell_parser { col_index; sheet_number; row_number } el in
         let acc = Fn.apply_n_times ~n:(col_index - i) (List.cons (Available cell_parser.null)) acc in
         (loop [@tailcall]) (col_index + 1) (v :: acc) rest
@@ -299,8 +299,8 @@ let stream_rows_buffer ?only_sheet ~sw ~feed cell_parser =
 
 let yojson_cell_parser : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_parser =
   {
-    string = (fun _location s -> `String (Xml.unescape s));
-    formula = (fun _location ~formula:_ s -> `String (Xml.unescape s));
+    string = (fun _location s -> `String (Xml.DOM.unescape s));
+    formula = (fun _location ~formula:_ s -> `String (Xml.DOM.unescape s));
     error = (fun _location s -> `String (sprintf "#ERROR# %s" s));
     boolean = (fun _location s -> `Bool String.(s = "1"));
     number = (fun _location s -> `Float (Float.of_string s));

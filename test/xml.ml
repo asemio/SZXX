@@ -271,7 +271,7 @@ module Test3 = struct
       },
       {
         "tag": "t",
-        "attrs": [ [ "xml:space", "preserve" ], [ "scoped", "" ] ],
+        "attrs": [ [ "xml:space", "preserve" ], [ "scoped", "scoped" ] ],
         "text": " \"hello!\"  world   | \n 🇨🇦 ",
         "children": [
           { "tag": "x", "attrs": [], "text": "", "children": [] }
@@ -441,7 +441,7 @@ module Test4 = struct
       },
       {
         "tag": "body",
-        "attrs": [ [ "scoped", "" ] ],
+        "attrs": [ [ "scoped", "scoped" ] ],
         "text": "",
         "children": [
           {
@@ -481,7 +481,7 @@ let test_large_cdata () =
   in
   bprintf buf "<![CDATA[%s]]>" random;
   let node =
-    Angstrom.parse_string ~consume:All SZXX.Xml.parser (Buffer.contents buf) |> Result.ok_or_failwith
+    Angstrom.parse_string ~consume:All SZXX.Xml.SAX.parser (Buffer.contents buf) |> Result.ok_or_failwith
   in
   if not ([%equal: SZXX.Xml.SAX.node] node (SZXX.Xml.SAX.Cdata random))
   then failwith "CDATA Strings did not match"
@@ -506,7 +506,7 @@ let sexp_of_buffer buf = Sexp.List [ Atom "Buffer"; Atom (Buffer.contents buf) ]
 
 let xml_to_dom
   ?(options =
-    SZXX.Xml.
+    SZXX.Xml.SAX.
       {
         accept_html_boolean_attributes = true;
         accept_unquoted_attributes = true;
@@ -514,44 +514,47 @@ let xml_to_dom
       }) ?strict test data () =
   match
     Angstrom.parse_string ~consume:Angstrom.Consume.All
-      (Angstrom.many SZXX.Xml.(make_parser options))
+      (Angstrom.many (SZXX.Xml.SAX.make_parser options))
       test
   with
   | Ok nodes ->
     (* print_endline (sprintf !"%{sexp#hum: SZXX.Xml.SAX.node list}" nodes); *)
     let doc =
       match
-        List.fold_result nodes ~init:SZXX.Xml.SAX.To_DOM.init ~f:(fun acc -> function
-          | Text s -> SZXX.Xml.SAX.To_DOM.folder ?strict (Ok acc) (Text (SZXX.Xml.unescape s))
-          | el -> SZXX.Xml.SAX.To_DOM.folder ?strict (Ok acc) el )
+        List.fold_result nodes ~init:SZXX.Xml.SAX.Expert.To_DOM.init ~f:(fun acc -> function
+          | Text s -> SZXX.Xml.SAX.Expert.To_DOM.folder ?strict (Ok acc) (Text (SZXX.Xml.DOM.unescape s))
+          | el -> SZXX.Xml.SAX.Expert.To_DOM.folder ?strict (Ok acc) el )
       with
       | Ok { decl_attrs; stack = []; top = Some top; _ } ->
         { decl_attrs = Option.value ~default:[] decl_attrs; top }
-      | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.To_DOM.state}" state ()
+      | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.Expert.To_DOM.state}" state ()
       | Error msg -> failwith msg
     in
     Json_diff.check (doc_to_yojson doc) data
   | Error msg -> failwith msg
 
-let xml_stream ?(options = SZXX.Xml.default_parser_options) ?strict test data filter_path () =
+let xml_stream ?(options = SZXX.Xml.SAX.default_parser_options) ?strict test data filter_path () =
   let queue = Queue.create () in
   let on_match x = Queue.enqueue queue x in
   match
     Angstrom.parse_string ~consume:Angstrom.Consume.All
-      (Angstrom.many SZXX.Xml.(make_parser options))
+      (Angstrom.many (SZXX.Xml.SAX.make_parser options))
       test
   with
   | Ok nodes ->
     let _state =
-      List.fold_result nodes ~init:SZXX.Xml.SAX.Stream.init ~f:(fun acc x ->
-        SZXX.Xml.SAX.Stream.folder ?strict ~filter_path ~on_match (Ok acc) x )
+      List.fold_result nodes ~init:SZXX.Xml.SAX.Expert.Stream.init ~f:(fun acc x ->
+        SZXX.Xml.SAX.Expert.Stream.folder ?strict ~filter_path ~on_match (Ok acc) x )
     in
     let streamed = `Assoc [ "data", [%to_yojson: element array] (Queue.to_array queue) ] in
     Json_diff.check streamed data
   | Error msg -> failwith msg
 
 let test_easy test data () =
-  SZXX.Xml.Easy.of_string test |> Result.ok_or_failwith |> doc_to_yojson |> Fn.flip Json_diff.check data
+  SZXX.Xml.Easy.dom_of_string test
+  |> Result.ok_or_failwith
+  |> doc_to_yojson
+  |> Fn.flip Json_diff.check data
 
 let readme_example1 () =
   let open SZXX in
@@ -566,10 +569,12 @@ let readme_example1 () =
   in
 
   let nodes =
-    Angstrom.parse_string ~consume:All (Angstrom.many Xml.parser) raw_xml_string |> Result.ok_or_failwith
+    Angstrom.parse_string ~consume:All (Angstrom.many Xml.SAX.parser) raw_xml_string
+    |> Result.ok_or_failwith
   in
   let xml =
-    List.fold_result nodes ~init:Xml.SAX.To_DOM.init ~f:(fun acc x -> Xml.SAX.To_DOM.folder (Ok acc) x)
+    List.fold_result nodes ~init:Xml.SAX.Expert.To_DOM.init ~f:(fun acc x ->
+      Xml.SAX.Expert.To_DOM.folder (Ok acc) x )
     |> Result.ok_or_failwith
   in
   (* Do something with `xml` *)
@@ -580,9 +585,9 @@ let readme_example2 () =
   let open SZXX in
   let src = Eio.Flow.string_source Test1.raw in
 
-  let state = ref (Ok Xml.SAX.To_DOM.init) in
-  let on_parse node = state := Xml.SAX.To_DOM.folder !state node in
-  let _rest, result = Angstrom_eio.parse_many Xml.parser on_parse src in
+  let state = ref (Ok Xml.SAX.Expert.To_DOM.init) in
+  let on_parse node = state := Xml.SAX.Expert.To_DOM.folder !state node in
+  let _rest, result = Angstrom_eio.parse_many Xml.SAX.parser on_parse src in
 
   match result, !state with
   | Error msg, _
@@ -610,14 +615,14 @@ let readme_example3 () =
 |}
   in
 
-  let state = ref (Ok Xml.SAX.Stream.init) in
+  let state = ref (Ok Xml.SAX.Expert.Stream.init) in
   let filter_path = [ "html"; "body"; "div" ] in
   let on_match div =
     (* Do something with `div` *)
     print_endline (Xml.DOM.sexp_of_element div |> Sexp.to_string)
   in
-  let on_parse node = state := Xml.SAX.Stream.folder ~filter_path ~on_match !state node in
-  let _rest, result = Angstrom_eio.parse_many Xml.parser on_parse src in
+  let on_parse node = state := Xml.SAX.Expert.Stream.folder ~filter_path ~on_match !state node in
+  let _rest, result = Angstrom_eio.parse_many Xml.SAX.parser on_parse src in
 
   match result, !state with
   | Error msg, _
@@ -626,7 +631,7 @@ let readme_example3 () =
   | Ok (), Ok shallow_tree ->
     (* Do something with `shallow_tree` or `acc_top_level_divs` *)
     Option.value_map shallow_tree.decl_attrs ~default:"--" ~f:(fun x ->
-      Xml.sexp_of_attr_list x |> Sexp.to_string )
+      Xml.DOM.sexp_of_attr_list x |> Sexp.to_string )
     |> print_endline
 
 let () =

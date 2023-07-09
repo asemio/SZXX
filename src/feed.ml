@@ -24,3 +24,32 @@ let of_bigstring_dispenser f : t =
   match f () with
   | Some bs -> `Bigstring bs
   | None -> `Eof
+
+(** Note: not ideal for extremely large strings. For that, use the other functions in this module. *)
+let of_string s : t =
+  let size = String.length s in
+  let slice_size = 4096 in
+  (* By copying the string into a sequence of Bigstrings,
+     we can reclaim memory as soon as the large string goes out of scope
+     and the sequence starts being processed. *)
+  let seq =
+    if size < slice_size
+    then Sequence.singleton (Bigstring.of_string s)
+    else (
+      let n = size / slice_size in
+      let rem = size - (slice_size * n) in
+      let seq1 =
+        List.init n ~f:(fun i -> Bigstringaf.of_string s ~off:(i * slice_size) ~len:slice_size)
+        |> Sequence.of_list
+      in
+      let seq2 =
+        if rem = 0
+        then Sequence.empty
+        else Sequence.singleton (Bigstringaf.of_string s ~off:(n * slice_size) ~len:rem)
+      in
+      Sequence.append seq1 seq2 )
+  in
+  fun () ->
+    match Sequence.hd seq with
+    | None -> `Eof
+    | Some bs -> `Bigstring bs
