@@ -17,7 +17,7 @@ let read env xlsx_path =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
   let t0 = Time_now.nanoseconds_since_unix_epoch () in
-  let feed = Feed.of_flow_non_seeking src in
+  let feed = Feed.of_flow_seekable src in
   let slices = ref 0 in
 
   let rec loop = function
@@ -46,21 +46,26 @@ let count env xlsx_path =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
   let t0 = Time_now.nanoseconds_since_unix_epoch () in
-  let stream, _sst_p = Xlsx.stream_rows_unparsed ~sw ~feed:(SZXX.Feed.of_flow src) ~skip_sst:true () in
+  let n = ref 0 in
+  let seq =
+    Xlsx.stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src) Xlsx.string_cell_parser ~filter:(fun _ ->
+      incr n;
+      false )
+  in
+  Sequence.iter seq ~f:(fun _ -> ());
 
-  let n = Xlsx.to_seq stream |> Seq.fold_left (fun acc _x -> acc + 1) 0 in
   let t1 = Time_now.nanoseconds_since_unix_epoch () in
 
   Eio.Flow.copy_string
-    (sprintf "Row count: %d (%Ldms)\n" n Int63.((t1 - t0) / of_int 1_000_000 |> to_int64))
+    (sprintf "Row count: %d (%Ldms)\n" !n Int63.((t1 - t0) / of_int 1_000_000 |> to_int64))
     env#stdout
 
 let length env xlsx_path =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
   let stream = Zip.stream_files ~sw ~feed:(SZXX.Feed.of_flow src) (const Zip.Action.String) in
-  Xlsx.to_seq stream
-  |> Seq.iter (function
+  Xlsx.to_sequence stream
+  |> Sequence.iter ~f:(function
        | ({ filename; _ } : Zip.entry), Zip.Data.String raw ->
          Eio.Flow.copy_string (sprintf "%s: %d\n" filename (String.length raw)) env#stdout
        | _ -> failwith "Expected Zip.Data.String" )
@@ -76,8 +81,8 @@ let extract_sst env xlsx_path =
       | { filename = "xl/sharedStrings.xml"; _ } -> Zip.Action.String
       | _ -> Zip.Action.Skip )
   in
-  Xlsx.to_seq stream
-  |> Seq.iter (function
+  Xlsx.to_sequence stream
+  |> Sequence.iter ~f:(function
        | _, Zip.Data.String s -> Eio.Flow.copy_string s sink
        | _ -> () )
 
@@ -85,9 +90,23 @@ let show_json env xlsx_path =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
   Eio.Buf_write.with_flow env#stdout @@ fun w ->
-  SZXX.Xlsx.stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src) SZXX.Xlsx.yojson_cell_parser
-  |> Seq.iter (fun (row : Yojson.Basic.t SZXX.Xlsx.row) ->
+  SZXX.Xlsx.stream_rows_buffer ~max_buffering:1000 ~sw ~feed:(SZXX.Feed.of_flow src)
+    SZXX.Xlsx.yojson_cell_parser
+  |> Sequence.iteri ~f:(fun i (row : Yojson.Basic.t SZXX.Xlsx.row) ->
        let s = `List row.data |> Yojson.Basic.pretty_to_string in
+       Eio.Buf_write.string w (sprintf "%d: " (i + 1));
+       Eio.Buf_write.string w s;
+       Eio.Buf_write.char w '\n' )
+
+let show_json_double_pass env xlsx_path =
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  Eio.Buf_write.with_flow env#stdout @@ fun w ->
+  SZXX.Xlsx.stream_rows_double_pass ~sw src SZXX.Xlsx.yojson_cell_parser
+  |> SZXX.Xlsx.to_sequence
+  |> Sequence.iteri ~f:(fun i (row : Yojson.Basic.t SZXX.Xlsx.row) ->
+       let s = `List row.data |> Yojson.Basic.pretty_to_string in
+       Eio.Buf_write.string w (sprintf "%d: " (i + 1));
        Eio.Buf_write.string w s;
        Eio.Buf_write.char w '\n' )
 
@@ -113,12 +132,15 @@ let count_types env xlsx_path =
         null = ();
       }
   in
-  let stream, _sst_p = Xlsx.stream_rows ~sw ~feed:(SZXX.Feed.of_flow src) cell_parser in
-  Xlsx.to_seq stream
-  |> Seq.iter (fun Xlsx.{ data; _ } ->
-       List.iter data ~f:(function
-         | Xlsx.Available _ -> ()
-         | Delayed _ -> incr ss ) );
+  let seq =
+    Xlsx.stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src) cell_parser ~filter:(fun raw ->
+      let row = Xlsx.Expert.parse_row_without_sst cell_parser raw in
+      List.iter row.data ~f:(function
+        | Available _ -> ()
+        | Delayed _ -> incr ss );
+      false )
+  in
+  Sequence.iter seq ~f:(fun _ -> ());
   Eio.Flow.copy_string
     (sprintf
        "%s\nstring: %d\nshared_string: %d\nformula: %d\nerror: %d\nboolean: %d\nnumber: %d\ndate: %d\n"
@@ -127,16 +149,6 @@ let count_types env xlsx_path =
 
 let count_total_string_length env xlsx_path =
   let t0 = Time_now.nanoseconds_since_unix_epoch () in
-  let sst =
-    Eio.Path.with_open_in Eio.Path.(env#fs / xlsx_path) @@ fun src ->
-    Xlsx.SST.from_zip ~feed:(SZXX.Feed.of_flow src)
-  in
-  let t1 = Time_now.nanoseconds_since_unix_epoch () in
-  Eio.Flow.copy_string
-    (sprintf
-       !"Parse SST: %{Time_float.Span#hum}\n"
-       (Int63.(t1 - t0 |> to_float) |> Time_float.Span.of_ns) )
-    env#stdout;
   let num_rows = ref 0 in
   let num_strings = ref 0 in
   let total_length = ref 0 in
@@ -156,18 +168,15 @@ let count_total_string_length env xlsx_path =
       }
   in
   Switch.run @@ fun sw ->
-  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
-  let stream, _sst = Xlsx.stream_rows_unparsed ~sw ~skip_sst:true ~feed:(SZXX.Feed.of_flow src) () in
-  Xlsx.to_seq stream
-  |> Seq.iter (fun el ->
-       let _row = Xlsx.parse_row_with_sst sst cell_parser el in
-       incr num_rows );
-  let t2 = Time_now.nanoseconds_since_unix_epoch () in
+  let file = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  let seq = Xlsx.stream_rows_double_pass ~sw file cell_parser |> Xlsx.to_sequence in
+  Sequence.iter seq ~f:(fun _row -> incr num_rows);
+  let t1 = Time_now.nanoseconds_since_unix_epoch () in
   Eio.Flow.copy_string
     (sprintf
        !"Rows: %{Int#hum}\nStrings: %{Int#hum}\nTotal string length: %{Int#hum}\n%{Time_float.Span#hum}\n"
        !num_rows !num_strings !total_length
-       (Int63.(t2 - t0 |> to_float) |> Time_float.Span.of_ns) )
+       (Int63.(t1 - t0 |> to_float) |> Time_float.Span.of_ns) )
     env#stdout
 
 let count_tokens env xlsx_path =
@@ -194,8 +203,8 @@ let count_tokens env xlsx_path =
         Zip.Action.Parse Angstrom.(SZXX__Parsing.skip_many (Xml.SAX.parser >>| on_parse))
       | _ -> Zip.Action.Skip )
   in
-  Xlsx.to_seq files
-  |> Seq.iter (function
+  Xlsx.to_sequence files
+  |> Sequence.iter ~f:(function
        | _, Zip.Data.Parse state -> Zip.Data.parser_state_to_result state |> Result.ok_or_failwith
        | _ -> () );
   Eio.Flow.copy_string
@@ -217,6 +226,7 @@ let () =
   | [| _; "count"; file |] -> count env file
   | [| _; "length"; file |] -> length env file
   | [| _; "show_json"; file |] -> show_json env file
+  | [| _; "show_json2"; file |] -> show_json_double_pass env file
   | [| _; "count_types"; file |] -> count_types env file
   | [| _; "count_length"; file |] -> count_total_string_length env file
   | [| _; "count_tokens"; file |] -> count_tokens env file

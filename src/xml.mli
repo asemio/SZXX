@@ -75,7 +75,7 @@ module SAX : sig
 
     It is not fully spec-compliant, it does not attempt to validate character encoding or reject all incorrect documents.
     It does not process references.
-    It does not automatically unescape XML escape sequences automatically but [SZXX.Xml.DOM.unescape] is provided to do so.
+    It does not automatically unescape XML escape sequences but [SZXX.Xml.DOM.unescape] is provided to do so.
 
     See README.md for examples on how to use it. *)
   val parser : node Angstrom.t
@@ -149,30 +149,38 @@ module Easy : sig
   }
   [@@deriving sexp_of, compare, equal]
 
-  (** Returns a fully formed, fully unescaped document, or a (sometimes) helpful error in case of failure.
+  (** Progressively parse a fully formed, fully escaped XML document.
 
-      [parser] overrides the default parser.
-      To support HTML you will need to pass a parser with non-standard options.
-      Call [SZXX.Xml.SAX.make_parser] if your document uses HTML-style features such as unquoted attributes.
+      [parser]: Override the default parser.
+        To support HTML you will need to pass a parser with non-standard options.
+        Call [SZXX.Xml.SAX.make_parser] if your document uses HTML-style features such as unquoted or boolean attributes.
 
-      [strict] (default: [true]) When false, non-closed elements are treated as self-closing elements, HTML-style.
-      For example a [<br>] without a matching [</br>] is treated as a self-closing [<br />]. *)
+      [strict]: Default: [true]. When false, non-closed elements are treated as self-closing elements, HTML-style.
+        For example a [<br>] without a matching [</br>] is treated as a self-closing [<br />].
+
+      [feed]: A producer of raw data. Create a [feed] by using the [SZXX.Feed] module. *)
+  val dom_of_feed : ?parser:SAX.node Angstrom.t -> ?strict:bool -> Feed.t -> (document, string) result
+
+  (** Same as [dom_of_feed], but from a string *)
   val dom_of_string : ?parser:SAX.node Angstrom.t -> ?strict:bool -> string -> (document, string) result
 
-  (** This function progressively assembles an XML DOM, but every element that matches [path_path]
-      is passed to [on_match] instead of being added to the DOM. This "shallow DOM" is then returned.
+  (** Progressively assemble an XML DOM, but every element that matches [path_path] is passed
+      to [on_match] instead of being added to the DOM. This "shallow DOM" is then returned.
       All text nodes are properly unescaped.
 
-      [parser] overrides the default parser.
-      To support HTML you will need to pass a parser with non-standard options.
-      Call [SZXX.Xml.SAX.make_parser] if your document uses HTML-style features such as unquoted attributes.
+      [parser]: Override the default parser.
+        To support HTML you will need to pass a parser with non-standard options.
+        Call [SZXX.Xml.SAX.make_parser] if your document uses HTML-style features such as unquoted or boolean attributes.
 
-      [strict] (default: [true]) When false, non-closed elements are treated as self-closing elements, HTML-style.
-      For example a [<br>] without a matching [</br>] is treated as a self-closing [<br />].
+      [strict]: Default: [true]. When false, non-closed elements are treated as self-closing elements, HTML-style.
+        For example a [<br>] without a matching [</br>] is treated as a self-closing [<br />].
 
-      [filter_path] indicates which part of the DOM should be streamed out instead of being stored in the DOM.
-      For example [ ["html"; "body"; "div"; "div"; "p"] ] will emit all the [<p>] tags nested inside exactly 2 levels of [<div>] tags in an HTML document.
-      *)
+      [feed]: A producer of raw data. Create a [feed] by using the [SZXX.Feed] module.
+
+      [filter_path]: indicates which part of the DOM should be streamed out instead of being stored in the DOM.
+        For example [ ["html"; "body"; "div"; "div"; "p"] ] will emit all the [<p>] tags nested inside exactly 2 levels of [<div>] tags in an HTML document.
+
+      [on_match]: Called on every element that matched [filter_path] *)
   val stream_matching_elements :
     ?parser:SAX.node Angstrom.t ->
     ?strict:bool ->

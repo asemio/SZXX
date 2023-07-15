@@ -449,3 +449,5 @@ let stream_files ~sw ~feed:(read : Feed.t) cb =
     Eio.Stream.add stream None;
     `Stop_daemon );
   stream
+
+let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq

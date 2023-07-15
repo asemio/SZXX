@@ -18,17 +18,6 @@ type 'a cell_parser = {
   null: 'a;
 }
 
-type delayed_string = {
-  location: location;
-  sst_index: string;
-}
-[@@deriving sexp_of]
-
-type 'a status =
-  | Available of 'a
-  | Delayed of delayed_string
-[@@deriving sexp_of]
-
 type 'a row = {
   sheet_number: int;
   row_number: int;
@@ -87,19 +76,6 @@ let parse_string_cell el =
   | Some { text; _ } -> text
   | None -> filter_map "r" el ~f:(dot_text "t") |> String.concat
 
-let to_seq stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream)
-
-let flush_zip_stream zip_stream =
-  to_seq zip_stream
-  |> Seq.iter (function
-       | ((_, (Skip | String _ | Bigstring _ | Fold_string _ | Fold_bigstring _ | Parse _ | Terminate)) :
-           Zip.entry * 'a Zip.Data.t ) ->
-         ()
-       | { filename; _ }, Parse_many state -> (
-         match Zip.Data.parser_state_to_result state with
-         | Ok x -> x
-         | Error msg -> failwithf "SZXX: File '%s': %s" filename msg () ) )
-
 module SST = struct
   type t = string Lazy.t array
 
@@ -111,18 +87,52 @@ module SST = struct
     Switch.run @@ fun sw ->
     let q = Queue.create () in
     let seen = ref false in
-    let zip_stream =
-      Zip.stream_files ~sw ~feed (function
-        | { filename = "xl/sharedStrings.xml"; _ } ->
-          seen := true;
-          let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
-          fold_angstrom ~filter_path ~on_match ()
-        | _ when !seen -> Zip.Action.Terminate
-        | _ -> Zip.Action.Skip )
-    in
-    flush_zip_stream zip_stream;
+    Zip.stream_files ~sw ~feed (function
+      | { filename = "xl/sharedStrings.xml"; _ } ->
+        seen := true;
+        let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
+        fold_angstrom ~filter_path ~on_match ()
+      | _ when !seen -> Zip.Action.Terminate
+      | _ -> Zip.Action.Skip )
+    |> Zip.to_sequence
+    |> Sequence.iter ~f:(function
+         | Zip.{ filename; _ }, Zip.Data.Parse_many state -> (
+           match Zip.Data.parser_state_to_result state with
+           | Ok x -> x
+           | Error msg -> failwithf "SZXX: File '%s' error: %s" filename msg () )
+         | _ -> () );
+
     Queue.to_array q
+
+  let resolve_sst_index (sst : t) ~sst_index =
+    let index = Int.of_string sst_index in
+    match sst with
+    | sst when index < Array.length sst && index >= 0 -> Some (force sst.(index))
+    | _ -> None
 end
+
+let flush_zip_stream ~sw zip_stream finalize =
+  let sst_p, sst_w = Promise.create () in
+  let flushed_p =
+    Fiber.fork_promise ~sw (fun () ->
+      Zip.to_sequence zip_stream
+      |> Sequence.iter ~f:(function
+           | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Skip -> Promise.resolve sst_w ()
+           | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Parse_many state -> (
+             match Zip.Data.parser_state_to_result state with
+             | Ok () -> Promise.resolve sst_w ()
+             | Error msg -> failwithf "SZXX: File '%s': %s" SST.zip_entry_filename msg () )
+           | Zip.{ filename; _ }, Zip.Data.Parse_many state -> (
+             match Zip.Data.parser_state_to_result state with
+             | Ok () -> ()
+             | Error msg -> failwithf "SZXX: File '%s': %s" filename msg () )
+           | _ -> () );
+
+      if not (Promise.is_resolved sst_p) then Promise.resolve sst_w ();
+
+      finalize () )
+  in
+  sst_p, flushed_p
 
 let process_file ?only_sheet ~skip_sst ~sw ~feed push finalize =
   let q = Queue.create () in
@@ -142,74 +152,13 @@ let process_file ?only_sheet ~skip_sst ~sw ~feed push finalize =
         >>| (fun sheet_number -> parse_sheet ~sheet_number push)
         |> Option.value ~default:Zip.Action.Skip )
   in
+  let sst_p, flushed_p = flush_zip_stream ~sw zip_stream finalize in
+  Fiber.fork_daemon ~sw (fun () ->
+    Promise.await_exn flushed_p;
+    `Stop_daemon );
   Fiber.fork_promise ~sw (fun () ->
-    (* [flush_zip_stream] fails the Switch if it encounters an error
-       so we don't need it to be in a try/catch to always call [finalize ()] *)
-    flush_zip_stream zip_stream;
-    finalize ();
+    Promise.await sst_p;
     Queue.to_array q )
-
-let resolve_sst_index (sst : SST.t) ~sst_index =
-  let index = Int.of_string sst_index in
-  match sst with
-  | sst when index < Array.length sst && index >= 0 -> Some (force sst.(index))
-  | _ -> None
-
-let unwrap_status cell_parser (sst : SST.t) (row : 'a status row) =
-  let data =
-    List.map row.data ~f:(function
-      | Available x -> x
-      | Delayed { location; sst_index } -> (
-        match resolve_sst_index sst ~sst_index with
-        | Some index -> cell_parser.string location index
-        | None -> cell_parser.null ) )
-  in
-  { row with data }
-
-let extract_cell_sst, extract_cell_status =
-  let open Xml.DOM in
-  let extract ~null location extractor : element option -> 'a = function
-    | None -> null
-    | Some { text; _ } -> extractor location text
-  in
-  let extract_cell_base { string; formula; error; boolean; number; date; null } location el ty =
-    match ty with
-    | None
-     |Some "n" ->
-      el |> dot "v" |> extract ~null location number
-    | Some "d" -> el |> dot "v" |> extract ~null location date
-    | Some "str" -> (
-      match el |> dot_text "v" with
-      | None -> null
-      | Some s -> formula location s ~formula:(el |> dot_text "f" |> Option.value ~default:"") )
-    | Some "inlineStr" -> (
-      match dot "is" el with
-      | None -> null
-      | Some el -> string location (parse_string_cell el) )
-    | Some "e" -> el |> dot "v" |> extract ~null location error
-    | Some "b" -> el |> dot "v" |> extract ~null location boolean
-    | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
-  in
-  let extract_cell_sst sst cell_parser location el =
-    match Xml.DOM.get_attr el.attrs "t" with
-    | Some "s" -> (
-      match el |> dot "v" with
-      | None -> cell_parser.null
-      | Some { text = sst_index; _ } -> (
-        match resolve_sst_index sst ~sst_index with
-        | None -> cell_parser.null
-        | Some resolved -> cell_parser.string location resolved ) )
-    | ty -> extract_cell_base cell_parser location el ty
-  in
-  let extract_cell_status cell_parser location el =
-    match Xml.DOM.get_attr el.attrs "t" with
-    | Some "s" -> (
-      match el |> dot "v" with
-      | None -> Available cell_parser.null
-      | Some { text = sst_index; _ } -> Delayed { location; sst_index } )
-    | ty -> Available (extract_cell_base cell_parser location el ty)
-  in
-  extract_cell_sst, extract_cell_status
 
 let index_of_column s =
   let key =
@@ -219,100 +168,196 @@ let index_of_column s =
   in
   String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1
 
-let parse_row_with_sst sst cell_parser ({ data; sheet_number; row_number } as row) =
-  let open Xml.DOM in
-  match data with
-  | [] -> { row with data = [] }
-  | _ ->
-    let rec loop i acc = function
-      | [] -> List.rev acc
-      | el :: rest ->
-        let col_index = Xml.DOM.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
-        let v = extract_cell_sst sst cell_parser { col_index; sheet_number; row_number } el in
-        let acc = Fn.apply_n_times ~n:(col_index - i) (List.cons cell_parser.null) acc in
-        (loop [@tailcall]) (col_index + 1) (v :: acc) rest
+module Expert = struct
+  module SST = SST
+
+  type delayed_string = {
+    location: location;
+    sst_index: string;
+  }
+  [@@deriving sexp_of]
+
+  type 'a status =
+    | Available of 'a
+    | Delayed of delayed_string
+  [@@deriving sexp_of]
+
+  let unwrap_status cell_parser (sst : SST.t) (row : 'a status row) =
+    let data =
+      List.map row.data ~f:(function
+        | Available x -> x
+        | Delayed { location; sst_index } -> (
+          match SST.resolve_sst_index sst ~sst_index with
+          | Some index -> cell_parser.string location index
+          | None -> cell_parser.null ) )
     in
-    { row with data = loop 0 [] data }
+    { row with data }
 
-let parse_row_without_sst cell_parser ({ data; sheet_number; row_number } as row) =
-  let open Xml.DOM in
-  match data with
-  | [] -> { row with data = [] }
-  | _ ->
-    let rec loop i acc = function
-      | [] -> List.rev acc
-      | el :: rest ->
-        let col_index = Xml.DOM.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column in
-        let v = extract_cell_status cell_parser { col_index; sheet_number; row_number } el in
-        let acc = Fn.apply_n_times ~n:(col_index - i) (List.cons (Available cell_parser.null)) acc in
-        (loop [@tailcall]) (col_index + 1) (v :: acc) rest
+  let extract_cell_sst, extract_cell_status =
+    let open Xml.DOM in
+    let extract ~null location extractor : element option -> 'a = function
+      | None -> null
+      | Some { text; _ } -> extractor location text
     in
-    { row with data = loop 0 [] data }
+    let extract_cell_base { string; formula; error; boolean; number; date; null } location el ty =
+      match ty with
+      | None
+       |Some "n" ->
+        el |> dot "v" |> extract ~null location number
+      | Some "d" -> el |> dot "v" |> extract ~null location date
+      | Some "str" -> (
+        match el |> dot_text "v" with
+        | None -> null
+        | Some s -> formula location s ~formula:(el |> dot_text "f" |> Option.value ~default:"") )
+      | Some "inlineStr" -> (
+        match dot "is" el with
+        | None -> null
+        | Some el -> string location (parse_string_cell el) )
+      | Some "e" -> el |> dot "v" |> extract ~null location error
+      | Some "b" -> el |> dot "v" |> extract ~null location boolean
+      | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
+    in
+    let extract_cell_sst sst cell_parser location el =
+      match Xml.DOM.get_attr el.attrs "t" with
+      | Some "s" -> (
+        match el |> dot "v" with
+        | None -> cell_parser.null
+        | Some { text = sst_index; _ } -> (
+          match SST.resolve_sst_index sst ~sst_index with
+          | None -> cell_parser.null
+          | Some resolved -> cell_parser.string location resolved ) )
+      | ty -> extract_cell_base cell_parser location el ty
+    in
+    let extract_cell_status cell_parser location el =
+      match Xml.DOM.get_attr el.attrs "t" with
+      | Some "s" -> (
+        match el |> dot "v" with
+        | None -> Available cell_parser.null
+        | Some { text = sst_index; _ } -> Delayed { location; sst_index } )
+      | ty -> Available (extract_cell_base cell_parser location el ty)
+    in
+    extract_cell_sst, extract_cell_status
 
-let stream_rows ?only_sheet ?(skip_sst = false) ~sw ~feed cell_parser =
-  let stream = Eio.Stream.create 0 in
-  let push x = Eio.Stream.add stream (Some (parse_row_without_sst cell_parser x)) in
-  let finalize () = Eio.Stream.add stream None in
+  let parse_row_with_sst sst cell_parser ({ data; sheet_number; row_number } as row) =
+    let open Xml.DOM in
+    match data with
+    | [] -> { row with data = [] }
+    | _ ->
+      let rec loop i acc = function
+        | [] -> List.rev acc
+        | el :: rest ->
+          let col_index =
+            Xml.DOM.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column
+          in
+          let v = extract_cell_sst sst cell_parser { col_index; sheet_number; row_number } el in
+          let acc = Fn.apply_n_times ~n:(col_index - i) (List.cons cell_parser.null) acc in
+          (loop [@tailcall]) (col_index + 1) (v :: acc) rest
+      in
+      { row with data = loop 0 [] data }
 
-  let sst_p = process_file ?only_sheet ~skip_sst ~sw ~feed push finalize in
-  stream, sst_p
-
-let stream_rows_unparsed ?only_sheet ?(skip_sst = false) ~sw ~feed () =
-  let stream = Eio.Stream.create 0 in
-  let push x = Eio.Stream.add stream (Some x) in
-  let finalize () = Eio.Stream.add stream None in
-
-  let sst_p = process_file ?only_sheet ~skip_sst ~sw ~feed push finalize in
-  stream, sst_p
+  let parse_row_without_sst cell_parser ({ data; sheet_number; row_number } as row) =
+    let open Xml.DOM in
+    match data with
+    | [] -> { row with data = [] }
+    | _ ->
+      let rec loop i acc = function
+        | [] -> List.rev acc
+        | el :: rest ->
+          let col_index =
+            Xml.DOM.get_attr el.attrs "r" |> Option.value_map ~default:i ~f:index_of_column
+          in
+          let v = extract_cell_status cell_parser { col_index; sheet_number; row_number } el in
+          let acc = Fn.apply_n_times ~n:(col_index - i) (List.cons (Available cell_parser.null)) acc in
+          (loop [@tailcall]) (col_index + 1) (v :: acc) rest
+      in
+      { row with data = loop 0 [] data }
+end
 
 let stream_rows_double_pass ?only_sheet ~sw src cell_parser =
   let sst =
-    let feed = Feed.of_flow_non_seeking src in
+    let feed = Feed.of_flow_seekable src in
     SST.from_zip ~feed
   in
   let stream = Eio.Stream.create 0 in
-  let push x = Eio.Stream.add stream (Some (parse_row_with_sst sst cell_parser x)) in
+  let push x = Eio.Stream.add stream (Some (Expert.parse_row_with_sst sst cell_parser x)) in
   let finalize () = Eio.Stream.add stream None in
 
-  let sst_p =
+  let _sst_p =
     let feed = Feed.of_flow src in
     process_file ?only_sheet ~skip_sst:true ~sw ~feed push finalize
   in
-  Fiber.fork_daemon ~sw (fun () ->
-    let _empty_sst = Eio.Promise.await_exn sst_p in
-    `Stop_daemon );
   stream
 
-let with_minimal_buffering stream sst_p ~parse =
-  let seq = to_seq stream in
-  let unparsed = Queue.create () in
-  let has_more =
-    Fiber.first
-      (fun () ->
-        Seq.iter
-          (fun x ->
-            Queue.enqueue unparsed x;
-            Fiber.yield ())
-          seq;
-        false)
-      (fun () ->
-        let _sst = Promise.await_exn sst_p in
-        true)
-  in
-  let sst = Promise.await_exn sst_p in
-  let seq1 = Seq.of_dispenser (fun () -> Queue.dequeue unparsed |> Option.map ~f:(parse ~sst)) in
-  let seq2 = if has_more then Seq.map (parse ~sst) seq else Seq.empty in
-  Seq.append seq1 seq2
+type status =
+  | All_buffered
+  | Overflowed
+  | Got_SST of SST.t
 
-let stream_rows_buffer ?only_sheet ~sw ~feed cell_parser =
+let with_minimal_buffering ?max_buffering ?filter ~parse
+  (stream : Xml.DOM.element row option Eio.Stream.t) sst_p =
+  let q = Queue.create ?capacity:max_buffering () in
+  let highwater = Option.value max_buffering ~default:Int.max_value in
+  let seq = Zip.to_sequence stream in
+
+  let status =
+    let filter = Option.value filter ~default:(fun _ -> true) in
+    let rec loop acc =
+      match Promise.peek sst_p with
+      | Some sst -> Got_SST (Result.ok_exn sst)
+      | None -> (
+        match Sequence.next acc with
+        | None -> All_buffered
+        | Some _ when Queue.length q = highwater -> Overflowed
+        | Some (row, next) ->
+          if filter row then Queue.enqueue q row;
+          Fiber.yield ();
+          (loop [@tailcall]) next )
+    in
+    loop seq
+  in
+
+  match status with
+  | All_buffered ->
+    let sst = Promise.await_exn sst_p in
+    Seq.of_dispenser (fun () -> Queue.dequeue q |> Option.map ~f:(parse ~sst)) |> Sequence.of_seq
+  | Overflowed -> failwithf "SZXX: stream_rows_buffer max_buffering exceeded %d." highwater ()
+  | Got_SST sst ->
+    let seq2 =
+      match filter with
+      | None -> Sequence.map seq ~f:(parse ~sst)
+      | Some filter ->
+        Sequence.filter_map seq ~f:(fun raw -> if filter raw then Some (parse ~sst raw) else None)
+    in
+    if Queue.is_empty q
+    then seq2
+    else (
+      let seq1 =
+        Seq.of_dispenser (fun () -> Queue.dequeue q |> Option.map ~f:(parse ~sst)) |> Sequence.of_seq
+      in
+      Sequence.append seq1 seq2 )
+
+let stream_rows_buffer ?max_buffering ?filter ?only_sheet ~sw ~feed cell_parser =
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some x) in
   let finalize () = Eio.Stream.add stream None in
 
   let sst_p = process_file ?only_sheet ~skip_sst:false ~sw ~feed push finalize in
 
-  let parse ~sst row = parse_row_with_sst sst cell_parser row in
-  with_minimal_buffering stream sst_p ~parse
+  let parse ~sst row = Expert.parse_row_with_sst sst cell_parser row in
+  with_minimal_buffering ?max_buffering ?filter ~parse stream sst_p
+
+let to_sequence = Zip.to_sequence
+
+let string_cell_parser : string cell_parser =
+  {
+    string = (fun _location s -> Xml.DOM.unescape s);
+    formula = (fun _location ~formula:_ s -> Xml.DOM.unescape s);
+    error = (fun _location s -> sprintf "#ERROR# %s" s);
+    boolean = (fun _location s -> if String.(s = "0") then "false" else "true");
+    number = (fun _location s -> s);
+    date = (fun _location s -> s);
+    null = "";
+  }
 
 let yojson_cell_parser : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_parser =
   {
