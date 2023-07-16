@@ -3,24 +3,24 @@ let flags = Unix.[ O_RDONLY; O_NONBLOCK ]
 open! Core
 open Eio.Std
 
+let get_file_path = sprintf "../../../test/files/%s"
+
 let fold env xlsx_filename json_filename () =
-  let xlsx_path = sprintf "../../../test/files/%s" xlsx_filename in
-  let json_path = sprintf "../../../test/files/%s" json_filename in
+  let xlsx_path = get_file_path xlsx_filename in
+  let json_path = get_file_path json_filename in
   let against = Eio.Path.(load (env#fs / json_path)) |> Yojson.Safe.from_string in
   let queue = Queue.create () in
 
   Switch.run (fun sw ->
     let src = Eio.Path.(open_in ~sw (env#fs / xlsx_path)) in
-    let stream =
+    let seq =
       SZXX.Zip.stream_files ~sw ~feed:(SZXX.Feed.of_flow src) (fun _ ->
         Fold_string { init = (); f = (fun _entry s () -> Queue.enqueue queue (`String s)) } )
     in
-    let rec loop () =
-      match Eio.Stream.take stream with
-      | None -> ()
-      | Some _ -> (loop [@tailcall]) ()
-    in
-    loop () );
+    Sequence.iter seq ~f:(fun _ -> ());
+
+    (* Test deadlocks: *)
+    Sequence.iter seq ~f:(fun _ -> assert false) );
 
   let parsed : Yojson.Safe.t = `Assoc [ "data", `List (List.rev (Queue.to_list queue)) ] in
   Json_diff.check parsed against
@@ -29,48 +29,34 @@ let fold env xlsx_filename json_filename () =
    Eio.Path.(env#fs / json_path)
    (Eio.Flow.copy_string (Yojson.Safe.to_string parsed)) *)
 
-let readme_example extract_filename src =
+let readme_example env filename () =
+  let zip_path = get_file_path filename in
   let open SZXX in
-  (* 1. Create a `feed` function. This README contains examples of this towards the end. *)
-  let feed = SZXX.Feed.of_flow src in
+  (* The Switch receives any parsing errors *)
+  Switch.run @@ fun sw ->
+  let file = Eio.Path.(open_in ~sw (Eio.Stdenv.fs env / zip_path)) in
 
-  (* 2. Create a callback function. Here we skip all files except the one we're interested in.
-      If you deem the file(s) too large for `Action.String`,
-      then look into `Action.Fold_string`, `Action.Fold_bigstring` and `Action.Angstrom` *)
   let callback = function
-    | ({ filename; _ } : Zip.entry) when String.(filename = extract_filename) -> Zip.Action.String
+    | ({ filename; _ } : Zip.entry) when String.is_suffix (String.lowercase filename) ~suffix:".jpg" ->
+      (* Here we'll simply extract each .jpg file into a string *)
+      Zip.Action.String
     | _ -> Zip.Action.Skip
   in
+  let seq = Zip.stream_files ~sw ~feed:(Feed.of_flow file) callback in
 
-  (* 3. Invoke `Zip.stream_files` *)
-  Switch.run @@ fun sw ->
-  let stream = Zip.stream_files ~sw ~feed callback in
+  let save_jpg ~filename:_ _contents = () in
 
-  (* 4. Work with the stream, but DO NOT AWAIT this promise!
-      Again, do not bind unto this promise yet! *)
-  let unzipped =
-    let rec loop () =
-      match Eio.Stream.take stream with
-      | Some (_entry, Zip.Data.String raw) -> Some raw
-      | _ -> (loop [@tailcall]) ()
-    in
-    loop ()
-  in
+  Sequence.iter seq ~f:(fun (entry, data) ->
+    match data with
+    | Zip.Data.String contents -> save_jpg ~filename:entry.filename contents
+    | _ -> () )
 
-  (* 4. Bind/await the `success` promise to catch any error that may have terminated the stream early
-      This could be due to a corrupted file or similar issues. *)
-
-  (* 5. Finally we can bind/await the promise from step 3 and use it! *)
-  match unzipped with
-  | None -> failwithf "File `%s` not found in ZIP archive" extract_filename ()
-  | Some _raw ->
-    (* Use `raw` file contents *)
-    ()
-
-let test_readme_example env zip_path () =
-  Eio.Path.with_open_in
-    Eio.Path.(env#fs / sprintf "../../../test/files/%s" zip_path)
-    (readme_example "xl/sharedStrings.xml")
+let corrupted env filename () =
+  try
+    readme_example env filename ();
+    raise Exit
+  with
+  | Failure _ -> ()
 
 let () =
   Eio_main.run @@ fun env ->
@@ -79,6 +65,7 @@ let () =
       ( "ZIP",
         [
           "financial.xlsx", `Quick, fold env "financial.xlsx" "chunks.json";
-          "Readme example", `Quick, test_readme_example env "financial.xlsx";
+          "Readme example", `Quick, readme_example env "financial.xlsx";
+          "Corrupted", `Quick, corrupted env "chunks.json";
         ] );
     ]

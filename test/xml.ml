@@ -1,5 +1,7 @@
 open! Core
 
+let get_file_path = sprintf "../../../test/files/%s"
+
 module Test1 = struct
   let raw =
     {s|<?xml version="1.0" encoding="UTF-8" standalone="yes"?> <!DOCTYPE stylesheet [<!ENTITY
@@ -326,7 +328,7 @@ module Test4 = struct
     back to the top
   </head2>
   <body scoped>
-    <span>BOO!</span>
+    <div>BOO!</div>
   </body>
 </html>
 |s}
@@ -445,7 +447,7 @@ module Test4 = struct
         "text": "",
         "children": [
           {
-            "tag": "span",
+            "tag": "div",
             "attrs": [],
             "text": "BOO!",
             "children": []
@@ -494,7 +496,7 @@ type element = SZXX.Xml.DOM.element = {
 }
 [@@deriving sexp_of, to_yojson]
 
-type doc = SZXX.Xml.Easy.document = {
+type doc = SZXX.Xml.document = {
   decl_attrs: (string * string) list;
   top: element;
 }
@@ -551,12 +553,12 @@ let xml_stream ?(options = SZXX.Xml.SAX.default_parser_options) ?strict test dat
   | Error msg -> failwith msg
 
 let test_easy test data () =
-  SZXX.Xml.Easy.dom_of_string test
+  SZXX.Xml.parse_document_from_string test
   |> Result.ok_or_failwith
   |> doc_to_yojson
   |> Fn.flip Json_diff.check data
 
-let readme_example1 () =
+let sync_to_dom () =
   let open SZXX in
   let raw_xml_string =
     {|
@@ -581,7 +583,7 @@ let readme_example1 () =
   Option.value_map xml.top ~default:"--" ~f:(fun el -> Xml.DOM.sexp_of_element el |> Sexp.to_string)
   |> print_endline
 
-let readme_example2 () =
+let async_to_dom () =
   let open SZXX in
   let src = Eio.Flow.string_source Test1.raw in
 
@@ -599,7 +601,7 @@ let readme_example2 () =
       Xml.DOM.sexp_of_element el |> Sexp.to_string )
     |> print_endline
 
-let readme_example3 () =
+let async_stream () =
   let open SZXX in
   let src =
     Eio.Flow.string_source
@@ -634,8 +636,41 @@ let readme_example3 () =
       Xml.DOM.sexp_of_attr_list x |> Sexp.to_string )
     |> print_endline
 
+let readme_example1 env filename () =
+  let open SZXX in
+  let xml_path = get_file_path filename in
+  let _doc =
+    Eio.Path.with_open_in
+      Eio.Path.(Eio.Stdenv.fs env / xml_path)
+      (fun file -> Xml.parse_document (Feed.of_flow file))
+    |> Result.ok_or_failwith
+  in
+  (* Do something with it *)
+  ()
+
+let readme_example2 env filename () =
+  let open SZXX in
+  let html_path = get_file_path filename in
+  let doc =
+    Eio.Path.with_open_in
+      Eio.Path.(Eio.Stdenv.fs env / html_path)
+      (fun file ->
+        Xml.parse_document ~parser:Xml.html_parser (* New for HTML *)
+          ~strict:false (* New for HTML *)
+          (Feed.of_flow file))
+    |> function
+    | Ok x -> x
+    | Error msg -> failwithf "Failed to parse '%s': %s" filename msg ()
+  in
+
+  let text =
+    doc.top |> Xml.DOM.(get [ dot "body"; dot "div" ]) |> Option.bind ~f:(Xml.DOM.dot_text "h1")
+  in
+  if not ([%equal: string option] text (Some "BOO!"))
+  then failwithf !"h1 contained %{sexp: string option}" text ()
+
 let () =
-  Eio_main.run @@ fun _env ->
+  Eio_main.run @@ fun env ->
   Alcotest.run ~verbose:true "SZXX XML"
     [
       ( "XML",
@@ -665,9 +700,11 @@ let () =
                 }
               Test4.raw Test4.data_streamed [ "html"; "head"; "meta" ] );
           "Large CDATA", `Quick, test_large_cdata;
-          "Sync To_DOM", `Quick, readme_example1;
-          "Async To_DOM", `Quick, readme_example2;
-          "Async Stream", `Quick, readme_example3;
+          "Sync To_DOM", `Quick, sync_to_dom;
+          "Async To_DOM", `Quick, async_to_dom;
+          "Async Stream", `Quick, async_stream;
           "Easy", `Quick, test_easy Test1.raw Test1.data;
+          "Readme example 1", `Quick, readme_example1 env "valid.xml";
+          "Readme example 2", `Quick, readme_example2 env "index.html";
         ] );
     ]

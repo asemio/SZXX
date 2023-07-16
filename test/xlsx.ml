@@ -21,10 +21,20 @@ let get_xlsx_path = sprintf "../../../test/files/%s.xlsx"
 let get_json_path = sprintf "../../../test/files/%s.json"
 
 let readme_example1 env filename () =
+  let open SZXX in
+  let xlsx_path = get_xlsx_path filename in
+  Switch.run @@ fun sw ->
+  let file = Eio.Path.(open_in ~sw (Eio.Stdenv.fs env / xlsx_path)) in
+  Xlsx.stream_rows_double_pass ~sw file Xlsx.yojson_cell_parser
+  |> Sequence.iter ~f:(fun row ->
+       (* Print each row *)
+       `List row.data |> Yojson.Basic.to_string |> print_endline )
+
+let readme_example1b env filename () =
   let xlsx_path = get_xlsx_path filename in
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
-  SZXX.Xlsx.stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src) SZXX.Xlsx.yojson_cell_parser
+  SZXX.Xlsx.stream_rows_single_pass ~sw ~feed:(SZXX.Feed.of_flow src) SZXX.Xlsx.yojson_cell_parser
   |> Sequence.iter ~f:(fun (row : Yojson.Basic.t SZXX.Xlsx.row) ->
        `List row.data |> Yojson.Basic.to_string |> print_endline )
 
@@ -32,23 +42,44 @@ let readme_example2 env filename () =
   let xlsx_path = get_xlsx_path filename in
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
-  let open SZXX.Xlsx in
+  let open SZXX in
+  let filter raw =
+    let open Xlsx in
+    if raw.row_number > 1000
+    then false
+    else (
+      let row = Expert.parse_row_without_sst yojson_cell_parser raw in
+      match List.nth row.data 10 with
+      | Some (Available (`Float x)) -> Float.(x >= 100.0)
+      | Some (Available _)
+       |Some (Delayed _)
+       |None ->
+        false )
+  in
   let seq =
-    stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src)
-      ~filter:(fun raw ->
-        let row = Expert.parse_row_without_sst yojson_cell_parser raw in
-        match List.nth_exn row.data 10 with
-        | _ when row.row_number > 1000 -> false
-        | Available (`Float x) -> Float.(x >= 100.0)
-        | Available _
-         |Delayed _ ->
-          false)
-      yojson_cell_parser
+    Xlsx.stream_rows_single_pass ~sw ~feed:(SZXX.Feed.of_flow src) ~filter Xlsx.yojson_cell_parser
   in
   let count = Sequence.fold seq ~init:0 ~f:(fun acc _row -> acc + 1) in
   if count <> 700 then failwithf "Wrong count: %d" count ()
 
-let xlsx_buffer env filename () =
+let readme_example3 env filename () =
+  let xlsx_path = get_xlsx_path filename in
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
+  let open SZXX in
+  let count = ref 0 in
+  let filter _ =
+    incr count;
+    false
+  in
+  let seq =
+    Xlsx.stream_rows_single_pass ~sw ~feed:(SZXX.Feed.of_flow src) ~filter Xlsx.yojson_cell_parser
+  in
+  (* For good measure let's still drain the Sequence *)
+  Sequence.iter seq ~f:(fun _ -> assert false);
+  if !count <> 701 then failwithf "Wrong count: %d" !count ()
+
+let single_pass env filename () =
   let xlsx_path = get_xlsx_path filename in
   let json_path = get_json_path filename in
   let against = Eio.Path.(load (env#fs / json_path)) |> Yojson.Safe.from_string in
@@ -56,8 +87,12 @@ let xlsx_buffer env filename () =
     Switch.run @@ fun sw ->
     let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
     let open SZXX.Xlsx in
-    let seq = stream_rows_buffer ~sw ~feed:(SZXX.Feed.of_flow src) extractors in
+    let seq = stream_rows_single_pass ~sw ~feed:(SZXX.Feed.of_flow src) extractors in
     let json = Sequence.fold seq ~init:[] ~f:(fun acc row -> `List row.data :: acc) in
+
+    (* Test deadlocks: *)
+    Sequence.iter seq ~f:(fun _ -> assert false);
+
     `Assoc [ "data", `List (List.rev json) ]
   in
 
@@ -66,23 +101,20 @@ let xlsx_buffer env filename () =
      (Eio.Flow.copy_string (Yojson.Safe.to_string parsed)); *)
   Json_diff.check (parsed : Yojson.Basic.t :> Yojson.Safe.t) against
 
-let xlsx_double_pass env filename () =
+let double_pass env filename () =
   let open SZXX in
   let xlsx_path = get_xlsx_path filename in
   let json_path = get_json_path filename in
   Eio.Path.with_open_in Eio.Path.(env#fs / xlsx_path) @@ fun src ->
   Switch.run @@ fun sw ->
-  let stream = Xlsx.stream_rows_double_pass ~sw src Xlsx.yojson_cell_parser in
+  let seq = Xlsx.stream_rows_double_pass ~sw src Xlsx.yojson_cell_parser in
   let parsed =
-    `Assoc
-      [
-        ( "data",
-          `List
-            ( Xlsx.to_sequence stream
-            |> Sequence.map ~f:(fun { data; _ } -> `List data)
-            |> Sequence.to_list ) );
-      ]
+    `Assoc [ "data", `List (Sequence.map seq ~f:(fun { data; _ } -> `List data) |> Sequence.to_list) ]
   in
+
+  (* Test deadlocks: *)
+  Sequence.iter seq ~f:(fun _ -> assert false);
+
   let against = Eio.Path.(load (env#fs / json_path)) |> Yojson.Safe.from_string in
   (* Eio.Path.with_open_out ~create:(`Or_truncate 0o644)
      Eio.Path.(env#fs / json_path)
@@ -105,7 +137,7 @@ let buffering ~overflow ~max_buffering env filename () =
     Switch.run @@ fun sw ->
     let src = Eio.Path.open_in ~sw Eio.Path.(env#fs / xlsx_path) in
     let open SZXX.Xlsx in
-    let _seq = stream_rows_buffer ~max_buffering ~sw ~feed:(SZXX.Feed.of_flow src) extractors in
+    let _seq = stream_rows_single_pass ~max_buffering ~sw ~feed:(SZXX.Feed.of_flow src) extractors in
     raise Exit
   with
   | Failure _ when overflow -> ()
@@ -118,15 +150,17 @@ let () =
       ( "XLSX",
         [
           "SST from ZIP", `Quick, sst_from_zip env "financial";
-          "simple.xlsx", `Quick, xlsx_buffer env "simple";
-          "financial.xlsx", `Quick, xlsx_buffer env "financial";
-          "zip64.xlsx", `Quick, xlsx_buffer env "zip64";
-          "formatting.xlsx", `Quick, xlsx_buffer env "formatting";
-          "inline.xlsx", `Quick, xlsx_buffer env "inline";
+          "simple.xlsx", `Quick, single_pass env "simple";
+          "financial.xlsx", `Quick, single_pass env "financial";
+          "zip64.xlsx", `Quick, single_pass env "zip64";
+          "formatting.xlsx", `Quick, single_pass env "formatting";
+          "inline.xlsx", `Quick, single_pass env "inline";
           "Readme example 1", `Quick, readme_example1 env "financial";
+          "Readme example 1b", `Quick, readme_example1b env "financial";
           "Readme example 2", `Quick, readme_example2 env "financial";
-          "Double pass", `Quick, xlsx_double_pass env "financial";
-          "Double pass (no SST)", `Quick, xlsx_double_pass env "inline";
+          "Readme example 3", `Quick, readme_example3 env "financial";
+          "Double pass", `Quick, double_pass env "financial";
+          "Double pass (no SST)", `Quick, double_pass env "inline";
           "Buffering (overflow)", `Quick, buffering env "cols" ~max_buffering:10 ~overflow:true;
           "Buffering (fits)", `Quick, buffering env "simple" ~max_buffering:10 ~overflow:false;
           "Buffering (no SST, fits)", `Quick, buffering env "inline" ~max_buffering:10 ~overflow:false;

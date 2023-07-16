@@ -109,7 +109,7 @@ module DOM = struct
 
   let at i node = Option.try_with (fun () -> Int.of_string i |> List.nth_exn node.children)
 
-  let get node (steps : (element -> element option) list) =
+  let get (steps : (element -> element option) list) node =
     let rec loop node = function
       | [] -> node
       | step :: rest -> (loop [@tailcall]) (Option.bind node ~f:step) rest
@@ -534,68 +534,74 @@ module SAX = struct
   end
 end
 
-module Easy = struct
-  type document = {
-    decl_attrs: DOM.attr_list;
-    top: DOM.element;
-  }
-  [@@deriving sexp_of, compare, equal]
+let html_parser =
+  SAX.make_parser
+    {
+      accept_html_boolean_attributes = true;
+      accept_unquoted_attributes = true;
+      accept_single_quoted_attributes = true;
+    }
 
-  let unescape_text = function
-  | SAX.Text s -> SAX.Text (Unescape.run s)
-  | x -> x
+type document = {
+  decl_attrs: DOM.attr_list;
+  top: DOM.element;
+}
+[@@deriving sexp_of, compare, equal]
 
-  let parse_feed ?parser:(node_parser = SAX.parser) ~feed:read on_parse =
-    let open Angstrom in
-    let open Parsing in
-    let parser = skip_many (node_parser >>| on_parse) *> end_of_input in
-    let open Buffered in
-    let rec loop = function
-      | Fail _ as state -> state_to_result state
-      | Done (_, ()) -> Error "SZXX: processing completed before reaching end of input"
-      | Partial feed -> (
-        match read () with
-        | `Eof as eof -> (
-          match feed eof with
-          | Fail _ as state -> state_to_result state
-          | _ -> Ok () )
-        | chunk -> (loop [@tailcall]) (feed chunk) )
-    in
-    loop (parse parser)
+let unescape_text = function
+| SAX.Text s -> SAX.Text (Unescape.run s)
+| x -> x
 
-  let dom_of_feed ?parser ?strict feed =
-    let sax = ref (Ok SAX.Expert.To_DOM.init) in
-    let on_parse node = sax := SAX.Expert.To_DOM.folder ?strict !sax (unescape_text node) in
-    let open Result.Monad_infix in
-    parse_feed ?parser ~feed on_parse >>= fun () ->
-    match !sax with
-    | Error _ as x -> x
-    | Ok { stack = []; top = Some top; decl_attrs; _ } ->
-      Ok { top; decl_attrs = Option.value ~default:[] decl_attrs }
-    | Ok { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
-    | Ok { stack; _ } ->
-      Error
-        (sprintf "SZXX: Unclosed XML elements: %s"
-           (List.map stack ~f:(fun { tag; _ } -> tag) |> String.concat ~sep:", ") )
+let parse_feed ?parser:(node_parser = SAX.parser) ~feed:read on_parse =
+  let open Angstrom in
+  let open Parsing in
+  let parser = skip_many (node_parser >>| on_parse) *> end_of_input in
+  let open Buffered in
+  let rec loop = function
+    | Fail _ as state -> state_to_result state
+    | Done (_, ()) -> Error "SZXX: processing completed before reaching end of input"
+    | Partial feed -> (
+      match read () with
+      | `Eof as eof -> (
+        match feed eof with
+        | Fail _ as state -> state_to_result state
+        | _ -> Ok () )
+      | chunk -> (loop [@tailcall]) (feed chunk) )
+  in
+  loop (parse parser)
 
-  let dom_of_string ?parser ?strict raw =
-    let feed = Feed.of_string raw in
-    dom_of_feed ?parser ?strict feed
+let parse_document ?parser ?strict feed =
+  let sax = ref (Ok SAX.Expert.To_DOM.init) in
+  let on_parse node = sax := SAX.Expert.To_DOM.folder ?strict !sax (unescape_text node) in
+  let open Result.Monad_infix in
+  parse_feed ?parser ~feed on_parse >>= fun () ->
+  match !sax with
+  | Error _ as x -> x
+  | Ok { stack = []; top = Some top; decl_attrs; _ } ->
+    Ok { top; decl_attrs = Option.value ~default:[] decl_attrs }
+  | Ok { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
+  | Ok { stack; _ } ->
+    Error
+      (sprintf "SZXX: Unclosed XML elements: %s"
+         (List.map stack ~f:(fun { tag; _ } -> tag) |> String.concat ~sep:", ") )
 
-  let stream_matching_elements ?parser ?strict ~feed ~filter_path ~on_match () =
-    let sax = ref (Ok SAX.Expert.Stream.init) in
-    let on_parse node =
-      sax := SAX.Expert.Stream.folder ~filter_path ~on_match ?strict !sax (unescape_text node)
-    in
-    let open Result.Monad_infix in
-    parse_feed ?parser ~feed on_parse >>= fun () ->
-    match !sax with
-    | Error _ as x -> x
-    | Ok { stack = []; top = Some top; decl_attrs; _ } ->
-      Ok { top; decl_attrs = Option.value ~default:[] decl_attrs }
-    | Ok { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
-    | Ok { stack; _ } ->
-      Error
-        (sprintf "SZXX: Unclosed XML elements: %s"
-           (List.map stack ~f:(fun { tag; _ } -> tag) |> String.concat ~sep:", ") )
-end
+let parse_document_from_string ?parser ?strict raw =
+  let feed = Feed.of_string raw in
+  parse_document ?parser ?strict feed
+
+let stream_matching_elements ?parser ?strict ~filter_path ~on_match feed =
+  let sax = ref (Ok SAX.Expert.Stream.init) in
+  let on_parse node =
+    sax := SAX.Expert.Stream.folder ~filter_path ~on_match ?strict !sax (unescape_text node)
+  in
+  let open Result.Monad_infix in
+  parse_feed ?parser ~feed on_parse >>= fun () ->
+  match !sax with
+  | Error _ as x -> x
+  | Ok { stack = []; top = Some top; decl_attrs; _ } ->
+    Ok { top; decl_attrs = Option.value ~default:[] decl_attrs }
+  | Ok { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
+  | Ok { stack; _ } ->
+    Error
+      (sprintf "SZXX: Unclosed XML elements: %s"
+         (List.map stack ~f:(fun { tag; _ } -> tag) |> String.concat ~sep:", ") )

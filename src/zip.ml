@@ -115,7 +115,8 @@ module Storage = struct
         flush outbs ~off:0 ~len;
         De.Inf.flush decoder;
         do_decompress ()
-      | `Malformed err -> failwith err
+      | `Malformed err ->
+        failwithf "SZXX malformed deflated data, this file is corrupted. Error: %s" err ()
     in
     let decompress bs ~off ~len =
       De.Inf.src decoder bs off len;
@@ -415,6 +416,8 @@ let parse_trailing_central_directory =
   let* () = bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:"PK\005\006" Parsing.Storage.noop in
   advance 18 *> end_of_input
 
+let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq
+
 let stream_files ~sw ~feed:(read : Feed.t) cb =
   let open Eio.Std in
   let stream = Eio.Stream.create 0 in
@@ -432,22 +435,31 @@ let stream_files ~sw ~feed:(read : Feed.t) cb =
     | Some () -> return `Terminated
   in
   let open Buffered in
+  let throw = function
+    | Ok x -> x
+    | Error msg -> failwithf "SZXX: invalid ZIP internals, this file is corrupted. Error: %s" msg ()
+  in
   let rec loop = function
-    | Fail _ as state -> state_to_result state |> Result.ok_or_failwith
+    | Fail _ as state -> state_to_result state |> throw
     | Done (_, `Reached_end) -> failwith "SZXX: ZIP processing completed before reaching end of input"
     | Done (_, `Terminated) -> ()
     | Partial feed -> (
       match read () with
       | `Eof as eof -> (
         match feed eof with
-        | Fail _ as state -> state_to_result state |> Result.ok_or_failwith
+        | Fail _ as state -> state_to_result state |> throw
         | _ -> () )
       | chunk -> (loop [@tailcall]) (feed chunk) )
   in
   Fiber.fork_daemon ~sw (fun () ->
     loop (parse parser);
-    Eio.Stream.add stream None;
+    (* Keep adding [None] in the background to allow the user to use
+       the Sequence again even after it's been iterated over. It doesn't
+       memoize the elements, but it does allow [Sequence.is_empty] to return [true]
+       without deadlocking, and [Sequence.fold] to return its initial value
+       without deadlocking, etc. *)
+    while true do
+      Eio.Stream.add stream None
+    done;
     `Stop_daemon );
-  stream
-
-let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq
+  to_sequence stream

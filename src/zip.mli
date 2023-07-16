@@ -62,8 +62,7 @@ module Action : sig
         (** Repeatedly apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first.
             Call [on_parse] on each parsed value. [Parse_many] expects the file to end with a complete parse, without trailing junk bytes. *)
     | Terminate
-        (** Terminate processing of the ZIP archive.
-            The output stream will finish with a [Data.Terminate] element (and the obligatory [None] to indicate end of stream).
+        (** Abruptly terminate processing of the ZIP archive.
             SZXX stops reading from the [Feed.t] immediately, without even skipping over the bytes of that entry. *)
 end
 
@@ -104,7 +103,7 @@ end
 
     [sw]: A regular [Eio.Switch.t].
 
-    [feed]: A producer of raw data. Create a [feed] by using the [SZXX.Feed] module.
+    [feed]: A producer of raw input data. Create a [feed] by using the [SZXX.Feed] module.
 
     [callback]: A function called on every file found within the ZIP archive.
     You must choose an Action ([SZXX.Zip.Action.t]) to perform over each file encountered within the ZIP archive.
@@ -116,16 +115,10 @@ end
     Return [Action.Fold_bigstring] to fold this file into a final state, in bigstring chunks of ~500-8192 bytes. IMPORTANT: this [Bigstring.t] is volatile! It's only safe to read from it until the end of function [f] (the "folder"). If you need to access the data again later, copy it in some way before the end of function [f].
     Return [Action.Parse] to apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. [Parse] expects the parser to consume all bytes and leave no trailing junk bytes after a successful parse.
     Return [Action.Parse_many] to repeatedly apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. Call [on_parse] on each parsed value. [Parse_many] expects the file to end with a complete parse and leave no trailing junk bytes.
-    Return [Action.Terminate] to terminate processing of the ZIP archive. The output stream will finish with a [Data.Terminate] element (and the obligatory [None] to indicate end of stream). SZXX stops reading from the [Feed.t] immediately, without even skipping over the bytes of that entry.
+    Return [Action.Terminate] to abruptly terminate processing of the ZIP archive. The output Sequence will finish with a [Data.Terminate] element. SZXX stops reading from the [Feed.t] immediately, without even skipping over the bytes of that entry.
 
-    This function returns a Stream of all files in the archive.
-    The order of the files passed to the [callback] and on the Stream matches the arrangement of the files within the ZIP.
-    The Stream ends with a None to indicate End Of File.
-    Use [SZXX.Zip.to_sequence] on the Stream to interact with it through a more convenient [Sequence.t] instead.
+    This function returns a Sequence of all files in the archive.
+    The order of the files passed to the [callback] and on the Sequence matches the arrangement of the files within the ZIP.
 
-    SZXX will wait for you to consume from the Stream before extracting more. *)
-val stream_files :
-  sw:Switch.t -> feed:Feed.t -> (entry -> 'a Action.t) -> (entry * 'a Data.t) option Eio.Stream.t
-
-(** A Sequence is an ephemeral iterator with all the standard collection functions *)
-val to_sequence : 'a option Eio.Stream.t -> 'a Sequence.t
+    SZXX will wait for you to consume from the Sequence before extracting more. *)
+val stream_files : sw:Switch.t -> feed:Feed.t -> (entry -> 'a Action.t) -> (entry * 'a Data.t) Sequence.t

@@ -35,7 +35,7 @@ module DOM : sig
 
   (** [get el [dot "abc"; dot "def"]] is equivalent to [el |> dot "abc" |> Option.bind ~f:(dot "def")]
       Convenience function to chain multiple [dot] and [at] calls to access nested elements. *)
-  val get : element -> (element -> element option) list -> element option
+  val get : (element -> element option) list -> element -> element option
 end
 
 (** Advanced parsing utilities: custom parser options and tools to stream huge documents *)
@@ -80,7 +80,7 @@ module SAX : sig
     See README.md for examples on how to use it. *)
   val parser : node Angstrom.t
 
-  (** For those who want finer-grained control. Consider using the functions in [SZXX.Xml.Easy] when possible. *)
+  (** For those who want finer-grained control and want to parse (using Angstrom) and fold (using this module) by hand. *)
   module Expert : sig
     type partial_text = {
       literal: bool;
@@ -97,7 +97,7 @@ module SAX : sig
     }
     [@@deriving sexp_of, compare, equal]
 
-    (** Convert a sequence of [SAX.node] "events" into a classic XML document *)
+    (** Assemble a sequence of [SAX.node] "events" into a classic XML document *)
     module To_DOM : sig
       type state = {
         decl_attrs: DOM.attr_list option;
@@ -109,11 +109,11 @@ module SAX : sig
       val init : state
 
       (** [strict] (default: [true]) When false, non-closed elements are treated as self-closing elements, HTML-style.
-        For example a [<br>] without a matching [</br>] is treated as a self-closing [<br />] *)
+        For example a [<br>] without a matching [</br>] will be treated as a self-closing [<br />] *)
       val folder : ?strict:bool -> (state, string) result -> node -> (state, string) result
     end
 
-    (** Convert a sequence of [SAX.node] "events" into a "shallow DOM" while streaming out the children matching a certain path.
+    (** Assemble a sequence of [SAX.node] "events" into a "shallow DOM" while streaming out the children matching a certain path.
       Those children aren't added to the DOM (hence "shallow"). *)
     module Stream : sig
       type state = {
@@ -127,7 +127,7 @@ module SAX : sig
       val init : state
 
       (** [strict] (default: [true]) When false, non-closed elements are treated as self-closing elements, HTML-style.
-        For example a [<br>] without a matching [</br>] is treated as a self-closing [<br />].
+        For example a [<br>] without a matching [</br>] will be treated as a self-closing [<br />].
         Note that non-closed elements within the path to [filter_path] will prevent
         [on_match] from being called on some (but not all) otherwise matching elements. *)
       val folder :
@@ -141,52 +141,51 @@ module SAX : sig
   end
 end
 
-(** Quick and easy way to parse documents that aren't overly large. *)
-module Easy : sig
-  type document = {
-    decl_attrs: DOM.attr_list;  (** The declaration attributes, e.g. version and encoding *)
-    top: DOM.element;  (** The top element of the document *)
-  }
-  [@@deriving sexp_of, compare, equal]
+type document = {
+  decl_attrs: DOM.attr_list;  (** The declaration attributes, e.g. version and encoding *)
+  top: DOM.element;  (** The top element of the document *)
+}
+[@@deriving sexp_of, compare, equal]
 
-  (** Progressively parse a fully formed, fully escaped XML document.
+(** Progressively parse a fully formed, fully escaped XML document.
+    It begins parsing without having to read the whole input in its entirety.
 
-      [parser]: Override the default parser.
-        To support HTML you will need to pass a parser with non-standard options.
-        Call [SZXX.Xml.SAX.make_parser] if your document uses HTML-style features such as unquoted or boolean attributes.
+    [parser]: Override the default parser.
+      Make your own parser with [SZXX.Xml.SAX.make_parser] or pass [SZXX.Xml.html_parser].
 
-      [strict]: Default: [true]. When false, non-closed elements are treated as self-closing elements, HTML-style.
-        For example a [<br>] without a matching [</br>] is treated as a self-closing [<br />].
+    [strict]: Default: [true]. When false, non-closed elements are treated as self-closing elements, HTML-style.
+      For example a [<br>] without a matching [</br>] will be treated as a self-closing [<br />].
 
-      [feed]: A producer of raw data. Create a [feed] by using the [SZXX.Feed] module. *)
-  val dom_of_feed : ?parser:SAX.node Angstrom.t -> ?strict:bool -> Feed.t -> (document, string) result
+    [feed]: A producer of raw input data. Create a [feed] by using the [SZXX.Feed] module. *)
+val parse_document : ?parser:SAX.node Angstrom.t -> ?strict:bool -> Feed.t -> (document, string) result
 
-  (** Same as [dom_of_feed], but from a string *)
-  val dom_of_string : ?parser:SAX.node Angstrom.t -> ?strict:bool -> string -> (document, string) result
+(** Same as [parse_document], but from a string *)
+val parse_document_from_string :
+  ?parser:SAX.node Angstrom.t -> ?strict:bool -> string -> (document, string) result
 
-  (** Progressively assemble an XML DOM, but every element that matches [path_path] is passed
-      to [on_match] instead of being added to the DOM. This "shallow DOM" is then returned.
-      All text nodes are properly unescaped.
+val html_parser : SAX.node Angstrom.t
 
-      [parser]: Override the default parser.
-        To support HTML you will need to pass a parser with non-standard options.
-        Call [SZXX.Xml.SAX.make_parser] if your document uses HTML-style features such as unquoted or boolean attributes.
+(** Progressively assemble an XML DOM, but every element that matches [filter_path] is passed
+    to [on_match] instead of being added to the DOM. This "shallow DOM" is then returned.
+    All text nodes are properly unescaped.
+    It begins parsing without having to read the whole input in its entirety.
 
-      [strict]: Default: [true]. When false, non-closed elements are treated as self-closing elements, HTML-style.
-        For example a [<br>] without a matching [</br>] is treated as a self-closing [<br />].
+    [parser]: Override the default parser.
+      Make your own parser with [SZXX.Xml.SAX.make_parser] or pass [SZXX.Xml.html_parser].
 
-      [feed]: A producer of raw data. Create a [feed] by using the [SZXX.Feed] module.
+    [strict]: Default: [true]. When false, non-closed elements are treated as self-closing elements, HTML-style.
+      For example a [<br>] without a matching [</br>] will be treated as a self-closing [<br />].
 
-      [filter_path]: indicates which part of the DOM should be streamed out instead of being stored in the DOM.
-        For example [ ["html"; "body"; "div"; "div"; "p"] ] will emit all the [<p>] tags nested inside exactly 2 levels of [<div>] tags in an HTML document.
+    [feed]: A producer of raw input data. Create a [feed] by using the [SZXX.Feed] module.
 
-      [on_match]: Called on every element that matched [filter_path] *)
-  val stream_matching_elements :
-    ?parser:SAX.node Angstrom.t ->
-    ?strict:bool ->
-    feed:Feed.t ->
-    filter_path:string list ->
-    on_match:(DOM.element -> unit) ->
-    unit ->
-    (document, string) result
-end
+    [filter_path]: indicates which part of the DOM should be streamed out instead of being stored in the DOM.
+      For example [ ["html"; "body"; "div"; "div"; "p"] ] will emit all the [<p>] tags nested inside exactly 2 levels of [<div>] tags in an HTML document.
+
+    [on_match]: Called on every element that matched [filter_path] *)
+val stream_matching_elements :
+  ?parser:SAX.node Angstrom.t ->
+  ?strict:bool ->
+  filter_path:string list ->
+  on_match:(DOM.element -> unit) ->
+  Feed.t ->
+  (document, string) result

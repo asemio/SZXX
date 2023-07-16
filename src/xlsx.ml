@@ -94,7 +94,6 @@ module SST = struct
         fold_angstrom ~filter_path ~on_match ()
       | _ when !seen -> Zip.Action.Terminate
       | _ -> Zip.Action.Skip )
-    |> Zip.to_sequence
     |> Sequence.iter ~f:(function
          | Zip.{ filename; _ }, Zip.Data.Parse_many state -> (
            match Zip.Data.parser_state_to_result state with
@@ -111,22 +110,21 @@ module SST = struct
     | _ -> None
 end
 
-let flush_zip_stream ~sw zip_stream finalize =
+let flush_zip_seq ~sw zip_seq finalize =
   let sst_p, sst_w = Promise.create () in
   let flushed_p =
     Fiber.fork_promise ~sw (fun () ->
-      Zip.to_sequence zip_stream
-      |> Sequence.iter ~f:(function
-           | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Skip -> Promise.resolve sst_w ()
-           | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Parse_many state -> (
-             match Zip.Data.parser_state_to_result state with
-             | Ok () -> Promise.resolve sst_w ()
-             | Error msg -> failwithf "SZXX: File '%s': %s" SST.zip_entry_filename msg () )
-           | Zip.{ filename; _ }, Zip.Data.Parse_many state -> (
-             match Zip.Data.parser_state_to_result state with
-             | Ok () -> ()
-             | Error msg -> failwithf "SZXX: File '%s': %s" filename msg () )
-           | _ -> () );
+      Sequence.iter zip_seq ~f:(function
+        | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Skip -> Promise.resolve sst_w ()
+        | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Parse_many state -> (
+          match Zip.Data.parser_state_to_result state with
+          | Ok () -> Promise.resolve sst_w ()
+          | Error msg -> failwithf "SZXX: File '%s': %s" SST.zip_entry_filename msg () )
+        | Zip.{ filename; _ }, Zip.Data.Parse_many state -> (
+          match Zip.Data.parser_state_to_result state with
+          | Ok () -> ()
+          | Error msg -> failwithf "SZXX: File '%s': %s" filename msg () )
+        | _ -> () );
 
       if not (Promise.is_resolved sst_p) then Promise.resolve sst_w ();
 
@@ -136,7 +134,7 @@ let flush_zip_stream ~sw zip_stream finalize =
 
 let process_file ?only_sheet ~skip_sst ~sw ~feed push finalize =
   let q = Queue.create () in
-  let zip_stream =
+  let zip_seq =
     Zip.stream_files ~sw ~feed (function
       | { filename = "xl/workbook.xml"; _ } -> Skip
       | { filename = "xl/sharedStrings.xml"; _ } when skip_sst -> Skip
@@ -152,7 +150,7 @@ let process_file ?only_sheet ~skip_sst ~sw ~feed push finalize =
         >>| (fun sheet_number -> parse_sheet ~sheet_number push)
         |> Option.value ~default:Zip.Action.Skip )
   in
-  let sst_p, flushed_p = flush_zip_stream ~sw zip_stream finalize in
+  let sst_p, flushed_p = flush_zip_seq ~sw zip_seq finalize in
   Fiber.fork_daemon ~sw (fun () ->
     Promise.await_exn flushed_p;
     `Stop_daemon );
@@ -215,7 +213,10 @@ module Expert = struct
         | Some el -> string location (parse_string_cell el) )
       | Some "e" -> el |> dot "v" |> extract ~null location error
       | Some "b" -> el |> dot "v" |> extract ~null location boolean
-      | Some t -> failwithf "Unknown data type: %s ::: %s" t (sexp_of_element el |> Sexp.to_string) ()
+      | Some t ->
+        failwithf "Unknown data type: %s. Please report this bug. %s" t
+          (sexp_of_element el |> Sexp.to_string)
+          ()
     in
     let extract_cell_sst sst cell_parser location el =
       match Xml.DOM.get_attr el.attrs "t" with
@@ -273,6 +274,21 @@ module Expert = struct
       { row with data = loop 0 [] data }
 end
 
+let make_finalizer ~sw stream () =
+  Eio.Stream.add stream None;
+  (* Keep adding [None] in the background to allow the user to use
+     the Sequence again even after it's been iterated over. It doesn't
+     memoize the elements, but it does allow [Sequence.is_empty] to return [true]
+     without deadlocking, and [Sequence.fold] to return its initial value
+     without deadlocking, etc. *)
+  Fiber.fork_daemon ~sw (fun () ->
+    while true do
+      Eio.Stream.add stream None
+    done;
+    `Stop_daemon )
+
+let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq
+
 let stream_rows_double_pass ?only_sheet ~sw src cell_parser =
   let sst =
     let feed = Feed.of_flow_seekable src in
@@ -280,24 +296,32 @@ let stream_rows_double_pass ?only_sheet ~sw src cell_parser =
   in
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some (Expert.parse_row_with_sst sst cell_parser x)) in
-  let finalize () = Eio.Stream.add stream None in
+  let finalize = make_finalizer ~sw stream in
 
   let _sst_p =
     let feed = Feed.of_flow src in
     process_file ?only_sheet ~skip_sst:true ~sw ~feed push finalize
   in
-  stream
+  to_sequence stream
 
 type status =
   | All_buffered
   | Overflowed
   | Got_SST of SST.t
 
-let with_minimal_buffering ?max_buffering ?filter ~parse
-  (stream : Xml.DOM.element row option Eio.Stream.t) sst_p =
+let with_minimal_buffering ?max_buffering ?filter ~parse stream sst_p =
   let q = Queue.create ?capacity:max_buffering () in
-  let highwater = Option.value max_buffering ~default:Int.max_value in
-  let seq = Zip.to_sequence stream in
+  let highwater =
+    match max_buffering with
+    | None -> Int.max_value
+    | Some 0 ->
+      (* The internal reader is waiting on [Eio.Stream.take] so the first row
+         always ends up in the buffer unless it gets dropped by filter. *)
+      1
+    | Some x when Int.is_positive x -> x
+    | Some x -> failwithf "SZXX: stream_rows_single_pass max_buffering: %d < 0" x ()
+  in
+  let seq = to_sequence stream in
 
   let status =
     let filter = Option.value filter ~default:(fun _ -> true) in
@@ -320,7 +344,10 @@ let with_minimal_buffering ?max_buffering ?filter ~parse
   | All_buffered ->
     let sst = Promise.await_exn sst_p in
     Seq.of_dispenser (fun () -> Queue.dequeue q |> Option.map ~f:(parse ~sst)) |> Sequence.of_seq
-  | Overflowed -> failwithf "SZXX: stream_rows_buffer max_buffering exceeded %d." highwater ()
+  | Overflowed ->
+    failwithf "SZXX: stream_rows_single_pass max_buffering exceeded %d."
+      (Option.value max_buffering ~default:Int.max_value)
+      ()
   | Got_SST sst ->
     let seq2 =
       match filter with
@@ -336,17 +363,15 @@ let with_minimal_buffering ?max_buffering ?filter ~parse
       in
       Sequence.append seq1 seq2 )
 
-let stream_rows_buffer ?max_buffering ?filter ?only_sheet ~sw ~feed cell_parser =
+let stream_rows_single_pass ?max_buffering ?filter ?only_sheet ~sw ~feed cell_parser =
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some x) in
-  let finalize () = Eio.Stream.add stream None in
+  let finalize = make_finalizer ~sw stream in
 
   let sst_p = process_file ?only_sheet ~skip_sst:false ~sw ~feed push finalize in
 
   let parse ~sst row = Expert.parse_row_with_sst sst cell_parser row in
   with_minimal_buffering ?max_buffering ?filter ~parse stream sst_p
-
-let to_sequence = Zip.to_sequence
 
 let string_cell_parser : string cell_parser =
   {

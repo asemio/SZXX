@@ -45,52 +45,50 @@ val index_of_column : string -> int
 (** Stream parsed rows from an XLSX file.
     This functions is GUARANTEED to run in constant memory, without buffering.
 
-    [SZXX.Xlsx.stream_rows_double_pass ?only_sheet ~sw open_file cell_parser]
+    [SZXX.Xlsx.stream_rows_double_pass ?only_sheet ~sw file cell_parser]
 
     [only_sheet]: Default: all sheets. Pass a sheet ID to limit parsing/extraction to only that single sheet.
       Sheet IDs start at 1. Note: it does not necessarily match the order of the sheets in Excel.
 
     [sw]: A regular [Eio.Switch.t]
 
-    [open_file]: A file opened with [Eio.Path.open_in] or [Eio.Path.with_open_in].
-      If your XLSX data is not in a file (e.g. an HTTP transfer), then use [SZXX.Xlsx.stream_rows_buffer]
+    [file]: A file opened with [Eio.Path.open_in] or [Eio.Path.with_open_in].
+      If your XLSX data is not in a file (e.g. an HTTP transfer), then use [SZXX.Xlsx.stream_rows_single_pass]
 
     [cell_parser]: A cell parser converts from XLSX types to your own data type (usually a variant).
       Use [SZXX.Xlsx.string_cell_parser] or [SZXX.Xlsx.yojson_cell_parser] to get started quickly, then make your own.
 
     This function returns a Stream of all parsed rows.
-    The Stream ends with a None to indicate End Of File.
+    The Stream ends with a [None] to indicate End Of File.
     Use [SZXX.Xlsx.to_sequence] on the Stream to interact with it through a more convenient [Sequence.t] instead.
 
     SZXX will wait for you to consume rows before extracting more. *)
 val stream_rows_double_pass :
-  ?only_sheet:int -> sw:Switch.t -> #Eio.File.ro -> 'a cell_parser -> 'a row option Eio.Stream.t
-
-(** A Sequence is an ephemeral iterator with all the standard collection functions *)
-val to_sequence : 'a option Eio.Stream.t -> 'a Sequence.t
+  ?only_sheet:int -> sw:Switch.t -> #Eio.File.ro -> 'a cell_parser -> 'a row Sequence.t
 
 (** Stream parsed rows from an XLSX file.
     This function will only buffer rows encountered before the SST (see [README.md]).
     Consider using [SZXX.Xlsx.stream_rows_double_pass] if your XLSX is stored as a file.
 
-    [SZXX.Xlsx.stream_rows_buffer ?max_buffering ?filter ?only_sheet ~sw ~feed cell_parser]
+    [SZXX.Xlsx.stream_rows_single_pass ?max_buffering ?filter ?only_sheet ~sw ~feed cell_parser]
 
     [max_buffering]: Default: unlimited. Sets a limit to the number of rows that may be buffered.
       Raises an exception if it runs out of buffer space before reaching the SST.
 
     [filter]: Use this filter to drop uninteresting rows and reduce the number of rows that must be buffered.
       If necessary, use [SZXX.Xlsx.Expert.parse_row_without_sst] to access cell-level data.
+      This function is called on every row of every sheet (unless [?only_sheet] limits extraction to a single sheet).
 
     [only_sheet]: Default: all sheets. Pass a sheet ID to limit parsing/extraction to only that single sheet.
       Sheet IDs start at 1. Note: it does not necessarily match the order of the sheets in Excel.
 
     [sw]: A regular [Eio.Switch.t]
 
-    [feed]: A producer of raw data. Create a [feed] by using the [SZXX.Feed] module.
+    [feed]: A producer of raw input data. Create a [feed] by using the [SZXX.Feed] module.
 
     [cell_parser]: A cell parser converts from XLSX types to your own data type (usually a variant).
       Use [SZXX.Xlsx.string_cell_parser] or [SZXX.Xlsx.yojson_cell_parser] to get started quickly, then make your own. *)
-val stream_rows_buffer :
+val stream_rows_single_pass :
   ?max_buffering:int ->
   ?filter:(Xml.DOM.element row -> bool) ->
   ?only_sheet:int ->
