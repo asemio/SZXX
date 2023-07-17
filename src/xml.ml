@@ -552,19 +552,23 @@ let unescape_text = function
 | SAX.Text s -> SAX.Text (Unescape.run s)
 | x -> x
 
+let invalid = function
+| Ok x -> x
+| Error msg -> failwithf "SZXX: Invalid XML structure. Error: %s" msg ()
+
 let parse_feed ?parser:(node_parser = SAX.parser) ~feed:read on_parse =
   let open Angstrom in
   let open Parsing in
   let parser = skip_many (node_parser >>| on_parse) *> end_of_input in
   let open Buffered in
   let rec loop = function
-    | Fail _ as state -> state_to_result state
-    | Done (_, ()) -> Error "SZXX: processing completed before reaching end of input"
+    | Fail _ as state -> state_to_result state |> invalid
+    | Done (_, ()) -> Error "SZXX: Processing completed before reaching end of input"
     | Partial feed -> (
       match read () with
       | `Eof as eof -> (
         match feed eof with
-        | Fail _ as state -> state_to_result state
+        | Fail _ as state -> state_to_result state |> invalid
         | _ -> Ok () )
       | chunk -> (loop [@tailcall]) (feed chunk) )
   in
@@ -580,6 +584,7 @@ let parse_document ?parser ?strict feed =
   | Ok { stack = []; top = Some top; decl_attrs; _ } ->
     Ok { top; decl_attrs = Option.value ~default:[] decl_attrs }
   | Ok { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
+  | Ok { stack = [ x ]; _ } -> Error (sprintf "SZXX: Unclosed XML element: %s" x.tag)
   | Ok { stack; _ } ->
     Error
       (sprintf "SZXX: Unclosed XML elements: %s"
@@ -601,6 +606,7 @@ let stream_matching_elements ?parser ?strict ~filter_path ~on_match feed =
   | Ok { stack = []; top = Some top; decl_attrs; _ } ->
     Ok { top; decl_attrs = Option.value ~default:[] decl_attrs }
   | Ok { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
+  | Ok { stack = [ x ]; _ } -> Error (sprintf "SZXX: Unclosed XML element: %s" x.tag)
   | Ok { stack; _ } ->
     Error
       (sprintf "SZXX: Unclosed XML elements: %s"

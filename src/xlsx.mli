@@ -13,10 +13,10 @@ type location = {
 type 'a cell_parser = {
   string: location -> string -> 'a;
   formula: location -> formula:string -> string -> 'a;
-  error: location -> string -> 'a;
-  boolean: location -> string -> 'a;
-  number: location -> string -> 'a;
-  date: location -> string -> 'a;
+  error: location -> formula:string -> string -> 'a;
+  boolean: location -> string -> 'a;  (** "1" for [true] *)
+  number: location -> string -> 'a;  (** May contain a decimal part *)
+  date: location -> string -> 'a;  (** ISO-8601 format *)
   null: 'a;
 }
 
@@ -47,8 +47,8 @@ val index_of_column : string -> int
 
     [SZXX.Xlsx.stream_rows_double_pass ?only_sheet ~sw file cell_parser]
 
-    [only_sheet]: Default: all sheets. Pass a sheet ID to limit parsing/extraction to only that single sheet.
-      Sheet IDs start at 1. Note: it does not necessarily match the order of the sheets in Excel.
+    [filter_sheets]: Default: all sheets. Sheet IDs start at 1.
+      Note: it does not necessarily match the order of the sheets in Excel.
 
     [sw]: A regular [Eio.Switch.t]
 
@@ -64,7 +64,11 @@ val index_of_column : string -> int
 
     SZXX will wait for you to consume rows before extracting more. *)
 val stream_rows_double_pass :
-  ?only_sheet:int -> sw:Switch.t -> #Eio.File.ro -> 'a cell_parser -> 'a row Sequence.t
+  ?filter_sheets:(sheet_id:int -> raw_size:Byte_units.t -> bool) ->
+  sw:Switch.t ->
+  #Eio.File.ro ->
+  'a cell_parser ->
+  'a row Sequence.t
 
 (** Stream parsed rows from an XLSX file.
     This function will only buffer rows encountered before the SST (see [README.md]).
@@ -79,8 +83,8 @@ val stream_rows_double_pass :
       If necessary, use [SZXX.Xlsx.Expert.parse_row_without_sst] to access cell-level data.
       This function is called on every row of every sheet (unless [?only_sheet] limits extraction to a single sheet).
 
-    [only_sheet]: Default: all sheets. Pass a sheet ID to limit parsing/extraction to only that single sheet.
-      Sheet IDs start at 1. Note: it does not necessarily match the order of the sheets in Excel.
+    [filter_sheets]: Default: all sheets. Sheet IDs start at 1.
+      Note: it does not necessarily match the order of the sheets in Excel.
 
     [sw]: A regular [Eio.Switch.t]
 
@@ -91,7 +95,7 @@ val stream_rows_double_pass :
 val stream_rows_single_pass :
   ?max_buffering:int ->
   ?filter:(Xml.DOM.element row -> bool) ->
-  ?only_sheet:int ->
+  ?filter_sheets:(sheet_id:int -> raw_size:Byte_units.t -> bool) ->
   sw:Switch.t ->
   feed:Feed.t ->
   'a cell_parser ->

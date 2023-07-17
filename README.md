@@ -1,6 +1,6 @@
 # SZXX
 
-_Streaming ZIP XML XLSX_
+_**S**treaming **Z**IP **X**ML **X**LSX_
 
 SZXX is an efficient streaming parser built from the ground up for very low and constant memory usage.
 It can be used to stream data out of ZIP, XML, and XLSX files.
@@ -10,11 +10,11 @@ There are 3 independent modules. Skip to the one appropriate for your use case.
 - [SZXX.Xml](#szxxxml)
 - [SZXX.Zip](#szxxzip)
 
-**A note about v4:** SZXX v4 improves on every aspect and is not backwards compatible with v3. See the [release page](https://github.com/asemio/SZXX/releases/tag/4.0.0) for more information.
+**SZXX v4:** improves on every aspect of the library. See the [release page](https://github.com/asemio/SZXX/releases/tag/4.0.0) to upgrade from v3.
 
 ## SZXX.Xlsx
 
-A simple example reading from a file:
+Let's start with a simple example reading from a file:
 ```ocaml
 open! Core
 open Eio.Std
@@ -32,16 +32,18 @@ let process_xlsx xlsx_path =
       `List row.data |> Yojson.Basic.to_string |> print_endline )
 ```
 
+### Intro to XLSX
+
 To paraphrase an [infamous rant](https://github.com/gco/xee/blob/4fa3a6d609dd72b8493e52a68f316f7a02903276/XeePhotoshopLoader.m#L108-L136):
 > At this point, I'd like to take a moment to speak to you about the XLSX format... XLSX is not my favourite file format.
 
 There's a reason streaming XLSX parsers are so rare: XLSX does not want to be streamed, it resists and fights back. But by rethinking the whole stack, SZXX can reliably stream rows out of any XLSX file in constant memory.
 
-### Let's get some important facts out of the way (SZXX will handle the rest)
+#### Let's get some important facts out of the way (SZXX will handle the rest)
 
-- ⚠️ **XLSX fact** An XLSX file is actually a ZIP archive of folders of XML files, each containing different pieces of the data.
+- ⚠️ **XLSX fact 1:** An XLSX file is actually a ZIP archive of folders of XML files, each containing different pieces of the data.
 
-- ⚠️ **XLSX fact** XLSX is **typed** (like JSON). The types are: `String`, `Formula`, `Error`, `Boolean`, `Number`, `Date` (rarely used), and `Null`. This is why streaming functions such as `Xlsx.stream_rows_double_pass` require a `'a Xlsx.cell_parser` to convert from XLSX types to your own `'a` type.
+- ⚠️ **XLSX fact 2:** XLSX is **typed** (like JSON). The types are: `String`, `Formula`, `Error`, `Boolean`, `Number`, `Date` (rarely used), and `Null`. This is why streaming functions such as `Xlsx.stream_rows_double_pass` require a `'a Xlsx.cell_parser` to convert from XLSX types to your own `'a` type.
 
 ```ocaml
 type 'a cell_parser = {
@@ -56,11 +58,11 @@ type 'a cell_parser = {
 ```
 This library includes two simple cell_parsers to get started: `Xlsx.yojson_cell_parser` and `Xlsx.string_cell_parser`, but creating your own `'a cell_parser` is probably a good idea.
 
-- ⚠️ **XLSX fact** String cells use XML-escaping (`&gt;` for ">", `&#x1F600;` for "😀" etc). For performance reasons SZXX avoids preemptively unescaping String cells in case they're not used. `Xlsx.yojson_cell_parser` and `Xlsx.string_cell_parser` already unescape strings for you. If you write your own `cell_parser` and your String cells might contain reserved XML characters (`<`, `>`, `'`, `"`, `&`, etc) you will need to call `SZXX.Xml.unescape` on data coming from String cells.
+- ⚠️ **XLSX fact 3:** Cells use XML-escaping (`&gt;` for ">", `&#x1F600;` for "😀" etc). For performance reasons SZXX avoids preemptively unescaping cells in case they're not used. `Xlsx.yojson_cell_parser` and `Xlsx.string_cell_parser` already unescape strings for you. If you write your own `cell_parser` and your String/Formula/Error cells might contain reserved XML characters (`<`, `>`, `'`, `"`, `&`, etc) you will need to call `SZXX.Xml.unescape` on data coming from String, Formula, and Error cells.
 
-- ⚠️ **XLSX fact** Most XLSX applications use Number cells (OCaml float) to encode Date and DateTime. Pass this float to `Xlsx.parse_date` or `Xlsx.parse_datetime` to decode it. The Date cell type was only introduced to Excel in 2010 and very few XLSX readers/writers use it.
+- ⚠️ **XLSX fact 4:** Most XLSX applications use Number cells (OCaml float) to encode Date and DateTime. Pass this float to `Xlsx.parse_date` or `Xlsx.parse_datetime` to decode it. The Date cell type was only introduced to Excel in 2010 and very few XLSX readers/writers use it.
 
-- ⚠️ **XLSX fact** Unfortunately, the vast majority of applications that generate XLSX files will not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to an offset in the Shared Strings Table (SST). This saves space, but 99.9% of the time those applications will place the SST is **after** the sheet!
+- ⚠️ **XLSX fact 5:** Unfortunately, the vast majority of applications that generate XLSX files will not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to an offset in the **Shared Strings Table** (SST). This saves space, but 99.9% of the time those applications will place the SST is **after** the sheet!
 
 We can inspect the XLSX structure using `zipinfo`:
 ```
@@ -84,24 +86,31 @@ Here we can see that the SST (`xl/sharedStrings.xml`) is located after the sheet
 
 This function extracts rows from an XLSX file. It is **guaranteed to run in constant memory**, without buffering.
 
-It first skims the file to find and extracts the SST, then it streams out fully parsed rows from the various sheets. Rows are always emitted strictly in the order they appear in the sheet(s). There's a small delay (to locate and parse the SST) before rows start streaming out.
+It first skims the file to find and extract the SST, then it streams out fully parsed rows from the various sheets. Rows are always emitted strictly in the order they appear in the sheet(s). There's a small delay (to locate and parse the SST) before rows start streaming out.
 
 ```ocaml
-SZXX.Xlsx.stream_rows_double_pass ?only_sheet ~sw file cell_parser
+SZXX.Xlsx.stream_rows_double_pass ?filter_sheets ~sw file cell_parser
 ```
 
-There's just one limitation to `stream_rows_double_pass`: your XLSX data has to be **in a file** so that SZXX can "rewind" after extracting the SST. To stream XLSX data out of non-seekable streams such as HTTP transfers, there's `Xlsx.stream_rows_single_pass`.
+There's just one limitation to `stream_rows_double_pass`: your XLSX data has to be **in a file** so that SZXX can "rewind" after extracting the SST. To stream XLSX data out of non-seekable streams such as HTTP transfers, use [Xlsx.stream_rows_single_pass](#xlsxstream_rows_single_pass) instead.
 
 #### Arguments:
-- `only_sheet`: Default: all sheets. Pass a sheet ID to limit parsing/extraction to only that single sheet. Sheet IDs start at 1. Note: it does not necessarily match the visual order of the sheets in Excel.
-- `sw`: A regular `Eio.Switch.t`. This is where parsing errors go.
-- `file`: A file opened with `Eio.Path.open_in` or `Eio.Path.with_open_in`
-- `cell_parser`: A cell parser converts from XLSX types to your own data type (usually a variant). Use `Xlsx.string_cell_parser` or `Xlsx.yojson_cell_parser` to get started quickly, then make your own.
+- `filter_sheets`
+  - Default: all sheets.
+  - Pass a function to limit parsing/extraction to only certain sheets.
+  - Sheet IDs start at 1. Note: it does not necessarily match the visual order of the sheets in Excel.
+- `sw`
+  - A regular `Eio.Switch.t`. This is where parsing errors go.
+- `file`
+  - A file opened with `Eio.Path.open_in` or `Eio.Path.with_open_in`.
+- `cell_parser`
+  - A cell parser converts from XLSX types to your own data type (usually a variant).
+  - Use `Xlsx.string_cell_parser` or `Xlsx.yojson_cell_parser` to get started quickly, then make your own.
 
 #### Returns:
 `'a Xlsx.row Sequence.t` where `'a` is the type of your cell_parser.
 
-Note that a `Sequence.t` is an ephemeral data structure. Each element can only be seen once, for example calling `Sequence.is_empty` will attempt to generate the next element in the Sequence, and return true if there was one, _but that element will be lost_.
+Note that a `Sequence.t` is an ephemeral data structure. Each element can only be seen once, for example calling `Sequence.is_empty` will attempt to generate the next element in the Sequence to return true if there was one, _but that element will be lost_.
 
 SZXX generates elements on demand, meaning that it will not read more raw data until necessary.
 
@@ -112,21 +121,33 @@ This function extracts rows from XLSX. Rows encountered **before** the SST will 
 You get full control over any and all buffering.
 
 ```ocaml
-SZXX.Xlsx.stream_rows_single_pass ?max_buffering ?filter ?only_sheet ~sw ~feed cell_parser
+SZXX.Xlsx.stream_rows_single_pass ?max_buffering ?filter ?filter_sheets ~sw ~feed cell_parser
 ```
 
 #### Arguments:
-- `max_buffering`: Default: unlimited. Sets a limit to the number of rows that may be buffered. Raises an exception if it runs out of buffer space before reaching the SST.
-- `filter`: Use this filter to drop uninteresting rows and reduce the number of rows that must be buffered. If necessary, use `Xlsx.Expert.parse_row_without_sst` to access cell-level data. This function is called on every row of every sheet (unless `?only_sheet` limits extraction to a single sheet).
-- `only_sheet`: Default: all sheets. Pass a sheet ID to limit parsing/extraction to only that single sheet. Sheet IDs start at 1. Note: it does not necessarily match the visual order of the sheets in Excel.
-- `sw`: A regular `Eio.Switch.t`. This is where parsing errors go.
-- `feed`: A producer of raw input data. Create a `feed` by using the `SZXX.Feed` module.
-- `cell_parser`: A cell parser converts from XLSX types to your own data type (usually a variant). Use `Xlsx.string_cell_parser` or `Xlsx.yojson_cell_parser` to get started quickly, then make your own.
+- `max_buffering`
+  - Default: unlimited.
+  - Sets a limit to the number of rows that may be buffered. Raises an exception if it runs out of buffer space before reaching the SST.
+- `filter`
+  - Use this filter to drop uninteresting rows and reduce the number of rows that must be buffered.
+  - If necessary, use `Xlsx.Expert.parse_row_without_sst` to access cell-level data. See the examples below.
+  - This function is called on every row of every sheet (except for sheets removed by `filter_sheets`).
+- `filter_sheets`
+  - Default: all sheets.
+  - Pass a function to limit parsing/extraction to only certain sheets.
+  - Sheet IDs start at 1. Note: it does not necessarily match the visual order of the sheets in Excel.
+- `sw`
+  - A regular `Eio.Switch.t`. This is where parsing errors go.
+- `feed`
+  - A producer of raw input data. Create a `feed` by using the `SZXX.Feed` module.
+- `cell_parser`
+  - A cell parser converts from XLSX types to your own data type (usually a variant).
+  - Use `Xlsx.string_cell_parser` or `Xlsx.yojson_cell_parser` to get started quickly, then make your own.
 
 #### Returns:
 `'a Xlsx.row Sequence.t` where `'a` is the type of your cell_parser.
 
-Note that a `Sequence.t` is an ephemeral data structure. Each element can only be seen once, for example calling `Sequence.is_empty` will attempt to generate the next element in the Sequence, and return true if there was one, _but that element will be lost_.
+Note that a `Sequence.t` is an ephemeral data structure. Each element can only be seen once, for example calling `Sequence.is_empty` will attempt to generate the next element in the Sequence to return true if there was one, _but that element will be lost_.
 
 SZXX generates elements on demand, meaning that it will not read more raw data until necessary.
 
@@ -140,6 +161,8 @@ For this example we'll pretend we have 3 requirements:
 - **R3:** and we only care about sheet #1
 
 We'll use the `Xlsx.yojson_cell_parser` to keep things simple.
+
+First, let's define our `filter` function:
 ```ocaml
 let open SZXX in
 
@@ -176,13 +199,16 @@ let seq =
   Xlsx.stream_rows_single_pass
     ~max_buffering:1000 (* Not necessary unless we made a mistake in ~filter *)
     ~filter
-    ~only_sheet:1 (* R3: we only care about sheet #1 *)
+    ~filter_sheets:(fun ~sheet_id ~raw_size:_ ->
+      (* R3: we only care about sheet #1 *)
+      sheet_id = 1
+    )
     ~sw
     ~feed:(SZXX.Feed.of_flow src) (* See SZXX.Feed for other ways to construct a ~feed *)
     Xlsx.yojson_cell_parser
 in
 ```
-We can then process the data as we would anything else.
+We can then now work with the data in `seq` as usual.
 
 #### Example 2
 
@@ -195,8 +221,7 @@ in
 let count = ref 0 in
 let filter _ =
   incr count;
-  (* Always reject *)
-  false
+  false (* Always reject *)
 in
 let seq =
   Xlsx.stream_rows_single_pass
@@ -206,7 +231,7 @@ let seq =
     Xlsx.yojson_cell_parser
 in
 
-(* Optional safety check: *)
+(* Optional sanity check *)
 Sequence.iter seq ~f:(fun _ -> assert false);
 
 (* Print our count! *)
@@ -214,8 +239,8 @@ Eio.traceln "Found %d rows" !count;
 ```
 
 There are two major benefits to using `~filter` in this way:
-- we don't waste any time parsing the rows themselves; `~filter` operates on raw rows
-- we're guaranteed to run in constant memory, no matter the XLSX's internal layout
+1. we don't waste any time parsing the rows themselves; `~filter` operates on raw rows
+2. we're guaranteed to run in constant memory, no matter the XLSX's internal layout
 
 ### Xlsx.parse_date
 
@@ -237,11 +262,11 @@ See [xlsx.mli](src/xlsx.mli).
 
 ## SZXX.Xml
 
-This XML parser is far from fully spec-compliant and does not attempt to validate schemas or follow references.
+This XML parser is not fully spec-compliant: it does not attempt to validate schemas or follow references.
 
 But it's simple, efficient and sufficient for the vast majority of use cases.
 
-It can be configured to parse HTML, and it can even stream nested elements out of a large file without having to hold the whole file in memory.
+It can be configured to parse HTML. It can also stream nested elements out of large XML files without having to hold the whole file in memory.
 
 ```ocaml
 open! Core
@@ -253,37 +278,41 @@ let parse_xml xml_path =
     Eio.Path.with_open_in
       Eio.Path.(Eio.Stdenv.fs env / xml_path)
       (fun file -> Xml.parse_document (Feed.of_flow file))
-    |> function
-    | Ok x -> x
-    | Error msg -> failwithf "Failed to parse '%s': %s" filename msg ()
+    |> Result.ok_or_failwith
   in
   (* Do something with the doc using the utilities in SZXX.Xml.DOM *)
 ```
 
 To operate on the document and its children, use the utility functions in the [`SZXX.Xml.DOM` module](src/xml.mli).
 
-SZXX transparently unescapes text nodes. Your text elements will contain e.g. `Fast & Furious 🏎️`, not the original `Fast &amp; Furious &#x1F3CE;&#xFE0F;`.
+This module transparently unescapes text nodes. Your text nodes will contain e.g. `Fast & Furious 🏎️`, not the original `Fast &amp; Furious &#x1F3CE;&#xFE0F;`.
 
 ### Xml.parse_document
 
 This function progressively parses the XML while reading from the raw input. It begins parsing without having to read the whole input in its entirety.
 
-To extract (stream) specific nested elements instead of parsing (very) large documents, there's `Xml.stream_matching_elements`.
+To extract (stream out) specific nested elements instead of fully parsing (very) large documents, use [Xml.stream_matching_elements](#xmlstream_matching_elements) instead.
 
 ```ocaml
 Xml.parse_document ?parser ?strict feed
 ```
 
 #### Arguments:
-- `parser`: Override the default parser. Make your own parser with `SZXX.Xml.SAX.make_parser` or pass `SZXX.Xml.html_parser`.
-- `strict`: Default: `true`. When false, non-closed elements are treated as self-closing elements, HTML-style. For example a `<br>` without a matching `</br>` will be treated as a self-closing `<br />`.
-- `feed`: A producer of raw input data. Create a `feed` by using the `SZXX.Feed` module.
+- `parser`
+  - Override the default parser.
+  - Make your own parser with `SZXX.Xml.SAX.make_parser` or pass `SZXX.Xml.html_parser`.
+- `strict`
+  - Default: `true`.
+  - When false, unclosed elements are treated as self-closing elements, HTML-style. For example a `<br>` without a matching `</br>` will be treated as a self-closing `<br />`.
+- `feed`
+  - A producer of raw input data. Create a `feed` by using the `SZXX.Feed` module.
 
 ### Working with HTML
 
-Let's adapt the previous example and add HTML support.
+Let's adapt the previous example and add HTML support:
+- add `~parser:Xml.html_parser`
+- add `~strict:false`
 
-All we need to do is add `~parser:Xml.html_parser` and `~strict:false`:
 ```ocaml
 open! Core
 open Eio.Std
@@ -295,12 +324,10 @@ let parse_html html_path =
       Eio.Path.(Eio.Stdenv.fs env / html_path)
       (fun file ->
         Xml.parse_document
-          ~parser:Xml.html_parser (* New for HTML *)
-          ~strict:false (* New for HTML *)
+          ~parser:Xml.html_parser (* added for HTML *)
+          ~strict:false (* added for HTML *)
           (Feed.of_flow file) )
-    |> function
-    | Ok x -> x
-    | Error msg -> failwithf "Failed to parse '%s': %s" filename msg ()
+    |> Result.ok_or_failwith
   )
   in
 
@@ -327,11 +354,19 @@ Xml.stream_matching_elements ?parser ?strict ~filter_path ~on_match feed
 ```
 
 #### Arguments:
-- `parser`: Override the default parser. Make your own parser with `SZXX.Xml.SAX.make_parser` or pass `SZXX.Xml.html_parser`.
-- `strict`: Default: `true`. When false, non-closed elements are treated as self-closing elements, HTML-style. For example a `<br>` without a matching `</br>` will be treated as a self-closing `<br />`.
-- `feed`: A producer of raw input data. Create a `feed` by using the `SZXX.Feed` module.
-- `filter_path`: indicates which part of the DOM should be streamed out instead of being stored in the DOM. For example `["html"; "body"; "div"; "div"; "p"]` will emit all the `<p>` tags nested inside exactly 2 levels of `<div>` tags in an HTML document.
-- `on_match`: Called on every element that matched `filter_path`.
+- `parser`
+  - Override the default parser.
+  - Make your own parser with `SZXX.Xml.SAX.make_parser` or pass `SZXX.Xml.html_parser`.
+- `strict`
+  - Default: `true`.
+  - When false, unclosed elements are treated as self-closing elements, HTML-style. For example a `<br>` without a matching `</br>` will be treated as a self-closing `<br />`.
+- `feed`
+  - A producer of raw input data. Create a `feed` by using the `SZXX.Feed` module.
+- `filter_path`
+  - Indicates which part of the DOM should be streamed out instead of being stored in the DOM.
+  - For example `["html"; "body"; "div"; "div"; "p"]` will emit all the `<p>` tags nested inside exactly 2 levels of `<div>` tags in an HTML document.
+- `on_match`
+  - Called on every element that matched `filter_path`.
 
 ### Xml.DOM (module)
 
@@ -339,15 +374,17 @@ This module contains various utilities to traverse DOM nested elements. See [xml
 
 ### Xml.Expert (module)
 
-See [xml.mli](src/xml.mli).
+See [xml.mli](src/xml.mli). Performs no automatic escaping.
 
 ## SZXX.Zip
 
-This ZIP parser is fully featured and supports every type of ZIP (including the important ZIP64 format) with the exception of files using deprecated compression methods.
+This ZIP parser is fully featured and supports every type of ZIP (including the important ZIP64 format) except for files using long-deprecated compression methods.
 
 ### Zip.stream_files
 
-This function processes a ZIP one file at a time. For each file, it invokes a `callback` to ask what it should do with the file, then processes that file, adds the outcome to the output Sequence, then invokes `callback` for the next file and so on.
+This function processes a ZIP one file at a time.
+
+For each file, it invokes a `callback` to ask what it should do with the file, then processes that file, adds the outcome to the output Sequence, then invokes `callback` for the next file and so on.
 
 In this example, we will extract all files that end in `.jpg`, skipping over any other files contained within the ZIP archive.
 
@@ -355,8 +392,8 @@ In this example, we will extract all files that end in `.jpg`, skipping over any
 open! Core
 open Eio.Std
 
-let save_jpg ~filename contents =
-  (* Let's pretend we have a function that saves .jpg files somewhere *)
+let save_jpg ~filename contents = ...
+  (* Let's pretend this function saves a .jpg file somewhere *)
 
 let unzip_and_save_jpgs zip_path =
   let open SZXX in
@@ -382,16 +419,48 @@ let unzip_and_save_jpgs zip_path =
     | _ -> () )
 ```
 
-Note that in a real world scenario, we should process each JPG in small chunks instead of decompressing each JPG into a (potentially large) string. For that we would use `Zip.Action.Fold_string` or `Zip.Action.Fold_bigstring`.
+Note that in a real world scenario, we should process each JPG in small chunks instead of decompressing each of them into a (potentially large) string. For that we would use `Zip.Action.Fold_string` or `Zip.Action.Fold_bigstring`.
+
+#### Actions:
+SZXX will call `callback` for each file it encounters within the ZIP archive. You must choose an Action for SZXX to perform on each file.
+
+- `Action.Skip`
+  - Skip over the compressed bytes of this file without attempting to decompress them.
+- `Action.String`
+  - Collect the whole decompressed file into a single string.
+- `Action.Bigstring`
+  - Collect the whole decompressed file into a single bigstring.
+  - More efficient than `Action.String` if you don't need to convert the final result into a string later on.
+- `Action.Fold_string f`
+  - Fold this file into a final state using function `f`, in string chunks of ~500-8192 bytes.
+- `Action.Fold_bigstring f`
+  - Fold this file into a final state using function `f`, in bigstring chunks of ~500-8192 bytes.
+  - **IMPORTANT:** this `Bigstring.t` is volatile! It's only safe to read from it until the end of function `f` (the "folder" function). If you need to access the data again later, copy it in some way before the end of function `f`.
+- `Action.Parse p`
+  - Apply the `Angstrom.t` parser `p` to the file while it is being decompressed without having to fully decompress it first.
+  - `Action.Parse` expects `p` to consume all bytes and leave no trailing junk bytes after a successful parse.
+- `Action.Parse_many { parser; on_parse }`
+  - Repeatedly apply the `Angstrom.t` parser to the file while it is being decompressed without having to fully decompress it first.
+  - It invokes `on_parse` on each parsed value.
+  - `Action.Parse_many` expects the file to end on a complete parse and leave no trailing junk bytes.
+- `Action.Terminate`
+  - Abruptly terminate processing of the ZIP archive.
+  - The output Sequence will finish with a `Data.Terminate` element.
+  - SZXX stops reading from the `Feed.t` immediately, without even skipping over the bytes of that entry.
+
 
 ```ocaml
 Zip.stream_files ~sw ~feed callback
 ```
 
 #### Arguments:
-- `sw`: A regular `Eio.Switch.t`. This is where parsing errors go.
-- `feed`: A producer of raw input data. Create a `feed` by using the `SZXX.Feed` module.
-- `callback`: A function called on every file found within the ZIP archive. You must choose an Action (`SZXX.Zip.Action.t`) to perform over each file encountered within the ZIP archive.
+- `sw`
+  - A regular `Eio.Switch.t`. This is where parsing errors go.
+- `feed`
+  - A producer of raw input data. Create a `feed` by using the `SZXX.Feed` module.
+- `callback`
+  - A function called on every file found within the ZIP archive.
+  - You must choose an Action (`SZXX.Zip.Action.t`) to perform over each file encountered within the ZIP archive.
 
 #### Returns:
 A `Sequence.t` of all files within the archive.
@@ -399,21 +468,9 @@ The order of the files passed to the `callback` and on the Sequence matches the 
 
 The Sequence contains `Zip.Data.t` elements that match the `Zip.Action.t` returned by the `callback`: `Zip.Action.Fold_string` yields a `Zip.Data.Fold_string` on the Sequence, `Zip.Action.Skip` yields `Zip.Data.Skip`, etc.
 
-Note that a `Sequence.t` is an ephemeral data structure. Each element can only be seen once, for example calling `Sequence.is_empty` will attempt to generate the next element in the Sequence, and return true if there was one, _but that element will be lost_.
+Note that a `Sequence.t` is an ephemeral data structure. Each element can only be seen once, for example calling `Sequence.is_empty` will attempt to generate the next element in the Sequence to return true if there was one, _but that element will be lost_.
 
 SZXX will wait for you to consume from the Sequence before extracting more.
-
-#### Actions:
-SZXX will call `callback` when it encounters a new file within the ZIP archive. You must choose an Action for SZXX to perform on each file.
-
-- Action.Skip`: skip over the compressed bytes of this file without attempting to decompress them.
-- Action.String`: collect the whole decompressed file into a single string.
-- Action.Bigstring`: collect the whole decompressed file into a single bigstring. More efficient than `Action.String` if you don't need to convert the result into a string.
-- Action.Fold_string f`: fold this file into a final state using function `f`, in string chunks of ~500-8192 bytes.
-- Action.Fold_bigstring f`: fold this file into a final state using function `f`, in bigstring chunks of ~500-8192 bytes. **IMPORTANT:** this `Bigstring.t` is volatile! It's only safe to read from it until the end of function `f` (the "folder"). If you need to access the data again later, copy it in some way before the end of function `f`.
-- Action.Parse p`: apply the `Angstrom.t` parser `p` to the file while it is being decompressed without having to fully decompress it first. `Parse p` expects `p` to consume all bytes and leave no trailing junk bytes after a successful parse.
-- Action.Parse_many { parser; on_parse }`: repeatedly apply the `Angstrom.t` parser to the file while it is being decompressed without having to fully decompress it first. It invokes `on_parse` on each parsed value. `Parse_many` expects the file to end with a complete parse and leave no trailing junk bytes.
-- Action.Terminate`: abruptly terminate processing of the ZIP archive. The output Sequence will finish with a `Data.Terminate` element. SZXX stops reading from the `Feed.t` immediately, without even skipping over the bytes of that entry.
 
 ## Performance
 
@@ -423,11 +480,14 @@ Streaming data is always going to be slower than deserializing a whole file into
 
 However a **significant** amount of work has gone into performance optimizations.
 
-It takes a lot of CPU work to extract each row from an XLSX file: ZIP is a format designed for floppy disks and old hard drives, XML is quite verbose, and XLSX requires reading and parsing **a lot** of XML data just to produce a single row of output.
+It takes a lot of CPU work to extract each row from an XLSX file:
+- the ZIP format was designed for floppy disks and old hard drives
+- the XML format is quite verbose and inefficient
+- the XLSX format requires reading and parsing **a lot** of XML data just to produce a single row of XLSX output
 
 All in all:
 - `SZXX.Zip` is fast
 - `SZXX.Xml` is respectable
-- `SZXX.Xlsx` is slow compared to a CSV parser, but comparable to the average simpler non-streaming parsers that load everything into memory. An equally optimized non-streaming parser should be faster than `SZXX.Xlsx`.
+- `SZXX.Xlsx` is slow compared to a CSV parser, but comparable to the average (simpler) non-streaming parsers that load everything into memory. An equally optimized non-streaming parser should manage to be faster than `SZXX.Xlsx`.
 
 Using 1 core on an ancient 2015 Macbook Pro, SZXX processes an enormous 28-column x 1,048,576-row XLSX file in 99 seconds **using only 11MB of memory**. The same file takes 70 seconds to open in LibreOffice using 2 cores and **1.8GB of memory**.

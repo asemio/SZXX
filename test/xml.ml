@@ -506,135 +506,21 @@ type buffer = Buffer.t
 
 let sexp_of_buffer buf = Sexp.List [ Atom "Buffer"; Atom (Buffer.contents buf) ]
 
-let xml_to_dom
-  ?(options =
-    SZXX.Xml.SAX.
-      {
-        accept_html_boolean_attributes = true;
-        accept_unquoted_attributes = true;
-        accept_single_quoted_attributes = true;
-      }) ?strict test data () =
-  match
-    Angstrom.parse_string ~consume:Angstrom.Consume.All
-      (Angstrom.many (SZXX.Xml.SAX.make_parser options))
-      test
-  with
-  | Ok nodes ->
-    (* print_endline (sprintf !"%{sexp#hum: SZXX.Xml.SAX.node list}" nodes); *)
-    let doc =
-      match
-        List.fold_result nodes ~init:SZXX.Xml.SAX.Expert.To_DOM.init ~f:(fun acc -> function
-          | Text s -> SZXX.Xml.SAX.Expert.To_DOM.folder ?strict (Ok acc) (Text (SZXX.Xml.DOM.unescape s))
-          | el -> SZXX.Xml.SAX.Expert.To_DOM.folder ?strict (Ok acc) el )
-      with
-      | Ok { decl_attrs; stack = []; top = Some top; _ } ->
-        { decl_attrs = Option.value ~default:[] decl_attrs; top }
-      | Ok state -> failwithf !"Invalid state: %{sexp: SZXX.Xml.SAX.Expert.To_DOM.state}" state ()
-      | Error msg -> failwith msg
-    in
-    Json_diff.check (doc_to_yojson doc) data
-  | Error msg -> failwith msg
+let xml_to_dom ?(parser = SZXX.Xml.html_parser) ?strict test data () =
+  let open SZXX in
+  let doc = Xml.parse_document_from_string ~parser ?strict test |> Result.ok_or_failwith in
+  Json_diff.check (doc_to_yojson doc) data
 
-let xml_stream ?(options = SZXX.Xml.SAX.default_parser_options) ?strict test data filter_path () =
+let xml_stream ?parser ?strict test data filter_path () =
+  let open SZXX in
   let queue = Queue.create () in
   let on_match x = Queue.enqueue queue x in
-  match
-    Angstrom.parse_string ~consume:Angstrom.Consume.All
-      (Angstrom.many (SZXX.Xml.SAX.make_parser options))
-      test
-  with
-  | Ok nodes ->
-    let _state =
-      List.fold_result nodes ~init:SZXX.Xml.SAX.Expert.Stream.init ~f:(fun acc x ->
-        SZXX.Xml.SAX.Expert.Stream.folder ?strict ~filter_path ~on_match (Ok acc) x )
-    in
-    let streamed = `Assoc [ "data", [%to_yojson: element array] (Queue.to_array queue) ] in
-    Json_diff.check streamed data
-  | Error msg -> failwith msg
-
-let test_easy test data () =
-  SZXX.Xml.parse_document_from_string test
-  |> Result.ok_or_failwith
-  |> doc_to_yojson
-  |> Fn.flip Json_diff.check data
-
-let sync_to_dom () =
-  let open SZXX in
-  let raw_xml_string =
-    {|
-<container>123
-  <value>foo</value>
-  <value>bar</value>
-  456
-</container>
-|}
-  in
-
-  let nodes =
-    Angstrom.parse_string ~consume:All (Angstrom.many Xml.SAX.parser) raw_xml_string
+  let _doc =
+    Xml.stream_matching_elements ?parser ?strict ~filter_path ~on_match (Feed.of_string test)
     |> Result.ok_or_failwith
   in
-  let xml =
-    List.fold_result nodes ~init:Xml.SAX.Expert.To_DOM.init ~f:(fun acc x ->
-      Xml.SAX.Expert.To_DOM.folder (Ok acc) x )
-    |> Result.ok_or_failwith
-  in
-  (* Do something with `xml` *)
-  Option.value_map xml.top ~default:"--" ~f:(fun el -> Xml.DOM.sexp_of_element el |> Sexp.to_string)
-  |> print_endline
-
-let async_to_dom () =
-  let open SZXX in
-  let src = Eio.Flow.string_source Test1.raw in
-
-  let state = ref (Ok Xml.SAX.Expert.To_DOM.init) in
-  let on_parse node = state := Xml.SAX.Expert.To_DOM.folder !state node in
-  let _rest, result = Angstrom_eio.parse_many Xml.SAX.parser on_parse src in
-
-  match result, !state with
-  | Error msg, _
-   |_, Error msg ->
-    failwith msg
-  | Ok (), Ok parsed_xml ->
-    (* Do something with parsed_xml *)
-    Option.value_map parsed_xml.top ~default:"--" ~f:(fun el ->
-      Xml.DOM.sexp_of_element el |> Sexp.to_string )
-    |> print_endline
-
-let async_stream () =
-  let open SZXX in
-  let src =
-    Eio.Flow.string_source
-      {|
-<html>
-  <head></head>
-  <body>
-    <div><p>foo</p></div>
-    <div>bar</div>
-    456
-  </body>
-</html>
-|}
-  in
-
-  let state = ref (Ok Xml.SAX.Expert.Stream.init) in
-  let filter_path = [ "html"; "body"; "div" ] in
-  let on_match div =
-    (* Do something with `div` *)
-    print_endline (Xml.DOM.sexp_of_element div |> Sexp.to_string)
-  in
-  let on_parse node = state := Xml.SAX.Expert.Stream.folder ~filter_path ~on_match !state node in
-  let _rest, result = Angstrom_eio.parse_many Xml.SAX.parser on_parse src in
-
-  match result, !state with
-  | Error msg, _
-   |_, Error msg ->
-    failwith msg
-  | Ok (), Ok shallow_tree ->
-    (* Do something with `shallow_tree` or `acc_top_level_divs` *)
-    Option.value_map shallow_tree.decl_attrs ~default:"--" ~f:(fun x ->
-      Xml.DOM.sexp_of_attr_list x |> Sexp.to_string )
-    |> print_endline
+  let streamed = `Assoc [ "data", [%to_yojson: element array] (Queue.to_array queue) ] in
+  Json_diff.check streamed data
 
 let readme_example1 env filename () =
   let open SZXX in
@@ -658,9 +544,7 @@ let readme_example2 env filename () =
         Xml.parse_document ~parser:Xml.html_parser (* New for HTML *)
           ~strict:false (* New for HTML *)
           (Feed.of_flow file))
-    |> function
-    | Ok x -> x
-    | Error msg -> failwithf "Failed to parse '%s': %s" filename msg ()
+    |> Result.ok_or_failwith
   in
 
   let text =
@@ -668,6 +552,14 @@ let readme_example2 env filename () =
   in
   if not ([%equal: string option] text (Some "BOO!"))
   then failwithf !"h1 contained %{sexp: string option}" text ()
+
+let corrupted env filename () =
+  try
+    let raw = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / get_file_path filename) in
+    xml_to_dom raw Test1.data ();
+    raise Exit
+  with
+  | Failure msg when String.is_prefix msg ~prefix:"SZXX: Invalid XML structure." -> ()
 
 let () =
   Eio_main.run @@ fun env ->
@@ -682,29 +574,28 @@ let () =
           ( "To DOM 4",
             `Quick,
             xml_to_dom ~strict:false
-              ~options:
-                {
-                  accept_html_boolean_attributes = true;
-                  accept_unquoted_attributes = true;
-                  accept_single_quoted_attributes = false;
-                }
+              ~parser:
+                (SZXX.Xml.SAX.make_parser
+                   {
+                     accept_html_boolean_attributes = true;
+                     accept_unquoted_attributes = true;
+                     accept_single_quoted_attributes = false;
+                   } )
               Test4.raw Test4.data );
           ( "Stream 4",
             `Quick,
             xml_stream ~strict:false
-              ~options:
-                {
-                  accept_html_boolean_attributes = true;
-                  accept_unquoted_attributes = true;
-                  accept_single_quoted_attributes = false;
-                }
+              ~parser:
+                (SZXX.Xml.SAX.make_parser
+                   {
+                     accept_html_boolean_attributes = true;
+                     accept_unquoted_attributes = true;
+                     accept_single_quoted_attributes = false;
+                   } )
               Test4.raw Test4.data_streamed [ "html"; "head"; "meta" ] );
           "Large CDATA", `Quick, test_large_cdata;
-          "Sync To_DOM", `Quick, sync_to_dom;
-          "Async To_DOM", `Quick, async_to_dom;
-          "Async Stream", `Quick, async_stream;
-          "Easy", `Quick, test_easy Test1.raw Test1.data;
           "Readme example 1", `Quick, readme_example1 env "valid.xml";
           "Readme example 2", `Quick, readme_example2 env "index.html";
+          "Corrupted", `Quick, corrupted env "chunks.json";
         ] );
     ]

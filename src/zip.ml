@@ -115,8 +115,7 @@ module Storage = struct
         flush outbs ~off:0 ~len;
         De.Inf.flush decoder;
         do_decompress ()
-      | `Malformed err ->
-        failwithf "SZXX malformed deflated data, this file is corrupted. Error: %s" err ()
+      | `Malformed err -> failwithf "SZXX: Corrupted file. Malformed deflate data. Error: %s" err ()
     in
     let decompress bs ~off ~len =
       De.Inf.src decoder bs off len;
@@ -329,7 +328,7 @@ let parse_entry =
       LE.any_uint16 >>| function
       | 20 -> Zip_2_0
       | 45 -> Zip_4_5
-      | x -> failwithf "SZXX: Unsupported ZIP version: %d. Please report this bug." x ()
+      | x -> failwithf "SZXX: Corrupted file. Invalid ZIP version: %d" x ()
     and+ flags, methd =
       flags_methd_parser
       <* LE.any_uint16 (* last modified time *)
@@ -435,19 +434,19 @@ let stream_files ~sw ~feed:(read : Feed.t) cb =
     | Some () -> return `Terminated
   in
   let open Buffered in
-  let throw = function
+  let invalid = function
     | Ok x -> x
-    | Error msg -> failwithf "SZXX: invalid ZIP internals, this file is corrupted. Error: %s" msg ()
+    | Error msg -> failwithf "SZXX: Corrupted file. Invalid ZIP structure. Error: %s" msg ()
   in
   let rec loop = function
-    | Fail _ as state -> state_to_result state |> throw
+    | Fail _ as state -> state_to_result state |> invalid
     | Done (_, `Reached_end) -> failwith "SZXX: ZIP processing completed before reaching end of input"
     | Done (_, `Terminated) -> ()
     | Partial feed -> (
       match read () with
       | `Eof as eof -> (
         match feed eof with
-        | Fail _ as state -> state_to_result state |> throw
+        | Fail _ as state -> state_to_result state |> invalid
         | _ -> () )
       | chunk -> (loop [@tailcall]) (feed chunk) )
   in

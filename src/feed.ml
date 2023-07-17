@@ -7,9 +7,11 @@ type t = unit -> [ `String of string | `Bigstring of Bigstring.t | `Eof ]
 let of_flow ?(slice_size = 4096) (src : #Eio.Flow.source) : t =
   let buf = Cstruct.create slice_size in
   fun () ->
-    match Eio.Flow.single_read src buf with
-    | len -> `Bigstring (Bigstringaf.sub ~off:0 ~len buf.buffer)
-    | exception End_of_file -> `Eof
+    try
+      let len = Eio.Flow.single_read src buf in
+      `Bigstring (Bigstringaf.sub ~off:0 ~len buf.buffer)
+    with
+    | End_of_file -> `Eof
 
 (** Same as [of_flow], but the resulting [Feed.t] does not advance the file cursor.
     In other words, even after processing, the flow will still appear to be "unread".
@@ -18,13 +20,12 @@ let of_flow_seekable ?(slice_size = 4096) (src : #Eio.File.ro) : t =
   let buf = Cstruct.create slice_size in
   let pos = ref Optint.Int63.zero in
   fun () ->
-    (* TODO: Use [Eio.File.pread] once https://github.com/ocaml-multicore/eio/issues/579 is fixed *)
-    match src#pread [ buf ] ~file_offset:!pos with
-    | 0 -> `Eof
-    | len ->
+    try
+      let len = Eio.File.pread src [ buf ] ~file_offset:!pos in
       (pos := Optint.Int63.(add !pos (of_int len)));
       `Bigstring (Bigstringaf.sub ~off:0 ~len buf.buffer)
-    | exception End_of_file -> `Eof
+    with
+    | End_of_file -> `Eof
 
 (** Return [None] to indicate End Of File *)
 let of_string_dispenser f : t =
@@ -46,27 +47,21 @@ let of_string ?(slice_size = 4096) s : t =
   (* By copying the string into a sequence of Bigstrings,
      we can reclaim memory as soon as the large string goes out of scope
      and the sequence starts being processed. *)
-  let seq =
+  let chunks =
     if size < slice_size
-    then Sequence.singleton (Bigstring.of_string s)
+    then [ Bigstring.of_string s ]
     else (
       let n = size / slice_size in
       let rem = size - (slice_size * n) in
-      let seq1 =
-        List.init n ~f:(fun i -> Bigstringaf.of_string s ~off:(i * slice_size) ~len:slice_size)
-        |> Sequence.of_list
-      in
-      let seq2 =
-        if rem = 0
-        then Sequence.empty
-        else Sequence.singleton (Bigstringaf.of_string s ~off:(n * slice_size) ~len:rem)
-      in
-      Sequence.append seq1 seq2 )
+      let init = if rem = 0 then [] else [ Bigstringaf.of_string s ~off:(n * slice_size) ~len:rem ] in
+      Array.init n ~f:Fn.id
+      |> Array.fold_right ~init ~f:(fun i acc ->
+           Bigstringaf.of_string s ~off:(i * slice_size) ~len:slice_size :: acc ) )
   in
-  let acc = ref seq in
+  let acc = ref chunks in
   fun () ->
-    match Sequence.next !acc with
-    | None -> `Eof
-    | Some (bs, rest) ->
+    match !acc with
+    | [] -> `Eof
+    | bs :: rest ->
       acc := rest;
       `Bigstring bs

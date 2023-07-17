@@ -11,7 +11,7 @@ type location = {
 type 'a cell_parser = {
   string: location -> string -> 'a;
   formula: location -> formula:string -> string -> 'a;
-  error: location -> string -> 'a;
+  error: location -> formula:string -> string -> 'a;
   boolean: location -> string -> 'a;
   number: location -> string -> 'a;
   date: location -> string -> 'a;
@@ -132,7 +132,7 @@ let flush_zip_seq ~sw zip_seq finalize =
   in
   sst_p, flushed_p
 
-let process_file ?only_sheet ~skip_sst ~sw ~feed push finalize =
+let process_file ?filter_sheets ~skip_sst ~sw ~feed push finalize =
   let q = Queue.create () in
   let zip_seq =
     Zip.stream_files ~sw ~feed (function
@@ -141,12 +141,14 @@ let process_file ?only_sheet ~skip_sst ~sw ~feed push finalize =
       | { filename = "xl/sharedStrings.xml"; _ } ->
         let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
         fold_angstrom ~filter_path:SST.filter_path ~on_match ()
-      | { filename; _ } ->
+      | { filename; descriptor = { uncompressed_size; _ }; _ } ->
         let open Option.Monad_infix in
         String.chop_prefix ~prefix:"xl/worksheets/sheet" filename
         >>= String.chop_suffix ~suffix:".xml"
         >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
-        |> Option.filter ~f:(fun i -> Option.value_map only_sheet ~default:true ~f:(( = ) i))
+        |> Option.filter ~f:(fun sheet_id ->
+             Option.value_map filter_sheets ~default:true ~f:(fun f ->
+               f ~sheet_id ~raw_size:(Byte_units.of_bytes_int64_exn uncompressed_size) ) )
         >>| (fun sheet_number -> parse_sheet ~sheet_number push)
         |> Option.value ~default:Zip.Action.Skip )
   in
@@ -207,11 +209,14 @@ module Expert = struct
         match el |> dot_text "v" with
         | None -> null
         | Some s -> formula location s ~formula:(el |> dot_text "f" |> Option.value ~default:"") )
+      | Some "e" -> (
+        match el |> dot_text "v" with
+        | None -> null
+        | Some s -> error location s ~formula:(el |> dot_text "f" |> Option.value ~default:"") )
       | Some "inlineStr" -> (
         match dot "is" el with
         | None -> null
         | Some el -> string location (parse_string_cell el) )
-      | Some "e" -> el |> dot "v" |> extract ~null location error
       | Some "b" -> el |> dot "v" |> extract ~null location boolean
       | Some t ->
         failwithf "Unknown data type: %s. Please report this bug. %s" t
@@ -289,7 +294,7 @@ let make_finalizer ~sw stream () =
 
 let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq
 
-let stream_rows_double_pass ?only_sheet ~sw src cell_parser =
+let stream_rows_double_pass ?filter_sheets ~sw src cell_parser =
   let sst =
     let feed = Feed.of_flow_seekable src in
     SST.from_zip ~feed
@@ -300,7 +305,7 @@ let stream_rows_double_pass ?only_sheet ~sw src cell_parser =
 
   let _sst_p =
     let feed = Feed.of_flow src in
-    process_file ?only_sheet ~skip_sst:true ~sw ~feed push finalize
+    process_file ?filter_sheets ~skip_sst:true ~sw ~feed push finalize
   in
   to_sequence stream
 
@@ -363,21 +368,23 @@ let with_minimal_buffering ?max_buffering ?filter ~parse stream sst_p =
       in
       Sequence.append seq1 seq2 )
 
-let stream_rows_single_pass ?max_buffering ?filter ?only_sheet ~sw ~feed cell_parser =
+let stream_rows_single_pass ?max_buffering ?filter ?filter_sheets ~sw ~feed cell_parser =
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some x) in
   let finalize = make_finalizer ~sw stream in
 
-  let sst_p = process_file ?only_sheet ~skip_sst:false ~sw ~feed push finalize in
+  let sst_p = process_file ?filter_sheets ~skip_sst:false ~sw ~feed push finalize in
 
   let parse ~sst row = Expert.parse_row_with_sst sst cell_parser row in
   with_minimal_buffering ?max_buffering ?filter ~parse stream sst_p
 
+let unescape = Xml.DOM.unescape
+
 let string_cell_parser : string cell_parser =
   {
-    string = (fun _location s -> Xml.DOM.unescape s);
-    formula = (fun _location ~formula:_ s -> Xml.DOM.unescape s);
-    error = (fun _location s -> sprintf "#ERROR# %s" s);
+    string = (fun _location s -> unescape s);
+    formula = (fun _location ~formula:_ s -> unescape s);
+    error = (fun _location ~formula s -> sprintf !"#ERROR# %{unescape} -> %{unescape}" formula s);
     boolean = (fun _location s -> if String.(s = "0") then "false" else "true");
     number = (fun _location s -> s);
     date = (fun _location s -> s);
@@ -386,9 +393,10 @@ let string_cell_parser : string cell_parser =
 
 let yojson_cell_parser : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_parser =
   {
-    string = (fun _location s -> `String (Xml.DOM.unescape s));
-    formula = (fun _location ~formula:_ s -> `String (Xml.DOM.unescape s));
-    error = (fun _location s -> `String (sprintf "#ERROR# %s" s));
+    string = (fun _location s -> `String (unescape s));
+    formula = (fun _location ~formula:_ s -> `String (unescape s));
+    error =
+      (fun _location ~formula s -> `String (sprintf !"#ERROR# %{unescape} -> %{unescape}" formula s));
     boolean = (fun _location s -> `Bool String.(s = "1"));
     number = (fun _location s -> `Float (Float.of_string s));
     date = (fun _location s -> `String s);

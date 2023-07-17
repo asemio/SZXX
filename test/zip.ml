@@ -8,11 +8,11 @@ let get_file_path = sprintf "../../../test/files/%s"
 let fold env xlsx_filename json_filename () =
   let xlsx_path = get_file_path xlsx_filename in
   let json_path = get_file_path json_filename in
-  let against = Eio.Path.(load (env#fs / json_path)) |> Yojson.Safe.from_string in
+  let against = Eio.Path.(load (Eio.Stdenv.fs env / json_path)) |> Yojson.Safe.from_string in
   let queue = Queue.create () in
 
   Switch.run (fun sw ->
-    let src = Eio.Path.(open_in ~sw (env#fs / xlsx_path)) in
+    let src = Eio.Path.(open_in ~sw (Eio.Stdenv.fs env / xlsx_path)) in
     let seq =
       SZXX.Zip.stream_files ~sw ~feed:(SZXX.Feed.of_flow src) (fun _ ->
         Fold_string { init = (); f = (fun _entry s () -> Queue.enqueue queue (`String s)) } )
@@ -26,7 +26,7 @@ let fold env xlsx_filename json_filename () =
   Json_diff.check parsed against
 
 (* Eio.Path.with_open_out ~create:(`Or_truncate 0o644)
-   Eio.Path.(env#fs / json_path)
+   Eio.Path.(Eio.Stdenv.fs env / json_path)
    (Eio.Flow.copy_string (Yojson.Safe.to_string parsed)) *)
 
 let readme_example env filename () =
@@ -56,7 +56,7 @@ let corrupted env filename () =
     readme_example env filename ();
     raise Exit
   with
-  | Failure _ -> ()
+  | Failure msg when String.is_prefix msg ~prefix:"SZXX: Corrupted file." -> ()
 
 let () =
   Eio_main.run @@ fun env ->
