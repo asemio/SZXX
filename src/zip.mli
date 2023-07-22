@@ -15,6 +15,7 @@ type descriptor = {
   crc: Int32.t;
   compressed_size: Int64.t;
   uncompressed_size: Int64.t;
+  offset: Int64.t option;
 }
 [@@deriving sexp_of, compare, equal]
 
@@ -44,12 +45,12 @@ module Action : sig
     | Fold_string of {
         init: 'a;
         f: entry -> string -> 'a -> 'a;
-      }  (** Fold the file into a final state, in string chunks of ~500-8192 bytes *)
+      }  (** Fold the file into a final state, in string chunks of ~8192 bytes *)
     | Fold_bigstring of {
         init: 'a;
         f: entry -> Bigstring.t -> 'a -> 'a;
       }
-        (** Fold the file into a final state, in bigstring chunks of ~500-8192 bytes.
+        (** Fold the file into a final state, in bigstring chunks of ~8192 bytes.
           IMPORTANT: this [Bigstring.t] is volatile! It's only safe to read from it until the end of function [f].
           If you need to access the data again later, copy it in some way before the end of function [f]. *)
     | Parse of 'a Angstrom.t
@@ -98,6 +99,7 @@ module Data : sig
 end
 
 (** Stream files from a ZIP archive.
+    This function operates in a single pass.
 
     [SZXX.Zip.stream_files ~sw ~feed callback]
 
@@ -111,8 +113,8 @@ end
     Return [Action.Skip] to skip over the compressed bytes of this file without attempting to decompress them.
     Return [Action.String] to collect the whole decompressed file into a single string.
     Return [Action.Bigstring] to collect the whole decompressed file into a single bigstring. More efficient than [Action.String] if you don't need to convert the result into a string.
-    Return [Action.Fold_string] to fold this file into a final state, in string chunks of ~500-8192 bytes.
-    Return [Action.Fold_bigstring] to fold this file into a final state, in bigstring chunks of ~500-8192 bytes. IMPORTANT: this [Bigstring.t] is volatile! It's only safe to read from it until the end of function [f] (the "folder"). If you need to access the data again later, copy it in some way before the end of function [f].
+    Return [Action.Fold_string] to fold this file into a final state, in string chunks of ~8192 bytes.
+    Return [Action.Fold_bigstring] to fold this file into a final state, in bigstring chunks of ~8192 bytes. IMPORTANT: this [Bigstring.t] is volatile! It's only safe to read from it until the end of function [f] (the "folder"). If you need to access the data again later, copy it in some way before the end of function [f].
     Return [Action.Parse] to apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. [Parse] expects the parser to consume all bytes and leave no trailing junk bytes after a successful parse.
     Return [Action.Parse_many] to repeatedly apply an [Angstrom.t] parser to the file while it is being decompressed without having to fully decompress it first. Call [on_parse] on each parsed value. [Parse_many] expects the file to end with a complete parse and leave no trailing junk bytes.
     Return [Action.Terminate] to abruptly terminate processing of the ZIP archive. The output Sequence will finish with a [Data.Terminate] element. SZXX stops reading from the [Feed.t] immediately, without even skipping over the bytes of that entry.
@@ -122,3 +124,11 @@ end
 
     SZXX will wait for you to consume from the Sequence before extracting more. *)
 val stream_files : sw:Switch.t -> feed:Feed.t -> (entry -> 'a Action.t) -> (entry * 'a Data.t) Sequence.t
+
+(** Return a list of all entries in a ZIP file.
+    This function is more efficient than the [SZXX.Zip.stream_files] equivalent, but it can only operate on files. *)
+val index_entries : #Eio.File.ro -> entry list
+
+(** Given an entry extracted from [SZXX.Zip.index_entries], this function extracts a single specific file.
+    This function is more efficient than the [SZXX.Zip.stream_files] equivalent, but it can only operate on files.  *)
+val extract_from_index : #Eio.File.ro -> entry -> 'a Action.t -> 'a Data.t

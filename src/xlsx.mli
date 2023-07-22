@@ -53,16 +53,12 @@ val index_of_column : string -> int
     [sw]: A regular [Eio.Switch.t]
 
     [file]: A file opened with [Eio.Path.open_in] or [Eio.Path.with_open_in].
-      If your XLSX data is not in a file (e.g. an HTTP transfer), then use [SZXX.Xlsx.stream_rows_single_pass]
+      If your XLSX document is not a file (e.g. an HTTP transfer), then use [SZXX.Xlsx.stream_rows_single_pass]
 
     [cell_parser]: A cell parser converts from XLSX types to your own data type (usually a variant).
       Use [SZXX.Xlsx.string_cell_parser] or [SZXX.Xlsx.yojson_cell_parser] to get started quickly, then make your own.
 
-    This function returns a Stream of all parsed rows.
-    The Stream ends with a [None] to indicate End Of File.
-    Use [SZXX.Xlsx.to_sequence] on the Stream to interact with it through a more convenient [Sequence.t] instead.
-
-    SZXX will wait for you to consume rows before extracting more. *)
+    SZXX will wait for you to consume rows from the Sequence before extracting more. *)
 val stream_rows_double_pass :
   ?filter_sheets:(sheet_id:int -> raw_size:Byte_units.t -> bool) ->
   sw:Switch.t ->
@@ -70,7 +66,7 @@ val stream_rows_double_pass :
   'a cell_parser ->
   'a row Sequence.t
 
-(** Stream parsed rows from an XLSX file.
+(** Stream parsed rows from an XLSX document.
     This function will only buffer rows encountered before the SST (see [README.md]).
     Consider using [SZXX.Xlsx.stream_rows_double_pass] if your XLSX is stored as a file.
 
@@ -91,7 +87,9 @@ val stream_rows_double_pass :
     [feed]: A producer of raw input data. Create a [feed] by using the [SZXX.Feed] module.
 
     [cell_parser]: A cell parser converts from XLSX types to your own data type (usually a variant).
-      Use [SZXX.Xlsx.string_cell_parser] or [SZXX.Xlsx.yojson_cell_parser] to get started quickly, then make your own. *)
+      Use [SZXX.Xlsx.string_cell_parser] or [SZXX.Xlsx.yojson_cell_parser] to get started quickly, then make your own.
+
+    As much as possible, SZXX will wait for you to consume rows from the Sequence before extracting more. *)
 val stream_rows_single_pass :
   ?max_buffering:int ->
   ?filter:(Xml.DOM.element row -> bool) ->
@@ -111,9 +109,14 @@ module Expert : sig
     (** Advanced: for use with [SZXX.Zip.stream_files] *)
     val zip_entry_filename : string
 
-    (** Extract the SST from an XLSX.
-        This function will stop reading from the Feed before End Of File if the SST is not located last within the file. *)
-    val from_zip : feed:Feed.t -> t
+    (** Extract the SST from an XLSX document.
+        This function will stop reading from the Feed as soon as it has retrieved the SST. *)
+    val from_feed : Feed.t -> t
+
+    (** Extract the SST from an XLSX file.
+        This function does not advance the file cursor.
+        It jumps around the file to only extract the SST while reading as few bytes as necessary. *)
+    val from_file : #Eio.File.ro -> t
 
     (** Resolve a single reference into the Shared Strings Table. *)
     val resolve_sst_index : t -> sst_index:string -> string option

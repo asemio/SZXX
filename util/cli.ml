@@ -230,6 +230,11 @@ let count_tokens env xlsx_path =
        !num_prologue !num_open !num_close !num_text !num_cdata !num_nothing )
     (Eio.Stdenv.stdout env)
 
+let index env xlsx_path =
+  Switch.run @@ fun sw ->
+  let src = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / xlsx_path) in
+  print_endline (sprintf !"%{sexp#hum: Zip.entry list}" (Zip.index_entries src))
+
 let () =
   Eio_main.run @@ fun env ->
   Sys.get_argv () |> function
@@ -243,4 +248,5 @@ let () =
   | [| _; "count_types"; file |] -> count_types env file
   | [| _; "count_length"; file |] -> count_total_string_length env file
   | [| _; "count_tokens"; file |] -> count_tokens env file
+  | [| _; "index"; file |] -> index env file
   | _ -> failwith "Invalid arguments"

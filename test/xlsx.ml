@@ -1,5 +1,3 @@
-let flags = Unix.[ O_RDONLY; O_NONBLOCK ]
-
 open! Core
 open Eio.Std
 
@@ -123,11 +121,21 @@ let double_pass env filename () =
      (Eio.Flow.copy_string (Yojson.Safe.to_string parsed)); *)
   Json_diff.check parsed against
 
-let sst_from_zip env filename () =
+let sst_from_feed env filename () =
   let open SZXX in
   let xlsx_path = get_xlsx_path filename in
   Eio.Path.with_open_in Eio.Path.(Eio.Stdenv.fs env / xlsx_path) @@ fun src ->
-  let sst = Xlsx.Expert.SST.from_zip ~feed:(SZXX.Feed.of_flow src) in
+  let sst = Xlsx.Expert.SST.from_feed (SZXX.Feed.of_flow src) in
+  match Xlsx.Expert.SST.resolve_sst_index sst ~sst_index:"30" with
+  | Some "October" -> ()
+  | Some x -> failwithf "Invalid SST index 30: '%s'" x ()
+  | None -> failwith "Failed to resolve SST index 30"
+
+let sst_from_file env filename () =
+  let open SZXX in
+  let xlsx_path = get_xlsx_path filename in
+  Eio.Path.with_open_in Eio.Path.(Eio.Stdenv.fs env / xlsx_path) @@ fun file ->
+  let sst = Xlsx.Expert.SST.from_file file in
   match Xlsx.Expert.SST.resolve_sst_index sst ~sst_index:"30" with
   | Some "October" -> ()
   | Some x -> failwithf "Invalid SST index 30: '%s'" x ()
@@ -145,9 +153,9 @@ let buffering ~overflow ~max_buffering env filename () =
   | Failure _ when overflow -> ()
   | Exit when not overflow -> ()
 
-let corrupted env filename () =
+let corrupted env filename ~f () =
   try
-    double_pass env filename ();
+    f env filename ();
     raise Exit
   with
   | Failure msg when String.is_prefix msg ~prefix:"SZXX: Corrupted file." -> ()
@@ -158,10 +166,11 @@ let () =
     [
       ( "XLSX",
         [
-          "SST from ZIP", `Quick, sst_from_zip env "financial";
+          "SST from feed", `Quick, sst_from_feed env "financial";
+          "SST from file", `Quick, sst_from_file env "financial";
           "simple.xlsx", `Quick, single_pass env "simple";
           "financial.xlsx", `Quick, single_pass env "financial";
-          "zip64.xlsx", `Quick, single_pass env "zip64";
+          "hybrid.xlsx", `Quick, single_pass env "hybrid";
           "formatting.xlsx", `Quick, single_pass env "formatting";
           "inline.xlsx", `Quick, single_pass env "inline";
           "Readme example 1", `Quick, readme_example1 env "financial";
@@ -174,6 +183,8 @@ let () =
           "Buffering (fits)", `Quick, buffering env "simple" ~max_buffering:10 ~overflow:false;
           "Buffering (no SST, fits)", `Quick, buffering env "inline" ~max_buffering:10 ~overflow:false;
           "Buffering (no SST, overflow)", `Quick, buffering env "inline" ~max_buffering:1 ~overflow:true;
-          "Corrupted", `Quick, corrupted env "invalid";
+          "Corrupted (double_pass)", `Quick, corrupted env "invalid" ~f:double_pass;
+          "Corrupted (sst_from_feed)", `Quick, corrupted env "invalid" ~f:sst_from_feed;
+          "Corrupted (sst_from_file)", `Quick, corrupted env "invalid" ~f:sst_from_file;
         ] );
     ]

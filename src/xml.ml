@@ -7,31 +7,29 @@ module Unescape = struct
     blends: int array;
   }
 
-  let encode_utf_8_codepoint code =
-    let consts =
-      (* https://en.wikipedia.org/wiki/UTF-8#Encoding *)
-      [|
-        { shifts = [| 0 |]; masks = [| 127 |]; blends = [| 0 |] };
-        { shifts = [| 6; 0 |]; masks = [| 31; 63 |]; blends = [| 192; 128 |] };
-        { shifts = [| 12; 6; 0 |]; masks = [| 15; 63; 63 |]; blends = [| 224; 128; 128 |] };
-        { shifts = [| 18; 12; 6; 0 |]; masks = [| 7; 63; 63; 63 |]; blends = [| 240; 128; 128; 128 |] };
-      |]
+  let consts =
+    (* https://en.wikipedia.org/wiki/UTF-8#Encoding *)
+    [|
+      { shifts = [| 6; 0 |]; masks = [| 31; 63 |]; blends = [| 192; 128 |] };
+      { shifts = [| 12; 6; 0 |]; masks = [| 15; 63; 63 |]; blends = [| 224; 128; 128 |] };
+      { shifts = [| 18; 12; 6; 0 |]; masks = [| 7; 63; 63; 63 |]; blends = [| 240; 128; 128; 128 |] };
+    |]
+
+  let encode_utf_8_codepoint = function
+  | code when code <= 0x7f -> Char.unsafe_of_int code |> String.of_char
+  | code ->
+    let num_bytes =
+      match code with
+      | x when x <= 0x7ff -> 2
+      | x when x <= 0xffff -> 3
+      | _ -> 4
     in
-    match code with
-    | code when code <= 0x7f -> Char.unsafe_of_int code |> String.of_char
-    | code ->
-      let num_bytes =
-        match code with
-        | x when x <= 0x7ff -> 2
-        | x when x <= 0xffff -> 3
-        | _ -> 4
-      in
-      let consts = consts.(num_bytes - 1) in
-      String.init num_bytes ~f:(fun i ->
-        (* lsr: Shift the relevant bits to the least significant position *)
-        (* land: Blank out the reserved bits *)
-        (* lor: Set the reserved bits to the right value *)
-        (code lsr consts.shifts.(i)) land consts.masks.(i) lor consts.blends.(i) |> Char.unsafe_of_int )
+    let consts = consts.(num_bytes - 2) in
+    String.init num_bytes ~f:(fun i ->
+      (* lsr: Shift the relevant bits to the least significant position *)
+      (* land: Blank out the reserved bits *)
+      (* lor: Set the reserved bits to the right value *)
+      (code lsr consts.shifts.(i)) land consts.masks.(i) lor consts.blends.(i) |> Char.unsafe_of_int )
 
   let decode_exn = function
   (* https://en.wikipedia.org/wiki/List_of_XML_and_HTML_character_entity_references#List_of_predefined_entities_in_XML *)
@@ -49,7 +47,7 @@ module Unescape = struct
       |> Int.of_string
       |> encode_utf_8_codepoint
     | '#', '0' .. '9' -> String.slice str 1 0 |> Int.of_string |> encode_utf_8_codepoint
-    | _ -> raise (Invalid_argument str) )
+    | _ -> raise (Invalid_argument (sprintf "Not a valid XML-encoded entity: '%s'" str)) )
 
   let run original =
     let rec loop buf from =
@@ -60,9 +58,11 @@ module Unescape = struct
         | None -> Buffer.add_substring buf original ~pos:from ~len:(String.length original - from)
         | Some stop ->
           Buffer.add_substring buf original ~pos:from ~len:(start - from);
-          (match decode_exn (String.slice original (start + 1) stop) with
-          | s -> Buffer.add_string buf s
-          | exception _ -> Buffer.add_substring buf original ~pos:start ~len:(stop - start + 1));
+          (try
+             let s = decode_exn (String.slice original (start + 1) stop) in
+             Buffer.add_string buf s
+           with
+          | _ -> Buffer.add_substring buf original ~pos:start ~len:(stop - start + 1));
           loop buf (stop + 1) )
     in
     (* Unroll first index call for performance *)
@@ -107,14 +107,17 @@ module DOM = struct
       | x when String.(x.tag = tag) -> f x
       | _ -> None )
 
-  let at i node = Option.try_with (fun () -> Int.of_string i |> List.nth_exn node.children)
+  let at i node = Option.try_with (fun () -> List.nth_exn node.children i)
 
   let get (steps : (element -> element option) list) node =
-    let rec loop node = function
-      | [] -> node
-      | step :: rest -> (loop [@tailcall]) (Option.bind node ~f:step) rest
+    let rec loop acc = function
+      | [] -> Some acc
+      | step :: rest -> (
+        match step acc with
+        | None -> None
+        | Some x -> (loop [@tailcall]) x rest )
     in
-    loop (Some node) steps
+    loop node steps
 end
 
 module Parser = struct
@@ -217,7 +220,7 @@ module Parser = struct
       <* char '>'
     in
     let declarations = char '[' *> skip_many (blank *> declaration) <* blank <* char ']' in
-    (string "<!DOCTYPE" <|> string "<!doctype")
+    string_ci "<!DOCTYPE"
     *> ( skip_many (blank *> choice [ declarations; drop token_parser; drop xml_string_parser ])
        <* blank
        <* char '>' )
@@ -235,7 +238,8 @@ module Parser = struct
     <* string "?>"
 
   let cdata_parser =
-    string "<![CDATA[" *> take_until_pattern ~slice_size:Int.(2 ** 10) ~pattern:"]]>" >>| fun s -> Cdata s
+    string_ci "<![CDATA[" *> take_until_pattern ~slice_size:Int.(2 ** 10) ~pattern:"]]>" >>| fun s ->
+    Cdata s
 
   let element_open_parser ~attr_parser =
     let+ tag = char '<' *> ws *> token_parser
@@ -322,8 +326,7 @@ module SAX = struct
         match acc with
         | after_first, _ when Parser.is_ws c -> after_first, true
         | true, true ->
-          Buffer.add_char final ' ';
-          Buffer.add_char final c;
+          bprintf final " %c" c;
           true, false
         | _ ->
           Buffer.add_char final c;

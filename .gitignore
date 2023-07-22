@@ -6,5 +6,5 @@ _build/
 *.xml
 *.xlsx
 *.html
-!test/files
+!test/files/*.xlsx
 *.txt

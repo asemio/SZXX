@@ -16,6 +16,7 @@ type descriptor = {
   crc: Int32.t;
   compressed_size: Int64.t;
   uncompressed_size: Int64.t;
+  offset: Int64.t option;
 }
 [@@deriving sexp_of, compare, equal]
 
@@ -270,30 +271,13 @@ let ( .*[] ) s i = s.[i] |> Char.to_int |> Int64.of_int_exn
 let parse_le_uint64 ?(offset = 0) s =
   (1, s.*[offset]) |> Fn.apply_n_times ~n:7 (fun (i, x) -> i + 1, s.*[i + offset] << i * 8 ||| x) |> snd
 
-let parse_descriptor =
-  let+ crc = LE.any_int32
-  and+ c_size = LE.any_int32
-  and+ r_size = LE.any_int32 in
-  { crc; compressed_size = Int32.to_int64 c_size; uncompressed_size = Int32.to_int64 r_size }
+module Parsers = struct
+  let version_needed =
+    LE.any_uint16 >>| function
+    | 20 -> Zip_2_0
+    | 45 -> Zip_4_5
+    | x -> failwithf "SZXX: Corrupted file. Invalid ZIP version: %d" x ()
 
-let parse_entry =
-  let rec extra_fields_parser acc = function
-    | 0 -> return acc
-    | left when left < 0 ->
-      failwith "SZXX: Corrupted file. Mismatch between reported and actual extra fields size"
-    | left ->
-      let* id = LE.any_uint16 in
-      let* size = LE.any_uint16 in
-      let* data = take size in
-      (extra_fields_parser [@tailcall]) ({ id; size; data } :: acc) (left - (size + 4))
-  in
-  let dynamic_len_fields_parser =
-    let* filename_len = LE.any_uint16 in
-    let* extra_fields_len = LE.any_uint16 in
-    let+ filename = take filename_len
-    and+ extra_fields = extra_fields_parser [] extra_fields_len in
-    filename, extra_fields
-  in
   let flags_methd_parser =
     let+ flags = LE.any_uint16
     and+ methd = LE.any_uint16 in
@@ -305,42 +289,106 @@ let parse_entry =
       | x -> failwithf "SZXX: Unsupported ZIP compression method %d" x ()
     in
     flags, methd
-  in
-  let get_zip64_descriptor ~crc extra_fields =
-    List.find_map extra_fields ~f:(function
-      | { id = 1; size = 16; data } ->
-        Some
-          {
-            crc;
-            uncompressed_size = parse_le_uint64 data;
-            compressed_size = parse_le_uint64 ~offset:8 data;
-          }
-      | { id = 1; size; _ } ->
-        failwithf "SZXX: Corrupted file. Expected 16 bytes for ZIP64 extra field length but found %d" size
-          ()
-      | _ -> None )
-  in
-  let entry_parser =
-    let* () =
-      bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:"PK\003\004" Parsing.Storage.noop_backtrack
+
+  let rec extra_fields_parser acc = function
+  | 0 -> return (List.rev acc)
+  | left when left < 0 ->
+    failwith "SZXX: Corrupted file. Mismatch between reported and actual extra fields size"
+  | left ->
+    let* id = LE.any_uint16 in
+    let* size = LE.any_uint16 in
+    let* data = take size in
+    (extra_fields_parser [@tailcall]) ({ id; size; data } :: acc) (left - (size + 4))
+
+  type initial_descriptor = {
+    crc: Int32.t;
+    compressed_size: Int64.t option;
+    uncompressed_size: Int64.t option;
+  }
+
+  let parse_initial_descriptor =
+    let+ crc = LE.any_int32
+    and+ c_size = LE.any_int32
+    and+ r_size = LE.any_int32 in
+    let compressed_size = if Int32.(c_size = -1l) then None else Some (Int32.to_int64 c_size) in
+    let uncompressed_size = if Int32.(r_size = -1l) then None else Some (Int32.to_int64 r_size) in
+    { crc; compressed_size; uncompressed_size }
+
+  let parse_initial_offset =
+    let+ offset = LE.any_int32 in
+    if Int32.(offset = -1l) then print_endline (sprintf !">>> %{Source_code_position}" [%here]);
+    Option.some_if Int32.(offset <> -1l) (Int32.to_int64 offset)
+
+  let make_descriptor ~init_offset version extra_fields initial =
+    match version with
+    | Zip_2_0 -> (
+      match initial with
+      | { crc; compressed_size = Some compressed_size; uncompressed_size = Some uncompressed_size } ->
+        { crc; compressed_size; uncompressed_size; offset = init_offset }
+      | _ -> failwith "SZXX: Corrupted file. Invalid file lengths for Zip2.0" )
+    | Zip_4_5 -> (
+      let data =
+        match List.find extra_fields ~f:(fun { id; _ } -> id = 1) with
+        | None -> ""
+        | Some { data; _ } -> data
+      in
+      let len = String.length data in
+      let needed =
+        (if Option.is_none initial.compressed_size then 8 else 0)
+        + if Option.is_none initial.uncompressed_size then 8 else 0
+      in
+      let offset =
+        match init_offset with
+        | Some _ as x -> x
+        | None when len >= needed + 8 -> Some (parse_le_uint64 data ~offset:needed)
+        | None -> None
+      in
+
+      match initial with
+      | { compressed_size = Some compressed_size; uncompressed_size = Some uncompressed_size; crc } ->
+        { compressed_size; uncompressed_size; crc; offset }
+      | { compressed_size = Some compressed_size; uncompressed_size = None; crc } when len >= 8 ->
+        { compressed_size; uncompressed_size = parse_le_uint64 data; crc; offset }
+      | { compressed_size = None; uncompressed_size = Some uncompressed_size; crc } when len >= 8 ->
+        { compressed_size = parse_le_uint64 data; uncompressed_size; crc; offset }
+      | { compressed_size = None; uncompressed_size = None; crc } when len >= 16 ->
+        {
+          uncompressed_size = parse_le_uint64 data;
+          compressed_size = parse_le_uint64 ~offset:8 data;
+          crc;
+          offset;
+        }
+      | _ -> failwithf "SZXX: Corrupted file. Unexpected length of ZIP64 extra field data: %d" len () )
+end
+
+module Magic = struct
+  let start_local_header = "PK\003\004"
+
+  let end_bounded_file = "PK\007\008"
+
+  let start_cd_header = "PK\001\002"
+
+  let start_eocd = "PK\005\006"
+
+  let start_eocd64 = "PK\006\006"
+
+  let start_eocd64_locator = "PK\006\007"
+end
+
+let parse_entry =
+  let parser =
+    let+ version_needed = string Magic.start_local_header *> Parsers.version_needed
+    and+ flags, methd = Parsers.flags_methd_parser
+    and+ initial_descriptor = advance 4 *> Parsers.parse_initial_descriptor
+    and+ filename, extra_fields =
+      let* filename_len = LE.any_uint16 in
+      let* extra_fields_len = LE.any_uint16 in
+      let+ filename = take filename_len
+      and+ extra_fields = Parsers.extra_fields_parser [] extra_fields_len in
+      filename, extra_fields
     in
-    let+ version_needed =
-      LE.any_uint16 >>| function
-      | 20 -> Zip_2_0
-      | 45 -> Zip_4_5
-      | x -> failwithf "SZXX: Corrupted file. Invalid ZIP version: %d" x ()
-    and+ flags, methd =
-      flags_methd_parser
-      <* LE.any_uint16 (* last modified time *)
-      <* LE.any_uint16 (* last modified date *)
-    and+ descriptor = parse_descriptor
-    and+ filename, extra_fields = dynamic_len_fields_parser in
     let descriptor =
-      match version_needed with
-      | Zip_2_0 -> descriptor
-      | Zip_4_5 ->
-        Option.value_exn ~message:"Missing ZIP64 extra field"
-          (get_zip64_descriptor ~crc:descriptor.crc extra_fields)
+      Parsers.make_descriptor ~init_offset:None version_needed extra_fields initial_descriptor
     in
     {
       version_needed;
@@ -355,10 +403,41 @@ let parse_entry =
       extra_fields;
     }
   in
-  entry_parser <* commit
+  parser <* commit
+
+let parse_cd_entry =
+  let parser =
+    let* version_needed = string Magic.start_cd_header *> advance 2 *> Parsers.version_needed in
+    let* flags, methd = Parsers.flags_methd_parser in
+    let* initial_descriptor = advance 4 *> Parsers.parse_initial_descriptor in
+    let+ descriptor, filename, extra_fields =
+      let* filename_len = LE.any_uint16 in
+      let* extra_fields_len = LE.any_uint16 in
+      let* comment_len = LE.any_uint16 in
+      let+ offset = advance 8 *> Parsers.parse_initial_offset
+      and+ filename = take filename_len
+      and+ extra_fields = Parsers.extra_fields_parser [] extra_fields_len <* advance comment_len in
+      let descriptor =
+        Parsers.make_descriptor ~init_offset:offset version_needed extra_fields initial_descriptor
+      in
+      descriptor, filename, extra_fields
+    in
+    {
+      version_needed;
+      flags;
+      trailing_descriptor_present =
+        ( flags land 0x008 <> 0
+        || Int64.(descriptor.compressed_size = 0L)
+        || Int64.(descriptor.uncompressed_size = 0L) );
+      methd;
+      descriptor;
+      filename;
+      extra_fields;
+    }
+  in
+  parser <* commit
 
 let parse_one cb =
-  let local_file_header_signature = string "PK\003\004" in
   let* entry = parse_entry in
   let reader ~buffer_size (action : 'a Action.t) =
     let Mode.{ flush; complete } =
@@ -379,7 +458,7 @@ let parse_one cb =
     in
     let file_reader =
       if Int64.(entry.descriptor.compressed_size = 0L) || Int64.(entry.descriptor.uncompressed_size = 0L)
-      then bounded_file_reader ~slice_size:Int.(2 ** 11) ~pattern:"PK\007\008"
+      then bounded_file_reader ~slice_size:Int.(2 ** 11) ~pattern:Magic.end_bounded_file
       else fixed_size_reader (Int64.to_int_exn zipped_length)
     in
     file_reader storage_method >>| complete
@@ -396,7 +475,11 @@ let parse_one cb =
         data_size_crc, entry
       | true ->
         let+ data_size_crc = reader ~buffer_size:slice_size action
-        and+ descriptor = option () local_file_header_signature *> parse_descriptor in
+        and+ initial_descriptor = Parsers.parse_initial_descriptor in
+        let descriptor =
+          Parsers.make_descriptor ~init_offset:None entry.version_needed entry.extra_fields
+            initial_descriptor
+        in
         data_size_crc, { entry with descriptor }
     in
     let valid_length = Int64.(entry.descriptor.uncompressed_size = of_int size) in
@@ -411,11 +494,98 @@ let parse_one cb =
     | true, false -> failwithf "SZXX: File '%s': CRC mismatch" entry.filename ()
     | true, true -> entry, data )
 
-let parse_trailing_central_directory =
-  let* () = bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:"PK\005\006" Parsing.Storage.noop in
-  advance 18 *> end_of_input
+let parse_eocd =
+  let* offset =
+    bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:Magic.start_eocd Parsing.Storage.noop
+    *> advance 12
+    *> Parsers.parse_initial_offset
+  in
+  (* comment length (2) + comment *)
+  let+ () = LE.any_int16 >>= advance in
+  offset
+
+let parse_eocd64 =
+  let+ raw =
+    bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:Magic.start_eocd64 Parsing.Storage.noop
+    *> advance 44
+    *> take 8
+  in
+  Some (parse_le_uint64 raw)
+
+let parse_eocd64_locator =
+  let+ raw =
+    bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:Magic.start_eocd64_locator Parsing.Storage.noop
+    *> advance 4
+    *> take 8
+  in
+  Some (parse_le_uint64 raw)
+
+let read_to_eof ~slice_size ~pos file =
+  let buf = Buffer.create slice_size in
+  let cs = Cstruct.create slice_size in
+  let rec read_slice pos =
+    let len = Eio.File.pread file [ cs ] ~file_offset:pos in
+    Buffer.add_string buf (Cstruct.to_string cs ~len);
+    read_slice Optint.Int63.(add pos (of_int len))
+  in
+  try read_slice (Optint.Int63.of_int pos) with
+  | End_of_file -> Buffer.contents buf
+
+let index_entries (file : #Eio.File.ro) =
+  (* First make sure the start is valid *)
+  let () =
+    let cs = Cstruct.create (String.length Magic.start_local_header) in
+    Eio.File.pread_exact file ~file_offset:Optint.Int63.zero [ cs ];
+    if String.(Cstruct.to_string cs <> Magic.start_local_header)
+    then failwith "SZXX: Corrupted file. Invalid file marker."
+  in
+  (* Find start of central dictory *)
+  let offset =
+    let do_parse ~kind parser raw =
+      match Angstrom.parse_string ~consume:Prefix parser raw with
+      | Error msg -> failwithf "SZXX: Corrupted file. Unable to parse %s. Error: %s" kind msg ()
+      | Ok x -> x
+    in
+    let size = (Eio.File.stat file).size |> Optint.Int63.to_int in
+    let rec try_find_cd_offset rev_offset =
+      let raw = read_to_eof file ~slice_size:4096 ~pos:(max 0 (size - rev_offset)) in
+
+      let found =
+        if String.is_substring raw ~substring:Magic.start_eocd64
+        then do_parse parse_eocd64 raw ~kind:"EOCD64"
+        else if String.is_substring raw ~substring:Magic.start_eocd64_locator
+        then
+          do_parse parse_eocd64_locator raw ~kind:"EOCD64_LOC"
+          |> Option.map ~f:(fun eocd64_offset ->
+               try_find_cd_offset (size - Int64.to_int_exn eocd64_offset) )
+        else if (* Intentionally overshoot to make sure we don't miss an eocd64 or eocd64_locator *)
+                String.is_substring raw ~substring:Magic.start_cd_header
+        then do_parse parse_eocd raw ~kind:"EOCD"
+        else if rev_offset = 0
+        then failwith "SZXX: Corrupted file. No central directory."
+        else None
+      in
+      match found, rev_offset with
+      | Some x, _ -> x
+      | None, 128 -> (try_find_cd_offset [@tailcall]) 512
+      | None, 512 -> (try_find_cd_offset [@tailcall]) 4096
+      | None, _ -> (try_find_cd_offset [@tailcall]) (rev_offset * 2)
+    in
+    try_find_cd_offset 128
+  in
+  (* Parse central directory *)
+  let raw = read_to_eof ~slice_size:4096 ~pos:(Int64.to_int_exn offset) file in
+  match Angstrom.parse_string ~consume:Prefix (Angstrom.many1 parse_cd_entry) raw with
+  | Error msg -> failwith msg
+  | Ok entries -> entries
+
+let skip_over_cd_and_drain = string Magic.start_cd_header *> skip_while (fun _ -> true) *> end_of_input
 
 let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq
+
+let invalid = function
+| Ok x -> x
+| Error msg -> failwithf "SZXX: Corrupted file. Invalid ZIP structure. Error: %s" msg ()
 
 let stream_files ~sw ~feed:(read : Feed.t) cb =
   let open Eio.Std in
@@ -430,14 +600,10 @@ let stream_files ~sw ~feed:(read : Feed.t) cb =
          Eio.Stream.add stream (Some pair);
          return_none )
     >>= function
-    | None -> parse_trailing_central_directory *> return `Reached_end
+    | None -> skip_over_cd_and_drain *> return `Reached_end
     | Some () -> return `Terminated
   in
   let open Buffered in
-  let invalid = function
-    | Ok x -> x
-    | Error msg -> failwithf "SZXX: Corrupted file. Invalid ZIP structure. Error: %s" msg ()
-  in
   let rec loop = function
     | Fail _ as state -> state_to_result state |> invalid
     | Done (_, `Reached_end) -> failwith "SZXX: ZIP processing completed before reaching end of input"
@@ -462,3 +628,25 @@ let stream_files ~sw ~feed:(read : Feed.t) cb =
     done;
     `Stop_daemon );
   to_sequence stream
+
+let extract_from_index file entry action =
+  let offset =
+    match entry with
+    | { descriptor = { offset = None; _ }; _ } ->
+      failwith "SZXX: cannot extract entry because it did not come from Zip.index_contents"
+    | { descriptor = { offset = Some x; _ }; _ } -> Int64.to_int_exn x
+  in
+  let read = Feed.of_flow_seekable ~offset file in
+  let _entry, data =
+    let open Buffered in
+    let rec loop = function
+      | (Fail _ | Done _) as state -> state_to_result state |> invalid
+      | Partial feed -> (
+        match read () with
+        | `Eof ->
+          failwithf "SZXX: File truncated, reached end of ZIP before the end of '%s'" entry.filename ()
+        | chunk -> (loop [@tailcall]) (feed chunk) )
+    in
+    loop (parse (parse_one (fun _ -> action)))
+  in
+  data

@@ -22,20 +22,7 @@ let skip_many p =
     | true -> m
     | false -> return_unit )
 
-let skip_find_backtrack p =
-  fix (fun m ->
-    let found = ref None in
-    p
-    >>= (function
-          | None -> return_true
-          | Some _ as x ->
-            found := x;
-            fail_backtrack)
-    <|> return_false
-    >>= function
-    | true -> m
-    | false -> return !found )
-
+(* Runs [p] until it returns a [Some], then return that *)
 let skip_find p =
   fix (fun m ->
     let found = ref None in
@@ -45,6 +32,21 @@ let skip_find p =
           | Some _ as x ->
             found := x;
             return_false)
+    <|> return_false
+    >>= function
+    | true -> m
+    | false -> return !found )
+
+(* Same as [skip_find] but backtracks to the position right before it received [Some] *)
+let skip_find_backtrack p =
+  fix (fun m ->
+    let found = ref None in
+    p
+    >>= (function
+          | None -> return_true
+          | Some _ as x ->
+            found := x;
+            fail_backtrack)
     <|> return_false
     >>= function
     | true -> m

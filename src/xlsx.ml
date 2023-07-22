@@ -72,7 +72,7 @@ let parse_sheet ~sheet_number push =
 
 let parse_string_cell el =
   let open Xml.DOM in
-  match el |> dot "t" with
+  match dot "t" el with
   | Some { text; _ } -> text
   | None -> filter_map "r" el ~f:(dot_text "t") |> String.concat
 
@@ -83,7 +83,7 @@ module SST = struct
 
   let zip_entry_filename = "xl/sharedStrings.xml"
 
-  let from_zip ~feed =
+  let from_feed feed =
     Switch.run @@ fun sw ->
     let q = Queue.create () in
     let seen = ref false in
@@ -102,6 +102,23 @@ module SST = struct
          | _ -> () );
 
     Queue.to_array q
+
+  let from_file file =
+    match
+      Zip.index_entries file |> List.find ~f:(fun entry -> String.( = ) entry.filename zip_entry_filename)
+    with
+    | None -> [||]
+    | Some entry -> (
+      let q = Queue.create () in
+      let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
+      let action = fold_angstrom ~filter_path ~on_match () in
+      match Zip.extract_from_index file entry action with
+      | Zip.Data.Parse_many state ->
+        (match Zip.Data.parser_state_to_result state with
+        | Ok () -> ()
+        | Error msg -> failwithf "SZXX: File '%s' error: %s" entry.filename msg ());
+        Queue.to_array q
+      | _ -> assert false )
 
   let resolve_sst_index (sst : t) ~sst_index =
     let index = Int.of_string sst_index in
@@ -203,21 +220,21 @@ module Expert = struct
       match ty with
       | None
        |Some "n" ->
-        el |> dot "v" |> extract ~null location number
-      | Some "d" -> el |> dot "v" |> extract ~null location date
+        dot "v" el |> extract ~null location number
+      | Some "d" -> dot "v" el |> extract ~null location date
       | Some "str" -> (
-        match el |> dot_text "v" with
+        match dot_text "v" el with
         | None -> null
-        | Some s -> formula location s ~formula:(el |> dot_text "f" |> Option.value ~default:"") )
+        | Some s -> formula location s ~formula:(dot_text "f" el |> Option.value ~default:"") )
       | Some "e" -> (
-        match el |> dot_text "v" with
+        match dot_text "v" el with
         | None -> null
-        | Some s -> error location s ~formula:(el |> dot_text "f" |> Option.value ~default:"") )
+        | Some s -> error location s ~formula:(dot_text "f" el |> Option.value ~default:"") )
       | Some "inlineStr" -> (
         match dot "is" el with
         | None -> null
         | Some el -> string location (parse_string_cell el) )
-      | Some "b" -> el |> dot "v" |> extract ~null location boolean
+      | Some "b" -> dot "v" el |> extract ~null location boolean
       | Some t ->
         failwithf "Unknown data type: %s. Please report this bug. %s" t
           (sexp_of_element el |> Sexp.to_string)
@@ -226,7 +243,7 @@ module Expert = struct
     let extract_cell_sst sst cell_parser location el =
       match Xml.DOM.get_attr el.attrs "t" with
       | Some "s" -> (
-        match el |> dot "v" with
+        match dot "v" el with
         | None -> cell_parser.null
         | Some { text = sst_index; _ } -> (
           match SST.resolve_sst_index sst ~sst_index with
@@ -237,7 +254,7 @@ module Expert = struct
     let extract_cell_status cell_parser location el =
       match Xml.DOM.get_attr el.attrs "t" with
       | Some "s" -> (
-        match el |> dot "v" with
+        match dot "v" el with
         | None -> Available cell_parser.null
         | Some { text = sst_index; _ } -> Delayed { location; sst_index } )
       | ty -> Available (extract_cell_base cell_parser location el ty)
@@ -294,17 +311,14 @@ let make_finalizer ~sw stream () =
 
 let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq
 
-let stream_rows_double_pass ?filter_sheets ~sw src cell_parser =
-  let sst =
-    let feed = Feed.of_flow_seekable src in
-    SST.from_zip ~feed
-  in
+let stream_rows_double_pass ?filter_sheets ~sw file cell_parser =
+  let sst = SST.from_file file in
   let stream = Eio.Stream.create 0 in
   let push x = Eio.Stream.add stream (Some (Expert.parse_row_with_sst sst cell_parser x)) in
   let finalize = make_finalizer ~sw stream in
 
   let _sst_p =
-    let feed = Feed.of_flow src in
+    let feed = Feed.of_flow file in
     process_file ?filter_sheets ~skip_sst:true ~sw ~feed push finalize
   in
   to_sequence stream
@@ -314,7 +328,7 @@ type status =
   | Overflowed
   | Got_SST of SST.t
 
-let with_minimal_buffering ?max_buffering ?filter ~parse stream sst_p =
+let with_minimal_buffering ?max_buffering ?filter cell_parser stream sst_p =
   let q = Queue.create ?capacity:max_buffering () in
   let highwater =
     match max_buffering with
@@ -348,7 +362,9 @@ let with_minimal_buffering ?max_buffering ?filter ~parse stream sst_p =
   match status with
   | All_buffered ->
     let sst = Promise.await_exn sst_p in
-    Seq.of_dispenser (fun () -> Queue.dequeue q |> Option.map ~f:(parse ~sst)) |> Sequence.of_seq
+    Seq.of_dispenser (fun () ->
+      Queue.dequeue q |> Option.map ~f:(Expert.parse_row_with_sst sst cell_parser) )
+    |> Sequence.of_seq
   | Overflowed ->
     failwithf "SZXX: stream_rows_single_pass max_buffering exceeded %d."
       (Option.value max_buffering ~default:Int.max_value)
@@ -356,15 +372,18 @@ let with_minimal_buffering ?max_buffering ?filter ~parse stream sst_p =
   | Got_SST sst ->
     let seq2 =
       match filter with
-      | None -> Sequence.map seq ~f:(parse ~sst)
+      | None -> Sequence.map seq ~f:(Expert.parse_row_with_sst sst cell_parser)
       | Some filter ->
-        Sequence.filter_map seq ~f:(fun raw -> if filter raw then Some (parse ~sst raw) else None)
+        Sequence.filter_map seq ~f:(fun raw ->
+          if filter raw then Some (Expert.parse_row_with_sst sst cell_parser raw) else None )
     in
     if Queue.is_empty q
     then seq2
     else (
       let seq1 =
-        Seq.of_dispenser (fun () -> Queue.dequeue q |> Option.map ~f:(parse ~sst)) |> Sequence.of_seq
+        Seq.of_dispenser (fun () ->
+          Queue.dequeue q |> Option.map ~f:(Expert.parse_row_with_sst sst cell_parser) )
+        |> Sequence.of_seq
       in
       Sequence.append seq1 seq2 )
 
@@ -375,8 +394,7 @@ let stream_rows_single_pass ?max_buffering ?filter ?filter_sheets ~sw ~feed cell
 
   let sst_p = process_file ?filter_sheets ~skip_sst:false ~sw ~feed push finalize in
 
-  let parse ~sst row = Expert.parse_row_with_sst sst cell_parser row in
-  with_minimal_buffering ?max_buffering ?filter ~parse stream sst_p
+  with_minimal_buffering ?max_buffering ?filter cell_parser stream sst_p
 
 let unescape = Xml.DOM.unescape
 

@@ -30,8 +30,8 @@ module DOM : sig
   (** [el |> filter_map "row" ~f] returns all filtered [f <row>] children of element [el] *)
   val filter_map : string -> f:(element -> 'a option) -> element -> 'a list
 
-  (** [el |> at "3"] returns the nth (0-based indexing) immediate child of element [el]. The first argument is a string. *)
-  val at : string -> element -> element option
+  (** [el |> at 3] returns the nth (0-based indexing) immediate child of element [el]. *)
+  val at : int -> element -> element option
 
   (** [get el [dot "abc"; dot "def"]] is equivalent to [el |> dot "abc" |> Option.bind ~f:(dot "def")]
       Convenience function to chain multiple [dot] and [at] calls to access nested elements. *)

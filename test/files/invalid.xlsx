@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="eng">
+  <head>
+    clear head   text
+    <meta charset="utf-8">X
+    <link rel="stylesheet" href="/assets/css/main.css">
+    <meta http-equiv="x-ua-compatible" content="ie=edge">
+    some lost text
+    <meta name="description" content="">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+    <link rel="stylesheet" href="/assets/css/main.css">
+    <title>Group Income</title>
+    back to the top
+    <!--<welp>welpo</welp>-->
+  </head>
+  <head2 xml:space="preserve">
+    clear head   text
+    <link rel="stylesheet" href="/assets/css/main.css">
+    <meta charset="utf-8">
+    <meta http-equiv=x-ua-compatible content="ie=edge">
+    some lost text
+    <meta name="description" content="">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0">
+    <link rel="stylesheet" href="/assets/css/main.css">
+    <title>Group Income</title>
+    back to the top
+  </head2>
+  <body scoped>
+    <div>
+      <h1>BOO!</h1>
+    </div>
+  </body>
+</html>

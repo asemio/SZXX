@@ -1,5 +1,3 @@
-let flags = Unix.[ O_RDONLY; O_NONBLOCK ]
-
 open! Core
 open Eio.Std
 
@@ -51,6 +49,42 @@ let readme_example env filename () =
     | Zip.Data.String contents -> save_jpg ~filename:entry.filename contents
     | _ -> () )
 
+let index_entries env filename () =
+  let zip_path = get_file_path filename in
+  let json_path = get_file_path (sprintf "%s.contents.json" filename) in
+  let against = Eio.Path.(load (Eio.Stdenv.fs env / json_path)) |> Yojson.Safe.from_string in
+  let open SZXX in
+  Eio.Path.(with_open_in (Eio.Stdenv.fs env / zip_path)) @@ fun file ->
+  let parsed =
+    let ll =
+      Zip.index_entries file
+      |> List.map ~f:(fun entry ->
+           `List
+             [
+               `String entry.filename;
+               Option.value_map entry.descriptor.offset ~default:`Null ~f:(fun x ->
+                 `Float (Int64.to_float x) );
+             ] )
+    in
+    `Assoc [ "data", `List ll ]
+  in
+  Json_diff.check parsed against
+
+let extract_contents env filename ~entry_name () =
+  let zip_path = get_file_path filename in
+  let open SZXX in
+  Eio.Path.(with_open_in (Eio.Stdenv.fs env / zip_path)) @@ fun file ->
+  let entry =
+    Zip.index_entries file |> List.find_exn ~f:(fun entry -> String.(entry.filename = entry_name))
+  in
+  let folder _entry chunk init = String.fold chunk ~init ~f:(fun acc c -> acc + Char.to_int c) in
+  let checksum =
+    match Zip.extract_from_index file entry (Zip.Action.Fold_string { init = 0; f = folder }) with
+    | Zip.Data.Fold_string x -> x
+    | _ -> assert false
+  in
+  if checksum <> 26819507 then failwithf "checksum: %d <> 26819507" checksum ()
+
 let corrupted env filename () =
   try
     readme_example env filename ();
@@ -66,6 +100,12 @@ let () =
         [
           "financial.xlsx", `Quick, fold env "financial.xlsx" "chunks.json";
           "Readme example", `Quick, readme_example env "financial.xlsx";
+          "Index (2.0)", `Quick, index_entries env "financial.xlsx";
+          "Index (hybrid)", `Quick, index_entries env "hybrid.xlsx";
+          "Index (4.5)", `Quick, index_entries env "zip64.zip";
+          ( "Extract from index",
+            `Quick,
+            extract_contents env "financial.xlsx" ~entry_name:"xl/worksheets/sheet1.xml" );
           "Corrupted", `Quick, corrupted env "chunks.json";
         ] );
     ]
