@@ -4,7 +4,6 @@
   (libraries
     core
     angstrom
-    checkseum.ocaml
     decompress.de
     eio_main
   )

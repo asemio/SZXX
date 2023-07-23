@@ -94,7 +94,7 @@ let extract_sst env xlsx_path =
   let seq =
     Zip.stream_files ~sw ~feed:(SZXX.Feed.of_flow src) (function
       | { filename = "xl/sharedStrings.xml"; _ } -> Zip.Action.String
-      | _ -> Zip.Action.Skip )
+      | _ -> Zip.Action.Fast_skip )
   in
   Sequence.iter seq ~f:(function
     | _, Zip.Data.String s -> Eio.Flow.copy_string s sink
@@ -153,7 +153,7 @@ let count_types env xlsx_path =
         | Delayed _ -> incr ss );
       false )
   in
-  Sequence.iter seq ~f:(fun _ -> ());
+  Sequence.iter seq ~f:(fun _ -> assert false);
   Eio.Flow.copy_string
     (sprintf
        "%s\nstring: %d\nshared_string: %d\nformula: %d\nerror: %d\nboolean: %d\nnumber: %d\ndate: %d\n"
@@ -214,7 +214,7 @@ let count_tokens env xlsx_path =
     Zip.stream_files ~sw ~feed:(SZXX.Feed.of_flow src) (function
       | { filename = "xl/sharedStrings.xml"; _ } ->
         Zip.Action.Parse Angstrom.(SZXX__Parsing.skip_many (Xml.SAX.parser >>| on_parse))
-      | _ -> Zip.Action.Skip )
+      | _ -> Zip.Action.Fast_skip )
   in
   Sequence.iter files ~f:(function
     | _, Zip.Data.Parse state -> Zip.Data.parser_state_to_result state |> Result.ok_or_failwith
@@ -237,16 +237,20 @@ let index env xlsx_path =
 
 let () =
   Eio_main.run @@ fun env ->
-  Sys.get_argv () |> function
-  | [| _; "cat"; file |] -> read env file
-  | [| _; "extract_sst"; file |] -> extract_sst env file
-  | [| _; "count"; file |] -> count env file
-  | [| _; "count2"; file |] -> count2 env file
-  | [| _; "length"; file |] -> length env file
-  | [| _; "show_json"; file |] -> show_json env file
-  | [| _; "show_json2"; file |] -> show_json_double_pass env file
-  | [| _; "count_types"; file |] -> count_types env file
-  | [| _; "count_length"; file |] -> count_total_string_length env file
-  | [| _; "count_tokens"; file |] -> count_tokens env file
-  | [| _; "index"; file |] -> index env file
-  | _ -> failwith "Invalid arguments"
+  (* try/with for afl-fuzz *)
+  try
+    Sys.get_argv () |> function
+    | [| _; "cat"; file |] -> read env file
+    | [| _; "extract_sst"; file |] -> extract_sst env file
+    | [| _; "count"; file |] -> count env file
+    | [| _; "count2"; file |] -> count2 env file
+    | [| _; "length"; file |] -> length env file
+    | [| _; "show_json"; file |] -> show_json env file
+    | [| _; "show_json2"; file |] -> show_json_double_pass env file
+    | [| _; "count_types"; file |] -> count_types env file
+    | [| _; "count_length"; file |] -> count_total_string_length env file
+    | [| _; "count_tokens"; file |] -> count_tokens env file
+    | [| _; "index"; file |] -> index env file
+    | _ -> failwith "Invalid arguments"
+  with
+  | exn -> Eio.traceln !"%{Exn}" exn

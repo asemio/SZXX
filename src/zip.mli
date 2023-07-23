@@ -34,12 +34,14 @@ type entry = {
   descriptor: descriptor;
   filename: string;
   extra_fields: extra_field list;
+  comment: string;
 }
 [@@deriving sexp_of, compare, equal]
 
 module Action : sig
   type 'a t =
-    | Skip  (** Skip over the compressed bytes without attempting to decompress them *)
+    | Skip  (** Skip the compressed bytes but still validate the file's integrity *)
+    | Fast_skip  (** Skip over the compressed bytes without attempting to decompress or validate them *)
     | String  (** Collect the whole decompressed file into a single string *)
     | Bigstring  (** Collect the whole decompressed file into a single bigstring *)
     | Fold_string of {
@@ -88,6 +90,7 @@ module Data : sig
 
   type 'a t =
     | Skip
+    | Fast_skip
     | String of string
     | Bigstring of Bigstring.t
     | Fold_string of 'a
@@ -110,7 +113,8 @@ end
     [callback]: A function called on every file found within the ZIP archive.
     You must choose an Action ([SZXX.Zip.Action.t]) to perform over each file encountered within the ZIP archive.
 
-    Return [Action.Skip] to skip over the compressed bytes of this file without attempting to decompress them.
+    Return [Action.Skip] to skip over the compressed bytes of this file without attempting to decompress them. The file's integrity is still validated as usual.
+    Return [Action.Fast_skip] to skip over the compressed bytes without attempting to decompress or validate them
     Return [Action.String] to collect the whole decompressed file into a single string.
     Return [Action.Bigstring] to collect the whole decompressed file into a single bigstring. More efficient than [Action.String] if you don't need to convert the result into a string.
     Return [Action.Fold_string] to fold this file into a final state, in string chunks of ~8192 bytes.

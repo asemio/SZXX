@@ -8,6 +8,8 @@ description: """
 SZXX is a streaming, non-seeking and efficient XLSX parser built from ground up for low, constant memory usage.
 SZXX is able to output XLSX rows while a file is being read from the file descriptor without buffering any part of the file.
 It can also stream data out of ZIP and XML files without buffering.
+
+Assumes a 64-bit architecture, large files (>4Gb) may not work on 32-bit systems.
 """
 license: "MIT"
 tags: ["Stream" "ZIP" "XML" "XLSX"]

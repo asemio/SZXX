@@ -3,7 +3,7 @@
 _**S**treaming **Z**IP **X**ML **X**LSX_
 
 SZXX is an efficient streaming parser built from the ground up for very low and constant memory usage.
-It can be used to stream data out of ZIP, XML, and XLSX files.
+It can be used to stream data out of ZIP, XML, and XLSX. It support both files and streams (like HTTP).
 
 There are 3 independent modules. Skip to the one appropriate for your use case.
 - [SZXX.Xlsx](#szxxxlsx)
@@ -13,6 +13,8 @@ There are 3 independent modules. Skip to the one appropriate for your use case.
 ```sh
 opam install SZXX
 ```
+[FAQ](#faq)
+
 **SZXX v4** replaces Lwt with Eio. See the [release page](https://github.com/asemio/SZXX/releases/tag/4.0.0) to upgrade from v3.
 
 ## SZXX.Xlsx
@@ -433,7 +435,7 @@ let unzip_and_save_jpgs zip_path =
       Zip.Action.String
     | _ ->
       (* All other files: skip/ignore them *)
-      Zip.Action.Skip
+      Zip.Action.Fast_skip
   in
 
   let seq = Zip.stream_files ~sw ~feed:(Feed.of_flow file) callback in
@@ -451,6 +453,9 @@ SZXX will call `callback` for each file it encounters within the ZIP archive. Yo
 #### Actions:
 - `Action.Skip`
   - Skip over the compressed bytes of this file without attempting to decompress them.
+  - It will still validate the file's integrity as usual
+- `Action.Fast_skip`
+  - Skip over the compressed bytes without attempting to decompress or validate them
 - `Action.String`
   - Collect the whole decompressed file into a single string.
 - `Action.Bigstring`
@@ -554,13 +559,54 @@ See [Actions](#actions) for the meaning of `Zip.Action.*` and `Zip.Data.*`
 #### Returns:
 A `Zip.Data.t` value that matches your `action` argument.
 
-## Performance
+## FAQ
 
-Is it fast?
+### Are there any performance tricks?
+
+Use flambda. Install the OPAM package named `ocaml-option-flambda` and add the following to your `dune` `(executable)`:
+```lisp
+(ocamlopt_flags -O3)
+```
+
+### Can I run it on my platform?
+
+SZXX assumes a 64-bit CPU architecture.
+
+It will probably work on 32-bit as well as long as the ZIP and XLSX files are small (<2Gb per zipped file or sheet).
+
+Please try it and report back.
+
+### Does it work on Windows?
+
+Maybe. Probably. It depends on [Eio's level of Windows support](https://github.com/ocaml-multicore/eio/issues/125). You'll probably need OCaml 5.1 too.
+
+### Does it work in the browser?
+
+[Version 3 worked but needed a special fork of angstrom](https://github.com/asemio/SZXX/tree/f0e35f34298e03fa1b7a561c7d64179bd356f4ca#does-it-work-in-the-browser).
+
+Version 4 will work too once [Eio's level of JS support](https://github.com/ocaml-multicore/eio/pull/405) is sufficient. It may already be sufficient today.
+
+You will definitely need to edit your `dune` files' `(libraries)` section.
+
+Replace
+```
+SZXX
+```
+with
+```
+checkseum.ocaml ; this line has to be first
+SZXX
+```
+
+You may or may not also need the angstrom fork mentioned previously.
+
+Please give it a try and report back.
+
+### Is it fast?
 
 Streaming data is always going to be slower than deserializing a whole file into memory.
 
-However a **significant** amount of work has gone into performance optimizations.
+However a **significant** amount of work has gone into performance optimizations, to the point that SZXX is faster than some non-streaming XLSX libraries.
 
 It takes a lot of CPU work to extract each row from an XLSX file:
 - the ZIP format was designed for floppy disks and old hard drives
@@ -569,6 +615,6 @@ It takes a lot of CPU work to extract each row from an XLSX file:
 
 All in all:
 - `SZXX.Zip` and `SZXX.Xml` are fast
-- `SZXX.Xlsx` is slow compared to a CSV parser, but comparable to the average non-streaming parser that loads everything into memory. An equally optimized non-streaming parser should manage to be faster than `SZXX.Xlsx`.
+- `SZXX.Xlsx` is slower than a CSV parser, but comparable to the average non-streaming XLSX parser that loads everything into memory. An equally optimized non-streaming parser should manage to be faster than `SZXX.Xlsx`.
 
-Using 1 core on an ancient 2015 Macbook Pro, SZXX processes an enormous 28-column x 1,048,576-row XLSX file in 99 seconds **using only 11MB of memory**. The same file takes 70 seconds to open in LibreOffice using 2 cores and **1.8GB of memory**.
+Using 1 core on an ancient 2015 Macbook Pro, SZXX processes an enormous 28-column x 1,048,576-row XLSX file in 77 seconds **using only 11MB of memory**. The same file takes 70 seconds to open in LibreOffice using 2 cores and **1.8GB of memory**.

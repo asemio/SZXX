@@ -92,8 +92,8 @@ module SST = struct
         seen := true;
         let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
         fold_angstrom ~filter_path ~on_match ()
-      | _ when !seen -> Zip.Action.Terminate
-      | _ -> Zip.Action.Skip )
+      | _ when !seen -> Terminate
+      | _ -> Fast_skip )
     |> Sequence.iter ~f:(function
          | Zip.{ filename; _ }, Zip.Data.Parse_many state -> (
            match Zip.Data.parser_state_to_result state with
@@ -132,7 +132,7 @@ let flush_zip_seq ~sw zip_seq finalize =
   let flushed_p =
     Fiber.fork_promise ~sw (fun () ->
       Sequence.iter zip_seq ~f:(function
-        | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Skip -> Promise.resolve sst_w ()
+        | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Fast_skip -> Promise.resolve sst_w ()
         | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Parse_many state -> (
           match Zip.Data.parser_state_to_result state with
           | Ok () -> Promise.resolve sst_w ()
@@ -153,8 +153,7 @@ let process_file ?filter_sheets ~skip_sst ~sw ~feed push finalize =
   let q = Queue.create () in
   let zip_seq =
     Zip.stream_files ~sw ~feed (function
-      | { filename = "xl/workbook.xml"; _ } -> Skip
-      | { filename = "xl/sharedStrings.xml"; _ } when skip_sst -> Skip
+      | { filename = "xl/sharedStrings.xml"; _ } when skip_sst -> Fast_skip
       | { filename = "xl/sharedStrings.xml"; _ } ->
         let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
         fold_angstrom ~filter_path:SST.filter_path ~on_match ()
@@ -167,7 +166,7 @@ let process_file ?filter_sheets ~skip_sst ~sw ~feed push finalize =
              Option.value_map filter_sheets ~default:true ~f:(fun f ->
                f ~sheet_id ~raw_size:(Byte_units.of_bytes_int64_exn uncompressed_size) ) )
         >>| (fun sheet_number -> parse_sheet ~sheet_number push)
-        |> Option.value ~default:Zip.Action.Skip )
+        |> Option.value ~default:Fast_skip )
   in
   let sst_p, flushed_p = flush_zip_seq ~sw zip_seq finalize in
   Fiber.fork_daemon ~sw (fun () ->

@@ -38,7 +38,7 @@ let readme_example env filename () =
     | ({ filename; _ } : Zip.entry) when String.is_suffix (String.lowercase filename) ~suffix:".jpg" ->
       (* Here we'll simply extract each .jpg file into a string *)
       Zip.Action.String
-    | _ -> Zip.Action.Skip
+    | _ -> Zip.Action.Fast_skip
   in
   let seq = Zip.stream_files ~sw ~feed:(Feed.of_flow file) callback in
 

@@ -35,12 +35,14 @@ type entry = {
   descriptor: descriptor;
   filename: string;
   extra_fields: extra_field list;
+  comment: string;
 }
 [@@deriving sexp_of, compare, equal]
 
 module Action = struct
   type 'a t =
     | Skip
+    | Fast_skip
     | String
     | Bigstring
     | Fold_string of {
@@ -78,6 +80,7 @@ module Data = struct
 
   type 'a t =
     | Skip
+    | Fast_skip
     | String of string
     | Bigstring of Bigstring.t
     | Fold_string of 'a
@@ -146,6 +149,11 @@ module Mode = struct
       crc := Checkseum.Crc32.digest_bigstring bs off len !crc
     in
     let complete () = Data.Skip, !bytes_processed, !crc in
+    { flush; complete }
+
+  let fast_skip () =
+    let flush _bs ~off:_ ~len:_ = () in
+    let complete () = Data.Fast_skip, 0, Optint.zero in
     { flush; complete }
 
   let string ~buffer_size =
@@ -300,6 +308,10 @@ module Parsers = struct
     let* data = take size in
     (extra_fields_parser [@tailcall]) ({ id; size; data } :: acc) (left - (size + 4))
 
+  let parse_initial_offset =
+    let+ offset = LE.any_int32 in
+    Option.some_if Int32.(offset <> -1l) (Int32.to_int64 offset)
+
   type initial_descriptor = {
     crc: Int32.t;
     compressed_size: Int64.t option;
@@ -314,11 +326,6 @@ module Parsers = struct
     let uncompressed_size = if Int32.(r_size = -1l) then None else Some (Int32.to_int64 r_size) in
     { crc; compressed_size; uncompressed_size }
 
-  let parse_initial_offset =
-    let+ offset = LE.any_int32 in
-    if Int32.(offset = -1l) then print_endline (sprintf !">>> %{Source_code_position}" [%here]);
-    Option.some_if Int32.(offset <> -1l) (Int32.to_int64 offset)
-
   let make_descriptor ~init_offset version extra_fields initial =
     match version with
     | Zip_2_0 -> (
@@ -327,6 +334,7 @@ module Parsers = struct
         { crc; compressed_size; uncompressed_size; offset = init_offset }
       | _ -> failwith "SZXX: Corrupted file. Invalid file lengths for Zip2.0" )
     | Zip_4_5 -> (
+      (* Section 4.5.3 of https://pkware.cachefly.net/webdocs/APPNOTE/APPNOTE-6.3.9.TXT *)
       let data =
         match List.find extra_fields ~f:(fun { id; _ } -> id = 1) with
         | None -> ""
@@ -401,6 +409,7 @@ let parse_entry =
       descriptor;
       filename;
       extra_fields;
+      comment = "";
     }
   in
   parser <* commit
@@ -410,17 +419,18 @@ let parse_cd_entry =
     let* version_needed = string Magic.start_cd_header *> advance 2 *> Parsers.version_needed in
     let* flags, methd = Parsers.flags_methd_parser in
     let* initial_descriptor = advance 4 *> Parsers.parse_initial_descriptor in
-    let+ descriptor, filename, extra_fields =
+    let+ descriptor, filename, extra_fields, comment =
       let* filename_len = LE.any_uint16 in
       let* extra_fields_len = LE.any_uint16 in
       let* comment_len = LE.any_uint16 in
       let+ offset = advance 8 *> Parsers.parse_initial_offset
       and+ filename = take filename_len
-      and+ extra_fields = Parsers.extra_fields_parser [] extra_fields_len <* advance comment_len in
+      and+ extra_fields = Parsers.extra_fields_parser [] extra_fields_len
+      and+ comment = take comment_len in
       let descriptor =
         Parsers.make_descriptor ~init_offset:offset version_needed extra_fields initial_descriptor
       in
-      descriptor, filename, extra_fields
+      descriptor, filename, extra_fields, comment
     in
     {
       version_needed;
@@ -433,16 +443,18 @@ let parse_cd_entry =
       descriptor;
       filename;
       extra_fields;
+      comment;
     }
   in
   parser <* commit
 
 let parse_one cb =
   let* entry = parse_entry in
-  let reader ~buffer_size (action : 'a Action.t) =
+  let reader ~buffer_size action =
     let Mode.{ flush; complete } =
       match action with
       | Action.Skip -> Mode.skip ()
+      | Action.Fast_skip -> Mode.fast_skip ()
       | Action.String -> Mode.string ~buffer_size
       | Action.Bigstring -> Mode.bigstring ~buffer_size
       | Action.Fold_string { init; f } -> Mode.fold_string ~init ~f entry
@@ -452,9 +464,10 @@ let parse_one cb =
       | Action.Terminate -> assert false
     in
     let storage_method, zipped_length =
-      match entry.methd with
-      | Stored -> Storage.stored flush, entry.descriptor.uncompressed_size
-      | Deflated -> Storage.deflated flush, entry.descriptor.compressed_size
+      match entry.methd, action with
+      | Deflated, Fast_skip -> Storage.stored flush, entry.descriptor.compressed_size
+      | Deflated, _ -> Storage.deflated flush, entry.descriptor.compressed_size
+      | Stored, _ -> Storage.stored flush, entry.descriptor.uncompressed_size
     in
     let file_reader =
       if Int64.(entry.descriptor.compressed_size = 0L) || Int64.(entry.descriptor.uncompressed_size = 0L)
@@ -484,15 +497,67 @@ let parse_one cb =
     in
     let valid_length = Int64.(entry.descriptor.uncompressed_size = of_int size) in
     let valid_crc = Int32.(entry.descriptor.crc = Optint.to_int32 crc) in
-    match valid_length, valid_crc with
-    | false, false ->
+    match data, valid_length, valid_crc with
+    | Fast_skip, _, _
+     |_, true, true ->
+      entry, data
+    | _, false, false ->
       failwithf "SZXX: File '%s': Size and CRC mismatch: %d bytes but expected %Ld bytes" entry.filename
         size entry.descriptor.uncompressed_size ()
-    | false, true ->
+    | _, false, true ->
       failwithf "SZXX: File '%s': Size mismatch: %d bytes but expected %Ld bytes" entry.filename size
         entry.descriptor.uncompressed_size ()
-    | true, false -> failwithf "SZXX: File '%s': CRC mismatch" entry.filename ()
-    | true, true -> entry, data )
+    | _, true, false -> failwithf "SZXX: File '%s': CRC mismatch" entry.filename () )
+
+let skip_over_cd_and_drain = string Magic.start_cd_header *> skip_while (fun _ -> true) *> end_of_input
+
+let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq
+
+let invalid = function
+| Ok x -> x
+| Error msg -> failwithf "SZXX: Corrupted file. Invalid ZIP structure. Error: %s" msg ()
+
+let stream_files ~sw ~feed:(read : Feed.t) cb =
+  let open Eio.Std in
+  let stream = Eio.Stream.create 0 in
+  let parser =
+    skip_find
+      (parse_one cb >>= function
+       | (_, Terminate) as pair ->
+         Eio.Stream.add stream (Some pair);
+         return (Some ())
+       | pair ->
+         Eio.Stream.add stream (Some pair);
+         return_none )
+    >>= function
+    | None -> skip_over_cd_and_drain *> return `Reached_end
+    | Some () -> return `Terminated
+  in
+  let open Buffered in
+  let rec loop = function
+    | Fail _ as state -> state_to_result state |> invalid
+    | Done (_, `Reached_end) -> failwith "SZXX: ZIP processing completed before reaching end of input"
+    | Done (_, `Terminated) -> ()
+    | Partial feed -> (
+      match read () with
+      | `Eof as eof -> (
+        match feed eof with
+        | Fail _ as state -> state_to_result state |> invalid
+        | _ -> () )
+      | chunk -> (loop [@tailcall]) (feed chunk) )
+  in
+  Fiber.fork_daemon ~sw (fun () ->
+    loop (parse parser);
+    (* Keep adding [None] in the background to allow the user to use
+       the Sequence again even after it's been iterated over. It doesn't
+       memoize the elements, but it does allow [Sequence.is_empty] to return [true]
+       without deadlocking, and [Sequence.fold] to return its initial value
+       without deadlocking, etc. *)
+    while true do
+      Eio.Stream.add stream None
+    done;
+    `Stop_daemon );
+  to_sequence stream
 
 let parse_eocd =
   let* offset =
@@ -578,56 +643,6 @@ let index_entries (file : #Eio.File.ro) =
   match Angstrom.parse_string ~consume:Prefix (Angstrom.many1 parse_cd_entry) raw with
   | Error msg -> failwith msg
   | Ok entries -> entries
-
-let skip_over_cd_and_drain = string Magic.start_cd_header *> skip_while (fun _ -> true) *> end_of_input
-
-let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq
-
-let invalid = function
-| Ok x -> x
-| Error msg -> failwithf "SZXX: Corrupted file. Invalid ZIP structure. Error: %s" msg ()
-
-let stream_files ~sw ~feed:(read : Feed.t) cb =
-  let open Eio.Std in
-  let stream = Eio.Stream.create 0 in
-  let parser =
-    skip_find
-      (parse_one cb >>= function
-       | (_, Terminate) as pair ->
-         Eio.Stream.add stream (Some pair);
-         return (Some ())
-       | pair ->
-         Eio.Stream.add stream (Some pair);
-         return_none )
-    >>= function
-    | None -> skip_over_cd_and_drain *> return `Reached_end
-    | Some () -> return `Terminated
-  in
-  let open Buffered in
-  let rec loop = function
-    | Fail _ as state -> state_to_result state |> invalid
-    | Done (_, `Reached_end) -> failwith "SZXX: ZIP processing completed before reaching end of input"
-    | Done (_, `Terminated) -> ()
-    | Partial feed -> (
-      match read () with
-      | `Eof as eof -> (
-        match feed eof with
-        | Fail _ as state -> state_to_result state |> invalid
-        | _ -> () )
-      | chunk -> (loop [@tailcall]) (feed chunk) )
-  in
-  Fiber.fork_daemon ~sw (fun () ->
-    loop (parse parser);
-    (* Keep adding [None] in the background to allow the user to use
-       the Sequence again even after it's been iterated over. It doesn't
-       memoize the elements, but it does allow [Sequence.is_empty] to return [true]
-       without deadlocking, and [Sequence.fold] to return its initial value
-       without deadlocking, etc. *)
-    while true do
-      Eio.Stream.add stream None
-    done;
-    `Stop_daemon );
-  to_sequence stream
 
 let extract_from_index file entry action =
   let offset =
