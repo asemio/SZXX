@@ -82,7 +82,6 @@ let readme_example3 env filename () =
 let single_pass env filename () =
   let xlsx_path = get_xlsx_path filename in
   let json_path = get_json_path filename in
-  let against = Eio.Path.(load (Eio.Stdenv.fs env / json_path)) |> Yojson.Safe.from_string in
   let parsed =
     Switch.run @@ fun sw ->
     let src = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / xlsx_path) in
@@ -91,7 +90,9 @@ let single_pass env filename () =
     let json = Sequence.fold seq ~init:[] ~f:(fun acc row -> `List row.data :: acc) in
 
     (* Test deadlocks: *)
-    Sequence.iter seq ~f:(fun _ -> assert false);
+    (try Sequence.iter seq ~f:(fun _ -> raise Exit) with
+    | Invalid_argument _ -> ()
+    | _ -> failwith "Unexpected exception from reusing Sequence");
 
     `Assoc [ "data", `List (List.rev json) ]
   in
@@ -99,6 +100,7 @@ let single_pass env filename () =
   (* Eio.Path.with_open_out ~create:(`Or_truncate 0o644)
      Eio.Path.((Eio.Stdenv.fs env) / json_path)
      (Eio.Flow.copy_string (Yojson.Safe.to_string parsed)); *)
+  let against = Eio.Path.(load (Eio.Stdenv.fs env / json_path)) |> Yojson.Safe.from_string in
   Json_diff.check (parsed : Yojson.Basic.t :> Yojson.Safe.t) against
 
 let double_pass env filename () =
@@ -113,13 +115,44 @@ let double_pass env filename () =
   in
 
   (* Test deadlocks: *)
-  Sequence.iter seq ~f:(fun _ -> assert false);
+  (try Sequence.iter seq ~f:(fun _ -> raise Exit) with
+  | Invalid_argument _ -> ()
+  | _ -> failwith "Unexpected exception from reusing Sequence");
 
-  let against = Eio.Path.(load (Eio.Stdenv.fs env / json_path)) |> Yojson.Safe.from_string in
   (* Eio.Path.with_open_out ~create:(`Or_truncate 0o644)
      Eio.Path.(Eio.Stdenv.fs env / json_path)
      (Eio.Flow.copy_string (Yojson.Safe.to_string parsed)); *)
+  let against = Eio.Path.(load (Eio.Stdenv.fs env / json_path)) |> Yojson.Safe.from_string in
   Json_diff.check parsed against
+
+let read_after_switch_single env filename () =
+  let xlsx_path = get_xlsx_path filename in
+  let count = ref 0 in
+  let seq =
+    Switch.run @@ fun sw ->
+    let src = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / xlsx_path) in
+    let open SZXX in
+    let filter _ =
+      incr count;
+      false
+    in
+    Xlsx.stream_rows_single_pass ~sw ~feed:(SZXX.Feed.of_flow src) ~filter Xlsx.yojson_cell_parser
+  in
+  try Sequence.iter seq ~f:(fun _ -> raise Exit) with
+  | Invalid_argument _ -> ()
+  | _ -> failwith "Unexpected exception from reusing Sequence"
+
+let read_after_switch_double env filename () =
+  let xlsx_path = get_xlsx_path filename in
+  let seq =
+    Switch.run @@ fun sw ->
+    let src = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / xlsx_path) in
+    let open SZXX in
+    Xlsx.stream_rows_double_pass ~sw src Xlsx.yojson_cell_parser
+  in
+  try Sequence.iter seq ~f:(fun _ -> raise Exit) with
+  | Invalid_argument _ -> ()
+  | _ -> failwith "Unexpected exception from reusing Sequence"
 
 let sst_from_feed env filename () =
   let open SZXX in
@@ -147,7 +180,8 @@ let buffering ~overflow ~max_buffering env filename () =
     Switch.run @@ fun sw ->
     let src = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / xlsx_path) in
     let open SZXX.Xlsx in
-    let _seq = stream_rows_single_pass ~max_buffering ~sw ~feed:(SZXX.Feed.of_flow src) extractors in
+    let seq = stream_rows_single_pass ~max_buffering ~sw ~feed:(SZXX.Feed.of_flow src) extractors in
+    Sequence.iter seq ~f:(fun _ -> ());
     raise Exit
   with
   | Failure _ when overflow -> ()
@@ -177,12 +211,14 @@ let () =
           "Readme example 1b", `Quick, readme_example1b env "financial";
           "Readme example 2", `Quick, readme_example2 env "financial";
           "Readme example 3", `Quick, readme_example3 env "financial";
+          "Read after Switch (single)", `Quick, read_after_switch_single env "financial";
+          "Read after Switch (double)", `Quick, read_after_switch_double env "financial";
           "Double pass", `Quick, double_pass env "financial";
           "Double pass (no SST)", `Quick, double_pass env "inline";
           "Buffering (overflow)", `Quick, buffering env "cols" ~max_buffering:10 ~overflow:true;
           "Buffering (fits)", `Quick, buffering env "simple" ~max_buffering:10 ~overflow:false;
           "Buffering (no SST, fits)", `Quick, buffering env "inline" ~max_buffering:10 ~overflow:false;
-          "Buffering (no SST, overflow)", `Quick, buffering env "inline" ~max_buffering:1 ~overflow:true;
+          "Buffering (no SST, overflow)", `Quick, buffering env "inline" ~max_buffering:0 ~overflow:true;
           "Corrupted (double_pass)", `Quick, corrupted env "invalid" ~f:double_pass;
           "Corrupted (sst_from_feed)", `Quick, corrupted env "invalid" ~f:sst_from_feed;
           "Corrupted (sst_from_file)", `Quick, corrupted env "invalid" ~f:sst_from_file;

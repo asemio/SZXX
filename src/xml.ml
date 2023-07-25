@@ -109,6 +109,8 @@ module DOM = struct
 
   let at i node = Option.try_with (fun () -> List.nth_exn node.children i)
 
+  let at_s s node = at (Int.of_string s) node
+
   let get (steps : (element -> element option) list) node =
     let rec loop acc = function
       | [] -> Some acc
@@ -312,6 +314,7 @@ module SAX = struct
 
     type partial = {
       tag: string;
+      tag_hash: int;
       attrs: DOM.attr_list;
       text: partial_text list;
       children: DOM.element list;
@@ -319,7 +322,8 @@ module SAX = struct
     }
     [@@deriving sexp_of, compare, equal]
 
-    let make_partial tag attrs = { tag; attrs; text = []; children = []; staged = [] }
+    let make_partial tag attrs =
+      { tag; tag_hash = [%hash: string] tag; attrs; text = []; children = []; staged = [] }
 
     let squish_into raw final acc =
       String.fold raw ~init:acc ~f:(fun acc c ->
@@ -365,127 +369,132 @@ module SAX = struct
 
       let rec folder ?(strict = true) acc (node : node) =
         match node, acc with
-        | _, Error _ -> acc
-        | Nothing, Ok _ -> acc
-        | Many ll, Ok acc -> List.fold_result ll ~init:acc ~f:(fun acc x -> folder ~strict (Ok acc) x)
-        | Prologue attrs, Ok ({ decl_attrs = None; stack = []; top = None; _ } as acc) ->
-          Ok { acc with decl_attrs = Some attrs }
-        | Prologue _, Ok _ -> Error "The prologue must located at the beginning of the file"
-        | Element_open { tag; attrs }, Ok acc ->
+        | Nothing, acc -> acc
+        | Many ll, acc -> List.fold ll ~init:acc ~f:(fun acc x -> (folder [@tailcall]) ~strict acc x)
+        | Prologue attrs, ({ decl_attrs = None; stack = []; top = None; _ } as acc) ->
+          { acc with decl_attrs = Some attrs }
+        | Prologue _, _ ->
+          failwith "SZXX: Invalid XML document. The prologue must located at the beginning of the file"
+        | Element_open { tag; attrs }, acc ->
           let partial = make_partial tag attrs in
-          Ok { acc with stack = partial :: acc.stack }
-        | Text _, Ok { stack = []; top = None; _ }
-         |Cdata _, Ok { stack = []; top = None; _ } ->
+          { acc with stack = partial :: acc.stack }
+        | Text _, { stack = []; top = None; _ }
+         |Cdata _, { stack = []; top = None; _ } ->
           acc
-        | Text _, Ok { stack = []; top = Some _; _ }
-         |Cdata _, Ok { stack = []; top = Some _; _ } ->
+        | Text _, { stack = []; top = Some _; _ }
+         |Cdata _, { stack = []; top = Some _; _ } ->
           acc
-        | Text s, Ok ({ stack = current :: rest; _ } as acc) ->
-          Ok
-            {
-              acc with
-              stack = { current with text = { raw = s; literal = false } :: current.text } :: rest;
-            }
-        | Cdata s, Ok ({ stack = current :: rest; _ } as acc) ->
-          Ok
-            {
-              acc with
-              stack = { current with text = { raw = s; literal = true } :: current.text } :: rest;
-            }
-        | Element_close tag, Ok ({ stack = current :: parent :: rest; _ } as acc)
+        | Text s, ({ stack = current :: rest; _ } as acc) ->
+          {
+            acc with
+            stack = { current with text = { raw = s; literal = false } :: current.text } :: rest;
+          }
+        | Cdata s, ({ stack = current :: rest; _ } as acc) ->
+          { acc with stack = { current with text = { raw = s; literal = true } :: current.text } :: rest }
+        | Element_close tag, ({ stack = current :: parent :: rest; _ } as acc)
           when String.( = ) tag current.tag ->
-          Ok
+          {
+            acc with
+            stack =
+              {
+                parent with
+                children = parent.staged @ (partial_to_element current :: parent.children);
+                staged = [];
+              }
+              :: rest;
+          }
+        | Element_close tag, ({ stack = [ current ]; top = None; _ } as acc)
+          when String.( = ) tag current.tag ->
+          { acc with stack = []; top = Some (partial_to_element current) }
+        | Element_close tag, { stack = current :: _ :: _; _ } when strict ->
+          failwithf "SZXX: Invalid XML document. Closing element '%s' before element '%s'" tag current.tag
+            ()
+        | (Element_close _ as tried), ({ stack = current :: parent :: rest; _ } as acc) ->
+          let acc =
             {
               acc with
               stack =
-                {
-                  parent with
-                  children = parent.staged @ (partial_to_element current :: parent.children);
-                  staged = [];
-                }
+                { current with text = []; children = [] }
+                :: {
+                     parent with
+                     text = current.text @ parent.text;
+                     staged = current.children @ parent.staged;
+                   }
                 :: rest;
             }
-        | Element_close tag, Ok ({ stack = [ current ]; top = None; _ } as acc)
-          when String.( = ) tag current.tag ->
-          Ok { acc with stack = []; top = Some (partial_to_element current) }
-        | Element_close tag, Ok { stack = current :: _ :: _; _ } when strict ->
-          Error (sprintf "Invalid document. Closing element '%s' before element '%s'" tag current.tag)
-        | (Element_close _ as tried), Ok ({ stack = current :: parent :: rest; _ } as acc) ->
-          let acc =
-            Ok
-              {
-                acc with
-                stack =
-                  { current with text = []; children = [] }
-                  :: {
-                       parent with
-                       text = current.text @ parent.text;
-                       staged = current.children @ parent.staged;
-                     }
-                  :: rest;
-              }
           in
-          folder ~strict acc (Many [ Element_close current.tag; tried ])
-        | Element_close tag, Ok _ ->
-          Error (sprintf "Invalid document. Closing tag without a matching opening tag: '%s'" tag)
+          (folder [@tailcall]) ~strict acc (Many [ Element_close current.tag; tried ])
+        | Element_close tag, _ ->
+          failwithf "SZXX: Invalid XML document. Closing tag without a matching opening tag: '%s'" tag ()
     end
 
     module Stream = struct
+      module Hash_state = struct
+        type t = Hash.state
+
+        let sexp_of_t x = [%sexp_of: int] (Hash.get_hash_value x)
+
+        let compare a b = [%compare: int] (Hash.get_hash_value a) (Hash.get_hash_value b)
+
+        let equal a b = [%equal: int] (Hash.get_hash_value a) (Hash.get_hash_value b)
+      end
+
       type state = {
         decl_attrs: DOM.attr_list option;
         stack: partial list;
-        path_stack: string list;
+        path_stack: (int * Hash_state.t * int) list;
         top: DOM.element option;
       }
       [@@deriving sexp_of, compare, equal]
 
-      let init = { decl_attrs = None; stack = []; path_stack = [ "" ]; top = None }
+      let init =
+        let hash = Hash.create () in
+        { decl_attrs = None; stack = []; path_stack = [ Hash.get_hash_value hash, hash, 0 ]; top = None }
 
-      let rec folder ~filter_path ~on_match ~strict acc (node : node) =
+      let rec folder ~filter_path ~filter_level ~on_match ~strict acc (node : node) =
         match node, acc with
-        | _, Error _ -> acc
-        | Nothing, Ok _ -> acc
-        | Many ll, Ok acc ->
-          List.fold_result ll ~init:acc ~f:(fun acc x -> folder ~filter_path ~on_match ~strict (Ok acc) x)
-        | Prologue attrs, Ok ({ decl_attrs = None; stack = []; top = None; _ } as acc) ->
-          Ok { acc with decl_attrs = Some attrs }
-        | Prologue _, Ok _ -> Error "The prologue must located at the beginning of the file"
-        | Element_open { tag; attrs }, Ok ({ path_stack = path :: _; _ } as acc) ->
+        | Nothing, acc -> acc
+        | Many ll, acc ->
+          List.fold ll ~init:acc ~f:(fun acc x ->
+            (folder [@tailcall]) ~filter_path ~filter_level ~on_match ~strict acc x )
+        | Prologue attrs, ({ decl_attrs = None; stack = []; top = None; _ } as acc) ->
+          { acc with decl_attrs = Some attrs }
+        | Prologue _, _ ->
+          failwith "SZXX: Invalid XML document. The prologue must located at the beginning of the file"
+        | Element_open { tag; attrs }, ({ stack; path_stack = (path, hash, level) :: _; _ } as acc) ->
           let partial = make_partial tag attrs in
-          Ok
-            {
-              acc with
-              stack = partial :: acc.stack;
-              path_stack = sprintf "%s %s" path tag :: acc.path_stack;
-            }
-        | Element_open _, Ok { path_stack = []; _ } ->
-          Error "Impossible case. Path stack cannot be empty. Please report this bug."
-        | Text _, Ok { stack = []; top = None; _ }
-         |Cdata _, Ok { stack = []; top = None; _ } ->
+          let frame =
+            if path = filter_path
+            then path, hash, level + 1
+            else (
+              let hash = [%hash_fold: string] hash tag in
+              Hash.get_hash_value hash, hash, level + 1 )
+          in
+          { acc with stack = partial :: stack; path_stack = frame :: acc.path_stack }
+        | Element_open _, { path_stack = []; _ } ->
+          failwith "Impossible case. Path stack cannot be empty. Please report this bug."
+        | Text _, { stack = []; top = None; _ }
+         |Cdata _, { stack = []; top = None; _ } ->
           acc
-        | Text s, Ok ({ stack = current :: rest; path_stack = path :: _; _ } as acc)
-          when String.is_prefix path ~prefix:filter_path ->
-          Ok
-            {
-              acc with
-              stack = { current with text = { raw = s; literal = false } :: current.text } :: rest;
-            }
-        | Cdata s, Ok ({ stack = current :: rest; path_stack = path :: _; _ } as acc)
-          when String.is_prefix path ~prefix:filter_path ->
-          Ok
-            {
-              acc with
-              stack = { current with text = { raw = s; literal = true } :: current.text } :: rest;
-            }
-        | Text _, Ok _
-         |Cdata _, Ok _ ->
+        | Text s, ({ stack = current :: rest; path_stack = (path, _, _) :: _; _ } as acc)
+          when path = filter_path ->
+          {
+            acc with
+            stack = { current with text = { raw = s; literal = false } :: current.text } :: rest;
+          }
+        | Cdata s, ({ stack = current :: rest; path_stack = (path, _, _) :: _; _ } as acc)
+          when path = filter_path ->
+          { acc with stack = { current with text = { raw = s; literal = true } :: current.text } :: rest }
+        | Text _, _
+         |Cdata _, _ ->
           acc
         | ( Element_close tag,
-            Ok ({ stack = current :: parent :: rest; path_stack = path :: path_rest; _ } as acc) )
+            ({ stack = current :: parent :: rest; path_stack = (path, _, level) :: path_rest; _ } as acc)
+          )
           when String.( = ) tag current.tag ->
           let parent_children =
-            match String.is_prefix path ~prefix:filter_path with
-            | true when String.length path = String.length filter_path ->
+            match path = filter_path with
+            | true when level = filter_level ->
               (* Exactly filter_path *)
               on_match (partial_to_element current);
               parent.children
@@ -494,45 +503,45 @@ module SAX = struct
               partial_to_element current :: parent.children
             | false -> parent.children
           in
-          Ok
+
+          {
+            acc with
+            stack = { parent with staged = []; children = parent.staged @ parent_children } :: rest;
+            path_stack = path_rest;
+          }
+        | Element_close tag, ({ stack = [ current ]; top = None; _ } as acc)
+          when String.( = ) tag current.tag ->
+          { acc with stack = []; top = Some (partial_to_element current) }
+        | Element_close tag, { stack = current :: _ :: _; _ } when strict ->
+          failwithf "SZXX: Invalid XML document. Closing element '%s' before element '%s'" tag current.tag
+            ()
+        | (Element_close _ as tried), ({ stack = current :: parent :: rest; _ } as acc) ->
+          let acc =
             {
               acc with
-              stack = { parent with staged = []; children = parent.staged @ parent_children } :: rest;
-              path_stack = path_rest;
+              stack =
+                { current with text = []; children = [] }
+                :: {
+                     parent with
+                     text = current.text @ parent.text;
+                     staged = current.children @ parent.staged;
+                   }
+                :: rest;
             }
-        | Element_close tag, Ok ({ stack = [ current ]; top = None; _ } as acc)
-          when String.( = ) tag current.tag ->
-          Ok { acc with stack = []; top = Some (partial_to_element current) }
-        | Element_close tag, Ok { stack = current :: _ :: _; _ } when strict ->
-          Error (sprintf "Invalid document. Closing element '%s' before element '%s'" tag current.tag)
-        | (Element_close _ as tried), Ok ({ stack = current :: parent :: rest; _ } as acc) ->
-          let acc =
-            Ok
-              {
-                acc with
-                stack =
-                  { current with text = []; children = [] }
-                  :: {
-                       parent with
-                       text = current.text @ parent.text;
-                       staged = current.children @ parent.staged;
-                     }
-                  :: rest;
-              }
           in
-          folder ~filter_path ~on_match ~strict acc (Many [ Element_close current.tag; tried ])
-        | Element_close tag, Ok _ ->
-          Error (sprintf "Invalid document. Closing tag without a matching opening tag: '%s'" tag)
+          (folder [@tailcall]) ~filter_path ~filter_level ~on_match ~strict acc
+            (Many [ Element_close current.tag; tried ])
+        | Element_close tag, _ ->
+          failwithf "SZXX: Invalid XML document. Closing tag without a matching opening tag: '%s'" tag ()
 
       let folder ~filter_path:path_list ~on_match ?(strict = true) acc node =
-        let filter_path =
-          let buf = Buffer.create 30 in
-          List.iter path_list ~f:(fun s ->
-            Buffer.add_char buf ' ';
-            Buffer.add_string buf s );
-          Buffer.contents buf
+        let filter_path, filter_level =
+          List.fold path_list
+            ~init:(Hash.create (), 0)
+            ~f:(fun (h, len) x -> [%hash_fold: string] h x, len + 1)
+          |> Tuple2.map_fst ~f:Hash.get_hash_value
         in
-        folder ~filter_path ~on_match ~strict acc (node : node)
+        folder ~filter_path ~filter_level ~on_match ~strict acc (node : node)
     end
   end
 end
@@ -578,39 +587,39 @@ let parse_feed ?parser:(node_parser = SAX.parser) ~feed:read on_parse =
   loop (parse parser)
 
 let parse_document ?parser ?strict feed =
-  let sax = ref (Ok SAX.Expert.To_DOM.init) in
+  let sax = ref SAX.Expert.To_DOM.init in
   let on_parse node = sax := SAX.Expert.To_DOM.folder ?strict !sax (unescape_text node) in
   let open Result.Monad_infix in
   parse_feed ?parser ~feed on_parse >>= fun () ->
   match !sax with
-  | Error _ as x -> x
-  | Ok { stack = []; top = Some top; decl_attrs; _ } ->
+  | { stack = []; top = Some top; decl_attrs; _ } ->
     Ok { top; decl_attrs = Option.value ~default:[] decl_attrs }
-  | Ok { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
-  | Ok { stack = [ x ]; _ } -> Error (sprintf "SZXX: Unclosed XML element: %s" x.tag)
-  | Ok { stack; _ } ->
+  | { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
+  | { stack = [ x ]; _ } -> Error (sprintf "SZXX: Unclosed XML element: %s" x.tag)
+  | { stack; _ } ->
     Error
       (sprintf "SZXX: Unclosed XML elements: %s"
          (List.map stack ~f:(fun { tag; _ } -> tag) |> String.concat ~sep:", ") )
+  | exception Failure msg -> Error msg
 
 let parse_document_from_string ?parser ?strict raw =
   let feed = Feed.of_string raw in
   parse_document ?parser ?strict feed
 
 let stream_matching_elements ?parser ?strict ~filter_path ~on_match feed =
-  let sax = ref (Ok SAX.Expert.Stream.init) in
+  let sax = ref SAX.Expert.Stream.init in
   let on_parse node =
     sax := SAX.Expert.Stream.folder ~filter_path ~on_match ?strict !sax (unescape_text node)
   in
   let open Result.Monad_infix in
   parse_feed ?parser ~feed on_parse >>= fun () ->
   match !sax with
-  | Error _ as x -> x
-  | Ok { stack = []; top = Some top; decl_attrs; _ } ->
+  | { stack = []; top = Some top; decl_attrs; _ } ->
     Ok { top; decl_attrs = Option.value ~default:[] decl_attrs }
-  | Ok { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
-  | Ok { stack = [ x ]; _ } -> Error (sprintf "SZXX: Unclosed XML element: %s" x.tag)
-  | Ok { stack; _ } ->
+  | { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
+  | { stack = [ x ]; _ } -> Error (sprintf "SZXX: Unclosed XML element: %s" x.tag)
+  | { stack; _ } ->
     Error
       (sprintf "SZXX: Unclosed XML elements: %s"
          (List.map stack ~f:(fun { tag; _ } -> tag) |> String.concat ~sep:", ") )
+  | exception Failure msg -> Error msg

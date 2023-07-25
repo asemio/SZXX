@@ -47,28 +47,9 @@ let xml_parser_options =
 let xml_parser = Xml.SAX.make_parser xml_parser_options
 
 let fold_angstrom ~filter_path ~on_match () =
-  let sax = ref (Ok Xml.SAX.Expert.Stream.init) in
+  let sax = ref Xml.SAX.Expert.Stream.init in
   let on_parse node = sax := Xml.SAX.Expert.Stream.folder ~filter_path ~on_match !sax node in
   Zip.Action.Parse_many { parser = xml_parser; on_parse }
-
-let parse_sheet ~sheet_number push =
-  let num = ref 0 in
-  let on_match (el : Xml.DOM.element) =
-    (match Xml.DOM.get_attr el.attrs "r" with
-    | None -> incr num
-    | Some s -> (
-      try
-        let i = Int.of_string s in
-        (* Insert blank rows *)
-        for row_number = !num to i - 2 do
-          push { sheet_number; row_number; data = [] }
-        done;
-        num := i
-      with
-      | _ -> incr num ));
-    push { sheet_number; row_number = !num; data = el.children }
-  in
-  fold_angstrom ~filter_path:[ "worksheet"; "sheetData"; "row" ] ~on_match ()
 
 let parse_string_cell el =
   let open Xml.DOM in
@@ -103,10 +84,8 @@ module SST = struct
 
     Queue.to_array q
 
-  let from_file file =
-    match
-      Zip.index_entries file |> List.find ~f:(fun entry -> String.( = ) entry.filename zip_entry_filename)
-    with
+  let from_entries file (entries : Zip.entry list) =
+    match List.find entries ~f:(fun entry -> String.( = ) entry.filename zip_entry_filename) with
     | None -> [||]
     | Some entry -> (
       let q = Queue.create () in
@@ -120,61 +99,14 @@ module SST = struct
         Queue.to_array q
       | _ -> assert false )
 
+  let from_file file = Zip.index_entries file |> from_entries file
+
   let resolve_sst_index (sst : t) ~sst_index =
     let index = Int.of_string sst_index in
     match sst with
     | sst when index < Array.length sst && index >= 0 -> Some (force sst.(index))
     | _ -> None
 end
-
-let flush_zip_seq ~sw zip_seq finalize =
-  let sst_p, sst_w = Promise.create () in
-  let flushed_p =
-    Fiber.fork_promise ~sw (fun () ->
-      Sequence.iter zip_seq ~f:(function
-        | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Fast_skip -> Promise.resolve sst_w ()
-        | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Parse_many state -> (
-          match Zip.Data.parser_state_to_result state with
-          | Ok () -> Promise.resolve sst_w ()
-          | Error msg -> failwithf "SZXX: File '%s': %s" SST.zip_entry_filename msg () )
-        | Zip.{ filename; _ }, Zip.Data.Parse_many state -> (
-          match Zip.Data.parser_state_to_result state with
-          | Ok () -> ()
-          | Error msg -> failwithf "SZXX: File '%s': %s" filename msg () )
-        | _ -> () );
-
-      if not (Promise.is_resolved sst_p) then Promise.resolve sst_w ();
-
-      finalize () )
-  in
-  sst_p, flushed_p
-
-let process_file ?filter_sheets ~skip_sst ~sw ~feed push finalize =
-  let q = Queue.create () in
-  let zip_seq =
-    Zip.stream_files ~sw ~feed (function
-      | { filename = "xl/sharedStrings.xml"; _ } when skip_sst -> Fast_skip
-      | { filename = "xl/sharedStrings.xml"; _ } ->
-        let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
-        fold_angstrom ~filter_path:SST.filter_path ~on_match ()
-      | { filename; descriptor = { uncompressed_size; _ }; _ } ->
-        let open Option.Monad_infix in
-        String.chop_prefix ~prefix:"xl/worksheets/sheet" filename
-        >>= String.chop_suffix ~suffix:".xml"
-        >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
-        |> Option.filter ~f:(fun sheet_id ->
-             Option.value_map filter_sheets ~default:true ~f:(fun f ->
-               f ~sheet_id ~raw_size:(Byte_units.of_bytes_int64_exn uncompressed_size) ) )
-        >>| (fun sheet_number -> parse_sheet ~sheet_number push)
-        |> Option.value ~default:Fast_skip )
-  in
-  let sst_p, flushed_p = flush_zip_seq ~sw zip_seq finalize in
-  Fiber.fork_daemon ~sw (fun () ->
-    Promise.await_exn flushed_p;
-    `Stop_daemon );
-  Fiber.fork_promise ~sw (fun () ->
-    Promise.await sst_p;
-    Queue.to_array q )
 
 let index_of_column s =
   let key =
@@ -295,105 +227,129 @@ module Expert = struct
       { row with data = loop 0 [] data }
 end
 
-let make_finalizer ~sw stream () =
-  Eio.Stream.add stream None;
-  (* Keep adding [None] in the background to allow the user to use
-     the Sequence again even after it's been iterated over. It doesn't
-     memoize the elements, but it does allow [Sequence.is_empty] to return [true]
-     without deadlocking, and [Sequence.fold] to return its initial value
-     without deadlocking, etc. *)
-  Fiber.fork_daemon ~sw (fun () ->
-    while true do
-      Eio.Stream.add stream None
-    done;
-    `Stop_daemon )
+let parse_sheet ~sheet_number push =
+  let num = ref 0 in
+  let on_match (el : Xml.DOM.element) =
+    (match Xml.DOM.get_attr el.attrs "r" with
+    | None -> incr num
+    | Some s -> (
+      try
+        let i = Int.of_string s in
+        (* Insert blank rows *)
+        for row_number = !num to i - 2 do
+          push { sheet_number; row_number; data = [] }
+        done;
+        num := i
+      with
+      | _ -> incr num ));
+    push { sheet_number; row_number = !num; data = el.children }
+  in
+  fold_angstrom ~filter_path:[ "worksheet"; "sheetData"; "row" ] ~on_match ()
 
-let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq
+let get_sheet_action ~filter_sheets (entry : Zip.entry) push =
+  let open Option.Monad_infix in
+  String.chop_prefix ~prefix:"xl/worksheets/sheet" entry.filename
+  >>= String.chop_suffix ~suffix:".xml"
+  >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
+  |> Option.filter ~f:(fun sheet_id ->
+       Option.value_map filter_sheets ~default:true ~f:(fun f ->
+         f ~sheet_id ~raw_size:(Byte_units.of_bytes_int64_exn entry.descriptor.uncompressed_size) ) )
+  >>| fun sheet_number -> parse_sheet ~sheet_number push
 
 let stream_rows_double_pass ?filter_sheets ~sw file cell_parser =
-  let sst = SST.from_file file in
-  let stream = Eio.Stream.create 0 in
-  let push x = Eio.Stream.add stream (Some (Expert.parse_row_with_sst sst cell_parser x)) in
-  let finalize = make_finalizer ~sw stream in
+  let entries = Zip.index_entries file in
+  let sst = SST.from_entries file entries in
+  Sequence.of_seq
+  @@ Fiber.fork_seq ~sw
+  @@ fun yield ->
+  let push x = yield (Expert.parse_row_with_sst sst cell_parser x) in
 
-  let _sst_p =
-    let feed = Feed.of_flow file in
-    process_file ?filter_sheets ~skip_sst:true ~sw ~feed push finalize
-  in
-  to_sequence stream
+  List.iter entries ~f:(fun ({ filename; _ } as entry) ->
+    get_sheet_action ~filter_sheets entry push
+    |> Option.iter ~f:(fun action ->
+         match Zip.extract_from_index file entry action with
+         | Zip.Data.Parse_many state -> (
+           match Zip.Data.parser_state_to_result state with
+           | Ok () -> ()
+           | Error msg -> failwithf "SZXX: File '%s': %s" filename msg () )
+         | _ -> assert false ) )
+
+let process_file ?filter_sheets ~sw ~feed (sst_p, sst_w) yield =
+  let q = Queue.create () in
+
+  Zip.stream_files ~sw ~feed (function
+    | { filename = "xl/sharedStrings.xml"; _ } ->
+      let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
+      fold_angstrom ~filter_path:SST.filter_path ~on_match ()
+    | entry -> get_sheet_action ~filter_sheets entry yield |> Option.value ~default:Zip.Action.Fast_skip )
+  |> Sequence.iter ~f:(function
+       | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Parse_many state -> (
+         match Zip.Data.parser_state_to_result state with
+         | Ok () -> Promise.resolve sst_w (Queue.to_array q)
+         | Error msg -> failwithf "SZXX: File '%s': %s" SST.zip_entry_filename msg () )
+       | Zip.{ filename; _ }, Zip.Data.Parse_many state -> (
+         match Zip.Data.parser_state_to_result state with
+         | Ok () -> ()
+         | Error msg -> failwithf "SZXX: File '%s': %s" filename msg () )
+       | _ -> () );
+
+  if not (Promise.is_resolved sst_p) then Promise.resolve sst_w (Queue.to_array q)
 
 type status =
   | All_buffered
   | Overflowed
   | Got_SST of SST.t
 
-let with_minimal_buffering ?max_buffering ?filter cell_parser stream sst_p =
+let with_minimal_buffering ?max_buffering ?filter cell_parser sst_p yield raw_rows =
   let q = Queue.create ?capacity:max_buffering () in
   let highwater =
     match max_buffering with
     | None -> Int.max_value
-    | Some 0 ->
-      (* The internal reader is waiting on [Eio.Stream.take] so the first row
-         always ends up in the buffer unless it gets dropped by filter. *)
-      1
-    | Some x when Int.is_positive x -> x
+    | Some x when Int.is_non_negative x -> x
     | Some x -> failwithf "SZXX: stream_rows_single_pass max_buffering: %d < 0" x ()
   in
-  let seq = to_sequence stream in
 
-  let status =
+  let status, raw_rows =
     let filter = Option.value filter ~default:(fun _ -> true) in
     let rec loop acc =
       match Promise.peek sst_p with
-      | Some sst -> Got_SST (Result.ok_exn sst)
+      | Some sst -> Got_SST sst, acc
       | None -> (
-        match Sequence.next acc with
-        | None -> All_buffered
-        | Some _ when Queue.length q = highwater -> Overflowed
-        | Some (row, next) ->
+        match acc () with
+        | Seq.Nil -> All_buffered, Seq.empty
+        | Cons (_, acc) when Queue.length q = highwater -> Overflowed, acc
+        | Cons (row, next) ->
           if filter row then Queue.enqueue q row;
           Fiber.yield ();
           (loop [@tailcall]) next )
     in
-    loop seq
+    loop raw_rows
   in
 
   match status with
   | All_buffered ->
-    let sst = Promise.await_exn sst_p in
-    Seq.of_dispenser (fun () ->
-      Queue.dequeue q |> Option.map ~f:(Expert.parse_row_with_sst sst cell_parser) )
-    |> Sequence.of_seq
+    let sst = Promise.await sst_p in
+    Queue.iter q ~f:(fun raw -> yield (Expert.parse_row_with_sst sst cell_parser raw))
   | Overflowed ->
     failwithf "SZXX: stream_rows_single_pass max_buffering exceeded %d."
       (Option.value max_buffering ~default:Int.max_value)
       ()
-  | Got_SST sst ->
-    let seq2 =
-      match filter with
-      | None -> Sequence.map seq ~f:(Expert.parse_row_with_sst sst cell_parser)
-      | Some filter ->
-        Sequence.filter_map seq ~f:(fun raw ->
-          if filter raw then Some (Expert.parse_row_with_sst sst cell_parser raw) else None )
-    in
-    if Queue.is_empty q
-    then seq2
-    else (
-      let seq1 =
-        Seq.of_dispenser (fun () ->
-          Queue.dequeue q |> Option.map ~f:(Expert.parse_row_with_sst sst cell_parser) )
-        |> Sequence.of_seq
-      in
-      Sequence.append seq1 seq2 )
+  | Got_SST sst -> (
+    Queue.iter q ~f:(fun row -> yield (Expert.parse_row_with_sst sst cell_parser row));
+    match filter with
+    | None -> Seq.iter (fun raw -> yield (Expert.parse_row_with_sst sst cell_parser raw)) raw_rows
+    | Some filter ->
+      Seq.iter
+        (fun raw -> if filter raw then yield (Expert.parse_row_with_sst sst cell_parser raw))
+        raw_rows )
 
 let stream_rows_single_pass ?max_buffering ?filter ?filter_sheets ~sw ~feed cell_parser =
-  let stream = Eio.Stream.create 0 in
-  let push x = Eio.Stream.add stream (Some x) in
-  let finalize = make_finalizer ~sw stream in
-
-  let sst_p = process_file ?filter_sheets ~skip_sst:false ~sw ~feed push finalize in
-
-  with_minimal_buffering ?max_buffering ?filter cell_parser stream sst_p
+  Sequence.of_seq
+  @@ Fiber.fork_seq ~sw
+  @@ fun yield ->
+  let ((sst_p, _) as p) = Promise.create () in
+  Fiber.fork_seq ~sw (process_file ?filter_sheets ~sw ~feed p)
+  |> with_minimal_buffering ?max_buffering ?filter cell_parser sst_p yield
 
 let unescape = Xml.DOM.unescape
 

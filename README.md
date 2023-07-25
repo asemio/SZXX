@@ -390,6 +390,12 @@ A "shallow" `Xml.document` or an error message.
 ### Xml.DOM (module)
 
 This module contains various utilities to traverse and process XML documents. See [xml.mli](src/xml.mli).
+- `Xml.DOM.get_attr`: get attribute value
+- `Xml.DOM.dot`: get first child element by tag name
+- `Xml.DOM.dot_text`: get first child element's inner text by tag name
+- `Xml.DOM.at`: get the nth child element
+- `Xml.DOM.filter_map`: filter_map child elements
+- etc
 
 ### Xml.Expert (module)
 
@@ -397,7 +403,7 @@ See [xml.mli](src/xml.mli). Performs no automatic escaping.
 
 ## SZXX.Zip
 
-This ZIP parser is fully featured and will parse every type of ZIP found in the wild: every subtype of ZIP `2.0` and `4.5`, with compression methods `0` or `8`.
+This ZIP parser is fully featured and will parse every common type of ZIP found in the wild: every subtype of ZIP `2.0` and `4.5`, with compression methods `0` or `8`.
 
 Other types of ZIPs are rare and not realistically expected to be understood by applications other than the one that created it.
 
@@ -561,20 +567,39 @@ A `Zip.Data.t` value that matches your `action` argument.
 
 ## FAQ
 
-### Are there any performance tricks?
+### Is it fast?
+
+Given the same level of optimization, streaming data is always going to be slower than deserializing a whole file into memory and reading from that.
+
+However SZXX has received **extensive** performance optimizations, to the point that SZXX is faster than many non-streaming XLSX libraries.
+
+It takes a lot of CPU work to extract each row from an XLSX file:
+- the ZIP format was designed for floppy disks and old hard drives, not parallelism or SSDs
+- the XML format is quite verbose and inefficient
+- the XLSX format requires reading and parsing **a lot** of XML data just to produce a single row of XLSX output
+
+All in all:
+- `SZXX.Zip` and `SZXX.Xml` are fast
+- `SZXX.Xlsx` is extremely fast for a streaming parser, and fast compared to the average non-streaming parser that loads everything into memory. In theory, an equally optimized non-streaming parser should manage to be faster than `SZXX.Xlsx`.
+
+Using 1 core on an ancient 2015 Macbook Pro, SZXX processes an enormous 28-column x 1,048,576-row XLSX file in 64 seconds **using only 11MB of memory**. The same file takes 70 seconds to open in LibreOffice using 2 cores and **1.8GB of memory**.
+
+About 10% faster than LibreOffice, but the real win is on memory usage and predictability.
+
+### Any performance tips?
 
 Use flambda. Install the OPAM package named `ocaml-option-flambda` and add the following to your `dune` `(executable)`:
-```lisp
+```
 (ocamlopt_flags -O3)
 ```
 
-### Can I run it on my platform?
+### Can I run it on my _insert exotic CPU here_?
 
 SZXX assumes a 64-bit CPU architecture.
 
 It will probably work on 32-bit as well as long as the ZIP and XLSX files are small (<2Gb per zipped file or sheet).
 
-Please try it and report back.
+Please report back if you try it.
 
 ### Does it work on Windows?
 
@@ -582,39 +607,22 @@ Maybe. Probably. It depends on [Eio's level of Windows support](https://github.c
 
 ### Does it work in the browser?
 
-[Version 3 worked but needed a special fork of angstrom](https://github.com/asemio/SZXX/tree/f0e35f34298e03fa1b7a561c7d64179bd356f4ca#does-it-work-in-the-browser).
+Version 3 [worked but needed a special fork of angstrom](https://github.com/asemio/SZXX/tree/f0e35f34298e03fa1b7a561c7d64179bd356f4ca#does-it-work-in-the-browser).
 
-Version 4 will work too once [Eio's level of JS support](https://github.com/ocaml-multicore/eio/pull/405) is sufficient. It may already be sufficient today.
+Version 4 will work too once [Eio's level of JS support](https://github.com/ocaml-multicore/eio/pull/405) is sufficient. It may very well be sufficient today already.
 
 You will definitely need to edit your `dune` files' `(libraries)` section.
 
 Replace
 ```
-SZXX
+(libraries SZXX some-other-lib)
 ```
 with
 ```
-checkseum.ocaml ; this line has to be first
-SZXX
+(libraries checkseum.ocaml SZXX some-other-lib)
 ```
+`checkseum.ocaml` has to be **before** SZXX [for it to work](https://github.com/mirage/checkseum/tree/96f959a8f473bf1e2061572c0579288d53afb243#linking-trick--variant).
 
-You may or may not also need the angstrom fork mentioned previously.
+You may or may not also need to use the aforementioned angstrom fork.
 
 Please give it a try and report back.
-
-### Is it fast?
-
-Streaming data is always going to be slower than deserializing a whole file into memory.
-
-However a **significant** amount of work has gone into performance optimizations, to the point that SZXX is faster than some non-streaming XLSX libraries.
-
-It takes a lot of CPU work to extract each row from an XLSX file:
-- the ZIP format was designed for floppy disks and old hard drives
-- the XML format is quite verbose and inefficient
-- the XLSX format requires reading and parsing **a lot** of XML data just to produce a single row of XLSX output
-
-All in all:
-- `SZXX.Zip` and `SZXX.Xml` are fast
-- `SZXX.Xlsx` is slower than a CSV parser, but comparable to the average non-streaming XLSX parser that loads everything into memory. An equally optimized non-streaming parser should manage to be faster than `SZXX.Xlsx`.
-
-Using 1 core on an ancient 2015 Macbook Pro, SZXX processes an enormous 28-column x 1,048,576-row XLSX file in 77 seconds **using only 11MB of memory**. The same file takes 70 seconds to open in LibreOffice using 2 cores and **1.8GB of memory**.

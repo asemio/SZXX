@@ -33,6 +33,9 @@ module DOM : sig
   (** [el |> at 3] returns the nth (0-based indexing) immediate child of element [el]. *)
   val at : int -> element -> element option
 
+  (** Same as [at] but takes a string argument. This allows [at_s] to be used in [get] together with [dot] and [dot_text]  *)
+  val at_s : string -> element -> element option
+
   (** [get el [dot "abc"; dot "def"]] is equivalent to [el |> dot "abc" |> Option.bind ~f:(dot "def")]
       Convenience function to chain multiple [dot] and [at] calls to access nested elements. *)
   val get : (element -> element option) list -> element -> element option
@@ -90,6 +93,7 @@ module SAX : sig
 
     type partial = {
       tag: string;
+      tag_hash: int;
       attrs: DOM.attr_list;
       text: partial_text list;
       children: DOM.element list;
@@ -110,16 +114,20 @@ module SAX : sig
 
       (** [strict] (default: [true]) When false, non-closed elements are treated as self-closing elements, HTML-style.
         For example a [<br>] without a matching [</br>] will be treated as a self-closing [<br />] *)
-      val folder : ?strict:bool -> (state, string) result -> node -> (state, string) result
+      val folder : ?strict:bool -> state -> node -> state
     end
 
     (** Assemble a sequence of [SAX.node] "events" into a "shallow DOM" while streaming out the children matching a certain path.
       Those children aren't added to the DOM (hence "shallow"). *)
     module Stream : sig
+      module Hash_state : sig
+        type t = Hash.state [@@deriving sexp_of, compare, equal]
+      end
+
       type state = {
         decl_attrs: DOM.attr_list option;
         stack: partial list;
-        path_stack: string list;
+        path_stack: (int * Hash_state.t * int) list;
         top: DOM.element option;
       }
       [@@deriving sexp_of, compare, equal]
@@ -134,9 +142,9 @@ module SAX : sig
         filter_path:string list ->
         on_match:(DOM.element -> unit) ->
         ?strict:bool ->
-        (state, string) result ->
+        state ->
         node ->
-        (state, string) result
+        state
     end
   end
 end

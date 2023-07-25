@@ -284,7 +284,7 @@ module Parsers = struct
     LE.any_uint16 >>| function
     | 20 -> Zip_2_0
     | 45 -> Zip_4_5
-    | x -> failwithf "SZXX: Corrupted file. Invalid ZIP version: %d" x ()
+    | x -> failwithf "SZXX: Unsupported/unknown ZIP version: %d" x ()
 
   let flags_methd_parser =
     let+ flags = LE.any_uint16
@@ -294,7 +294,9 @@ module Parsers = struct
       match methd with
       | 0 -> Stored
       | 8 -> Deflated
-      | x -> failwithf "SZXX: Unsupported ZIP compression method %d" x ()
+      | x ->
+        failwithf
+          "SZXX: Unsupported ZIP compression method %d. You are welcome to open a feature request." x ()
     in
     flags, methd
 
@@ -511,24 +513,21 @@ let parse_one cb =
 
 let skip_over_cd_and_drain = string Magic.start_cd_header *> skip_while (fun _ -> true) *> end_of_input
 
-let to_sequence stream = Seq.of_dispenser (fun () -> Eio.Stream.take stream) |> Sequence.of_seq
-
 let invalid = function
 | Ok x -> x
 | Error msg -> failwithf "SZXX: Corrupted file. Invalid ZIP structure. Error: %s" msg ()
 
 let stream_files ~sw ~feed:(read : Feed.t) cb =
-  let open Eio.Std in
-  let stream = Eio.Stream.create 0 in
+  Sequence.of_seq
+  @@ Eio.Fiber.fork_seq ~sw
+  @@ fun yield ->
   let parser =
     skip_find
-      (parse_one cb >>= function
-       | (_, Terminate) as pair ->
-         Eio.Stream.add stream (Some pair);
-         return (Some ())
-       | pair ->
-         Eio.Stream.add stream (Some pair);
-         return_none )
+      ( parse_one cb >>= fun pair ->
+        yield pair;
+        match pair with
+        | _, Terminate -> return (Some ())
+        | _ -> return_none )
     >>= function
     | None -> skip_over_cd_and_drain *> return `Reached_end
     | Some () -> return `Terminated
@@ -546,18 +545,7 @@ let stream_files ~sw ~feed:(read : Feed.t) cb =
         | _ -> () )
       | chunk -> (loop [@tailcall]) (feed chunk) )
   in
-  Fiber.fork_daemon ~sw (fun () ->
-    loop (parse parser);
-    (* Keep adding [None] in the background to allow the user to use
-       the Sequence again even after it's been iterated over. It doesn't
-       memoize the elements, but it does allow [Sequence.is_empty] to return [true]
-       without deadlocking, and [Sequence.fold] to return its initial value
-       without deadlocking, etc. *)
-    while true do
-      Eio.Stream.add stream None
-    done;
-    `Stop_daemon );
-  to_sequence stream
+  loop (parse parser)
 
 let parse_eocd =
   let* offset =
@@ -604,13 +592,13 @@ let index_entries (file : #Eio.File.ro) =
     if String.(Cstruct.to_string cs <> Magic.start_local_header)
     then failwith "SZXX: Corrupted file. Invalid file marker."
   in
+  let do_parse ~kind parser raw =
+    match Angstrom.parse_string ~consume:Prefix parser raw with
+    | Error msg -> failwithf "SZXX: Corrupted file. Unable to parse %s. Error: %s" kind msg ()
+    | Ok x -> x
+  in
   (* Find start of central dictory *)
   let offset =
-    let do_parse ~kind parser raw =
-      match Angstrom.parse_string ~consume:Prefix parser raw with
-      | Error msg -> failwithf "SZXX: Corrupted file. Unable to parse %s. Error: %s" kind msg ()
-      | Ok x -> x
-    in
     let size = (Eio.File.stat file).size |> Optint.Int63.to_int in
     let rec try_find_cd_offset rev_offset =
       let raw = read_to_eof file ~slice_size:4096 ~pos:(max 0 (size - rev_offset)) in
@@ -640,9 +628,7 @@ let index_entries (file : #Eio.File.ro) =
   in
   (* Parse central directory *)
   let raw = read_to_eof ~slice_size:4096 ~pos:(Int64.to_int_exn offset) file in
-  match Angstrom.parse_string ~consume:Prefix (Angstrom.many1 parse_cd_entry) raw with
-  | Error msg -> failwith msg
-  | Ok entries -> entries
+  do_parse (Angstrom.many1 parse_cd_entry) raw ~kind:"CD"
 
 let extract_from_index file entry action =
   let offset =
@@ -656,11 +642,7 @@ let extract_from_index file entry action =
     let open Buffered in
     let rec loop = function
       | (Fail _ | Done _) as state -> state_to_result state |> invalid
-      | Partial feed -> (
-        match read () with
-        | `Eof ->
-          failwithf "SZXX: File truncated, reached end of ZIP before the end of '%s'" entry.filename ()
-        | chunk -> (loop [@tailcall]) (feed chunk) )
+      | Partial feed -> (loop [@tailcall]) (feed (read ()))
     in
     loop (parse (parse_one (fun _ -> action)))
   in

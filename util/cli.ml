@@ -13,10 +13,14 @@ let string_readers : string Xlsx.cell_parser =
     null = "";
   }
 
+let get_time env =
+  let mono = Eio.Stdenv.mono_clock env in
+  Eio.Time.Mono.now mono |> Mtime.to_uint64_ns
+
 let read env xlsx_path =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / xlsx_path) in
-  let t0 = Time_now.nanoseconds_since_unix_epoch () in
+  let t0 = get_time env in
   let feed = Feed.of_flow_seekable src in
   let slices = ref 0 in
 
@@ -36,16 +40,16 @@ let read env xlsx_path =
   in
   loop (feed ());
 
-  let t1 = Time_now.nanoseconds_since_unix_epoch () in
+  let t1 = get_time env in
 
   Eio.Flow.copy_string
-    (sprintf "Slice count: %d (%Ldms)\n" !slices Int63.((t1 - t0) / of_int 1_000_000 |> to_int64))
+    (sprintf "Slice count: %d (%Ldms)\n" !slices Int64.((t1 - t0) / 1_000_000L))
     (Eio.Stdenv.stdout env)
 
 let count env xlsx_path =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / xlsx_path) in
-  let t0 = Time_now.nanoseconds_since_unix_epoch () in
+  let t0 = get_time env in
   let n = ref 0 in
   let seq =
     Xlsx.stream_rows_single_pass ~sw ~feed:(SZXX.Feed.of_flow src) Xlsx.string_cell_parser
@@ -53,26 +57,26 @@ let count env xlsx_path =
       incr n;
       false )
   in
-  Sequence.iter seq ~f:(fun _ -> assert false);
 
-  let t1 = Time_now.nanoseconds_since_unix_epoch () in
+  Sequence.iter seq ~f:(fun _ -> ());
+  let t1 = get_time env in
 
   Eio.Flow.copy_string
-    (sprintf "Row count: %d (%Ldms)\n" !n Int63.((t1 - t0) / of_int 1_000_000 |> to_int64))
+    (sprintf "Row count: %d (%Ldms)\n" !n Int64.((t1 - t0) / 1_000_000L))
     (Eio.Stdenv.stdout env)
 
 let count2 env xlsx_path =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / xlsx_path) in
-  let t0 = Time_now.nanoseconds_since_unix_epoch () in
+  let t0 = get_time env in
 
   let seq = Xlsx.stream_rows_double_pass ~sw src Xlsx.string_cell_parser in
   let n = Sequence.fold seq ~init:0 ~f:(fun acc _ -> acc + 1) in
 
-  let t1 = Time_now.nanoseconds_since_unix_epoch () in
+  let t1 = get_time env in
 
   Eio.Flow.copy_string
-    (sprintf "Row count: %d (%Ldms)\n" n Int63.((t1 - t0) / of_int 1_000_000 |> to_int64))
+    (sprintf "Row count: %d (%Ldms)\n" n Int64.((t1 - t0) / 1_000_000L))
     (Eio.Stdenv.stdout env)
 
 let length env xlsx_path =
@@ -104,7 +108,7 @@ let show_json env xlsx_path =
   Switch.run @@ fun sw ->
   let src = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / xlsx_path) in
   Eio.Buf_write.with_flow (Eio.Stdenv.stdout env) @@ fun w ->
-  SZXX.Xlsx.stream_rows_single_pass ~max_buffering:1000 ~sw ~feed:(SZXX.Feed.of_flow src)
+  SZXX.Xlsx.stream_rows_single_pass ~max_buffering:10000 ~sw ~feed:(SZXX.Feed.of_flow src)
     SZXX.Xlsx.yojson_cell_parser
   |> Sequence.iteri ~f:(fun i (row : Yojson.Basic.t SZXX.Xlsx.row) ->
        let s = `List row.data |> Yojson.Basic.pretty_to_string in
@@ -161,7 +165,7 @@ let count_types env xlsx_path =
     (Eio.Stdenv.stdout env)
 
 let count_total_string_length env xlsx_path =
-  let t0 = Time_now.nanoseconds_since_unix_epoch () in
+  let t0 = get_time env in
   let num_rows = ref 0 in
   let num_strings = ref 0 in
   let total_length = ref 0 in
@@ -184,12 +188,12 @@ let count_total_string_length env xlsx_path =
   let file = Eio.Path.open_in ~sw Eio.Path.(Eio.Stdenv.fs env / xlsx_path) in
   let seq = Xlsx.stream_rows_double_pass ~sw file cell_parser in
   Sequence.iter seq ~f:(fun _row -> incr num_rows);
-  let t1 = Time_now.nanoseconds_since_unix_epoch () in
+  let t1 = get_time env in
   Eio.Flow.copy_string
     (sprintf
        !"Rows: %{Int#hum}\nStrings: %{Int#hum}\nTotal string length: %{Int#hum}\n%{Time_float.Span#hum}\n"
        !num_rows !num_strings !total_length
-       (Int63.(t1 - t0 |> to_float) |> Time_float.Span.of_ns) )
+       (Int64.(t1 - t0 |> to_float) |> Time_float.Span.of_ns) )
     (Eio.Stdenv.stdout env)
 
 let count_tokens env xlsx_path =
@@ -237,20 +241,16 @@ let index env xlsx_path =
 
 let () =
   Eio_main.run @@ fun env ->
-  (* try/with for afl-fuzz *)
-  try
-    Sys.get_argv () |> function
-    | [| _; "cat"; file |] -> read env file
-    | [| _; "extract_sst"; file |] -> extract_sst env file
-    | [| _; "count"; file |] -> count env file
-    | [| _; "count2"; file |] -> count2 env file
-    | [| _; "length"; file |] -> length env file
-    | [| _; "show_json"; file |] -> show_json env file
-    | [| _; "show_json2"; file |] -> show_json_double_pass env file
-    | [| _; "count_types"; file |] -> count_types env file
-    | [| _; "count_length"; file |] -> count_total_string_length env file
-    | [| _; "count_tokens"; file |] -> count_tokens env file
-    | [| _; "index"; file |] -> index env file
-    | _ -> failwith "Invalid arguments"
-  with
-  | exn -> Eio.traceln !"%{Exn}" exn
+  Sys.get_argv () |> function
+  | [| _; "cat"; file |] -> read env file
+  | [| _; "extract_sst"; file |] -> extract_sst env file
+  | [| _; "count"; file |] -> count env file
+  | [| _; "count2"; file |] -> count2 env file
+  | [| _; "length"; file |] -> length env file
+  | [| _; "show_json"; file |] -> show_json env file
+  | [| _; "show_json2"; file |] -> show_json_double_pass env file
+  | [| _; "count_types"; file |] -> count_types env file
+  | [| _; "count_length"; file |] -> count_total_string_length env file
+  | [| _; "count_tokens"; file |] -> count_tokens env file
+  | [| _; "index"; file |] -> index env file
+  | _ -> failwith "Invalid arguments passed to cli.exe"
