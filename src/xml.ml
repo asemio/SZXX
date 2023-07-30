@@ -144,6 +144,7 @@ module Parser = struct
       accept_html_boolean_attributes: bool;
       accept_unquoted_attributes: bool;
       accept_single_quoted_attributes: bool;
+      batch_size: int;
     }
     [@@deriving sexp_of, compare, equal]
   end
@@ -288,7 +289,10 @@ module Parser = struct
         else text_parser )
       >>= Fn.id
     in
-    fast_path <|> slow_path
+    let p = fast_path <|> slow_path in
+    if options.batch_size > 1
+    then choice [ (Parsing.count options.batch_size p >>| fun x -> Many x); p ]
+    else p
 end
 
 module SAX = struct
@@ -299,6 +303,7 @@ module SAX = struct
       accept_html_boolean_attributes = true;
       accept_unquoted_attributes = false;
       accept_single_quoted_attributes = false;
+      batch_size = 20;
     }
 
   let parser = Parser.create default_parser_options
@@ -306,10 +311,9 @@ module SAX = struct
   let make_parser = Parser.create
 
   module Expert = struct
-    type partial_text = {
-      literal: bool;
-      raw: string;
-    }
+    type partial_text =
+      | Standard of string
+      | Literal of string
     [@@deriving sexp_of, compare, equal]
 
     type partial = {
@@ -343,14 +347,14 @@ module SAX = struct
       let _prev_ws =
         List.fold_right ll ~init:(false, false) ~f:(fun partial ((after_first, prev_ws) as acc) ->
           match partial with
-          | { literal = true; raw } ->
+          | Literal raw ->
             Buffer.add_string final raw;
             true, true
-          | { raw; _ } when DOM.preserve_space attrs ->
+          | Standard raw when DOM.preserve_space attrs ->
             if after_first && not prev_ws then Buffer.add_char final ' ';
             Buffer.add_string final raw;
             true, Parser.is_ws raw.[String.length raw - 1]
-          | { raw; _ } -> squish_into raw final (if after_first then true, true else acc) )
+          | Standard raw -> squish_into raw final (if after_first then true, true else acc) )
       in
       Buffer.contents final
 
@@ -378,19 +382,13 @@ module SAX = struct
         | Element_open { tag; attrs }, acc ->
           let partial = make_partial tag attrs in
           { acc with stack = partial :: acc.stack }
-        | Text _, { stack = []; top = None; _ }
-         |Cdata _, { stack = []; top = None; _ } ->
-          acc
-        | Text _, { stack = []; top = Some _; _ }
-         |Cdata _, { stack = []; top = Some _; _ } ->
+        | Text _, { stack = []; _ }
+         |Cdata _, { stack = []; _ } ->
           acc
         | Text s, ({ stack = current :: rest; _ } as acc) ->
-          {
-            acc with
-            stack = { current with text = { raw = s; literal = false } :: current.text } :: rest;
-          }
+          { acc with stack = { current with text = Standard s :: current.text } :: rest }
         | Cdata s, ({ stack = current :: rest; _ } as acc) ->
-          { acc with stack = { current with text = { raw = s; literal = true } :: current.text } :: rest }
+          { acc with stack = { current with text = Literal s :: current.text } :: rest }
         | Element_close tag, ({ stack = current :: parent :: rest; _ } as acc)
           when String.( = ) tag current.tag ->
           {
@@ -478,13 +476,10 @@ module SAX = struct
           acc
         | Text s, ({ stack = current :: rest; path_stack = (path, _, _) :: _; _ } as acc)
           when path = filter_path ->
-          {
-            acc with
-            stack = { current with text = { raw = s; literal = false } :: current.text } :: rest;
-          }
+          { acc with stack = { current with text = Standard s :: current.text } :: rest }
         | Cdata s, ({ stack = current :: rest; path_stack = (path, _, _) :: _; _ } as acc)
           when path = filter_path ->
-          { acc with stack = { current with text = { raw = s; literal = true } :: current.text } :: rest }
+          { acc with stack = { current with text = Literal s :: current.text } :: rest }
         | Text _, _
          |Cdata _, _ ->
           acc
@@ -552,6 +547,7 @@ let html_parser =
       accept_html_boolean_attributes = true;
       accept_unquoted_attributes = true;
       accept_single_quoted_attributes = true;
+      batch_size = 20;
     }
 
 type document = {
@@ -560,8 +556,9 @@ type document = {
 }
 [@@deriving sexp_of, compare, equal]
 
-let unescape_text = function
+let rec unescape_text = function
 | SAX.Text s -> SAX.Text (Unescape.run s)
+| SAX.Many ll -> SAX.Many (List.map ll ~f:unescape_text)
 | x -> x
 
 let invalid = function

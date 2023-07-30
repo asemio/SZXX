@@ -11,6 +11,8 @@ let return_none = return None
 
 let return_unit = return ()
 
+let return_nil = return []
+
 let fail_pattern = fail "pattern"
 
 let fail_backtrack = fail "backtrack"
@@ -61,6 +63,17 @@ let skip_n_times n p =
       let* _ = p in
       incr count;
       if !count < n then m else return_unit )
+
+(* Faster version of Angstrom.count *)
+let count n p =
+  if n <= 0
+  then return_nil
+  else (
+    let rec loop = function
+      | 0 -> return_nil
+      | n -> lift2 List.cons p (loop (n - 1))
+    in
+    loop n )
 
 let peek_with len f =
   Unsafe.peek len f <|> (advance len *> fail_backtrack <|> return_unit) *> Unsafe.peek len f
@@ -197,7 +210,7 @@ let take_until_pattern ~slice_size ~pattern =
             Bigstringaf.unsafe_blit_to_bytes bs ~src_off:off partial ~dst_off:!staged ~len;
             staged := !staged + len);
         finalize = (fun () -> if !staged > 0 then Buffer.add_subbytes buf partial ~pos:0 ~len:!staged);
-        commit;
+        commit = return_unit;
       }
   in
   let* () = return_unit in

@@ -66,6 +66,9 @@ module SAX : sig
     accept_single_quoted_attributes: bool;
       (** Invalid XML but valid HTML: [<div attr1="foo" attr2='bar'>]
           But with [accept_unquoted_attributes] set to [true], [attr2] will be ["bar"] *)
+    batch_size: int;
+      (** (Default: [20]) Performance optimization. When [batch_size] is greater than 1,
+          the parser will prefer to return [Many list] where the length of [list] is [batch_size]. *)
   }
   [@@deriving sexp_of, compare, equal]
 
@@ -85,10 +88,9 @@ module SAX : sig
 
   (** For those who want finer-grained control and want to parse (using Angstrom) and fold (using this module) by hand. *)
   module Expert : sig
-    type partial_text = {
-      literal: bool;
-      raw: string;
-    }
+    type partial_text =
+      | Standard of string
+      | Literal of string
     [@@deriving sexp_of, compare, equal]
 
     type partial = {

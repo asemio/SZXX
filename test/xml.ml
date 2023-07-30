@@ -486,7 +486,7 @@ let test_large_cdata () =
     Angstrom.parse_string ~consume:All SZXX.Xml.SAX.parser (Buffer.contents buf) |> Result.ok_or_failwith
   in
   if not ([%equal: SZXX.Xml.SAX.node] node (SZXX.Xml.SAX.Cdata random))
-  then failwith "CDATA Strings did not match"
+  then failwithf !"CDATA Strings did not match %{sexp#hum: SZXX.Xml.SAX.node}" node ()
 
 type element = SZXX.Xml.DOM.element = {
   tag: string;
@@ -580,6 +580,7 @@ let () =
                      accept_html_boolean_attributes = true;
                      accept_unquoted_attributes = true;
                      accept_single_quoted_attributes = false;
+                     batch_size = 20;
                    } )
               Test4.raw Test4.data );
           ( "Stream 4",
@@ -591,6 +592,7 @@ let () =
                      accept_html_boolean_attributes = true;
                      accept_unquoted_attributes = true;
                      accept_single_quoted_attributes = false;
+                     batch_size = 20;
                    } )
               Test4.raw Test4.data_streamed [ "html"; "head"; "meta" ] );
           "Large CDATA", `Quick, test_large_cdata;

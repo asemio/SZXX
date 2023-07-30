@@ -42,6 +42,7 @@ let xml_parser_options =
       accept_html_boolean_attributes = false;
       accept_unquoted_attributes = false;
       accept_single_quoted_attributes = false;
+      batch_size = 20;
     }
 
 let xml_parser = Xml.SAX.make_parser xml_parser_options
@@ -102,9 +103,7 @@ module SST = struct
   let from_file file = Zip.index_entries file |> from_entries file
 
   let resolve_sst_index (sst : t) ~sst_index =
-    let index = Int.of_string sst_index in
-    match sst with
-    | sst when index < Array.length sst && index >= 0 -> Some (force sst.(index))
+    try Some (force (Array.get sst (Int.of_string sst_index))) with
     | _ -> None
 end
 
