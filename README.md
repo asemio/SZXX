@@ -41,13 +41,13 @@ let print_xlsx xlsx_path =
 
 XLSX is tabular (like CSV) and typed (like JSON).
 
-It's also not just one file... it's a whole bunch of XML files zipped together.
+Most XLSX files consist of about a dozen separate XML files and folders zipped together.
 
 > Why do I need to know this?
 
-That's a fair question. SZXX tries extremely hard to silently handle all the complexity of this chimera of a format.
+That's a fair question. SZXX tries extremely hard to quietly handle all the complexity of this chimera of a format.
 
-But the design of the XLSX format demands that you -the user- make some decisions.
+But the design of the XLSX format demands that you -the user- make a few decisions.
 
 #### Just the essentials
 
@@ -68,13 +68,13 @@ type 'a cell_parser = {
 ```
 This library includes two simple cell_parsers to get started: `Xlsx.yojson_cell_parser` and `Xlsx.string_cell_parser`, but creating your own `'a cell_parser` is probably a good idea.
 
-XLSX cells use XML-escaping (`&gt;` for ">", `&#x1F600;` for "😀" etc). `Xlsx.yojson_cell_parser` and `Xlsx.string_cell_parser` already unescape everything for you. If you write your own `cell_parser` and your String/Formula/Error cells might contain reserved XML characters (`<`, `>`, `'`, `"`, `&`, etc) or non-ASCII characters, you will need to call `SZXX.Xml.unescape` on data coming from **String**, **Formula**, and **Error** cells.
+XLSX cells use XML-escaping (`&amp;` for "&", `&#x1F600;` for "😀" etc). `Xlsx.yojson_cell_parser` and `Xlsx.string_cell_parser` already unescape everything for you. If you write your own `cell_parser` and your cells might contain special characters or non-ASCII characters, you will need to call `SZXX.Xml.unescape` on data coming from **String**, **Formula**, and **Error** cells.
 
 Most XLSX applications use Number cells (OCaml float) to encode Date and DateTime. Pass this float to `Xlsx.parse_date` or `Xlsx.parse_datetime` to decode it. The Date cell type was only introduced to Excel in 2010 and few XLSX files use it.
 
-The vast majority of applications that generate XLSX files will not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to an offset in the **Shared Strings Table** (the **SST**). This saves space, but 99.9% of the time those applications will place the SST **after** the sheet!
+The vast majority of applications that generate XLSX files will not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to an offset in the **Shared Strings Table** (the **SST**). This saves space by reusing strings, but 99% of the time those applications will place the SST **after** the sheet!
 
-If the XLSX document is in the form of a file, no problem, SZXX can jump around the file to parse the SST before reading the rows. But the location of the SST matters when we cannot rewind, such as when parsing directly from an HTTP stream.
+If the XLSX document is in the form of a file, then it's fine because SZXX can jump around the file to parse the SST before reading the rows. But the location of the SST matters when we cannot rewind, such as when parsing directly from an HTTP stream.
 
 We can inspect the structure of a file using `zipinfo`:
 ```sh
@@ -129,7 +129,9 @@ Xlsx.stream_rows_double_pass ?filter_sheets ~sw file cell_parser
 
 Note that a `Sequence.t` is an ephemeral data structure. Each element can only be seen once, so for example calling `Sequence.is_empty` will attempt to generate the next element in the Sequence to return true if there was one, _but that element will be lost_.
 
-SZXX generates elements on demand, meaning that it will not read more raw data until necessary.
+SZXX generates elements on demand (lazily), meaning that it will not begin parsing until you begin reading from the Sequence.
+
+Note that you must consume the Sequence from within the Switch. Attempting to read from the Sequence from outside the Switch will fail with `Invalid_argument "Coroutine has already failed"`. The Sequence's contents can safely leave the Switch.
 
 ### Xlsx.stream_rows_single_pass
 
@@ -166,7 +168,9 @@ Xlsx.stream_rows_single_pass ?max_buffering ?filter ?filter_sheets ~sw ~feed cel
 
 Note that a `Sequence.t` is an ephemeral data structure. Each element can only be seen once, so for example calling `Sequence.is_empty` will attempt to generate the next element in the Sequence to return true if there was one, _but that element will be lost_.
 
-SZXX generates elements on demand, meaning that it will not read more raw data until necessary.
+SZXX generates elements on demand (lazily), meaning that it will not begin parsing until you begin reading from the Sequence.
+
+Note that you must consume the Sequence from within the Switch. Attempting to read from the Sequence from outside the Switch will fail with `Invalid_argument "Coroutine has already failed"`. The Sequence's contents can safely leave the Switch.
 
 #### Example 1
 
@@ -506,7 +510,9 @@ The Sequence contains `Zip.Data.t` elements that match the `Zip.Action.t` return
 
 Note that a `Sequence.t` is an ephemeral data structure. Each element can only be seen once, so for example calling `Sequence.is_empty` will attempt to generate the next element in the Sequence to return true if there was one, _but that element will be lost_.
 
-SZXX will wait for you to consume from the Sequence before extracting more.
+SZXX generates elements on demand (lazily), meaning that it will not begin parsing until you begin reading from the Sequence.
+
+Note that you must consume the Sequence from within the Switch. Attempting to read from the Sequence from outside the Switch will fail with `Invalid_argument "Coroutine has already failed"`. The Sequence's contents can safely leave the Switch.
 
 ### Zip.index_entries
 
@@ -567,11 +573,24 @@ A `Zip.Data.t` value that matches your `action` argument.
 
 ## FAQ
 
+### Why am I getting a "Coroutine" error?
+
+Because you are reading a Sequence from outside the Switch that populates the Sequence.
+
+This restriction applies to the following 3 SZXX functions that take a Switch argument and return a Sequence:
+- `SZXX.Xlsx.stream_rows_double_pass`
+- `SZXX.Xlsx.stream_rows_single_pass`
+- `SZXX.Zip.stream_files`
+
+To fix your code: only interact with the Sequence while inside the Switch. In other words: do not let the Sequence escape the Switch scope.
+
+The Sequence's contents can safely leave the Switch.
+
 ### Is it fast?
 
-Given the same level of optimization, streaming data is always going to be slower than deserializing a whole file into memory and reading from that.
+Given similar optimization efforts, streaming parsers should always be slower than parsers that deserialize a whole file into memory and read from that.
 
-However SZXX has received **extensive** performance optimizations, to the point that SZXX is faster than many non-streaming XLSX libraries.
+However, SZXX has received **extensive** performance optimizations, to the point that SZXX is faster than many non-streaming XLSX libraries.
 
 It takes a lot of CPU work to extract each row from an XLSX file:
 - the ZIP format was designed for floppy disks and old hard drives, not parallelism or SSDs
@@ -580,11 +599,11 @@ It takes a lot of CPU work to extract each row from an XLSX file:
 
 All in all:
 - `SZXX.Zip` and `SZXX.Xml` are fast
-- `SZXX.Xlsx` is extremely fast for a streaming parser, and fast compared to the average non-streaming parser that loads everything into memory. In theory, an equally optimized non-streaming parser should manage to be faster than `SZXX.Xlsx`.
+- `SZXX.Xlsx` is extremely fast for a streaming parser, and fast compared to the average non-streaming parser that loads everything into memory.
 
-Using 1 core on an ancient 2015 Macbook Pro, SZXX processes an enormous 28-column x 1,048,576-row XLSX file in 64 seconds **using only 11MB of memory**. The same file takes 70 seconds to open in LibreOffice using 2 cores and **1.8GB of memory**.
+Using 1 core on an ancient 2015 Macbook Pro, SZXX processes an enormous 28-column x 1,048,576-row XLSX file in 55 seconds **using only 9MB of memory**. In 2022, the same file used to take 70 seconds to open in LibreOffice using 2 cores and **1.8GB of memory**, but improvements to LibreOffice have recently brought it down to 36 seconds and **1.1GB**.
 
-About 10% faster than LibreOffice, but the real win is on memory usage and predictability.
+Where SZXX wins is on memory usage and predictability.
 
 ### Any performance tips?
 
