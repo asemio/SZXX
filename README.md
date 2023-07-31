@@ -612,14 +612,6 @@ Use flambda. Install the OPAM package named `ocaml-option-flambda` and add the f
 (ocamlopt_flags -O3)
 ```
 
-### Can I run it on my _insert exotic CPU here_?
-
-SZXX assumes a 64-bit CPU architecture.
-
-It will probably work on 32-bit as well as long as the ZIP and XLSX files are small (<2Gb per zipped file or sheet).
-
-Please report back if you try it.
-
 ### Does it work on Windows?
 
 Maybe. Probably. It depends on [Eio's level of Windows support](https://github.com/ocaml-multicore/eio/issues/125). You'll probably need OCaml 5.1 too.
