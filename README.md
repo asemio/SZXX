@@ -68,13 +68,13 @@ type 'a cell_parser = {
 ```
 This library includes two simple cell_parsers to get started: `Xlsx.yojson_cell_parser` and `Xlsx.string_cell_parser`, but creating your own `'a cell_parser` is probably a good idea.
 
-XLSX cells use XML-escaping (`&amp;` for "&", `&#x1F600;` for "😀" etc). `Xlsx.yojson_cell_parser` and `Xlsx.string_cell_parser` already unescape everything for you. If you write your own `cell_parser` and your cells might contain special characters or non-ASCII characters, you will need to call `SZXX.Xml.unescape` on data coming from **String**, **Formula**, and **Error** cells.
+XLSX cells use XML-escaping (`&amp;` for "&", `&#x1F600;` for "😀" etc). The two aforementioned "beginner" cell_parsers already unescape everything for you. If you write your own `cell_parser` and if your spreadsheets might contain special characters or non-ASCII characters, you will need to call `SZXX.Xml.unescape` on data coming from **String**, **Formula**, and **Error** cells.
 
 Most XLSX applications use Number cells (OCaml float) to encode Date and DateTime. Pass this float to `Xlsx.parse_date` or `Xlsx.parse_datetime` to decode it. The Date cell type was only introduced to Excel in 2010 and few XLSX files use it.
 
-The vast majority of applications that generate XLSX files will not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to an offset in the **Shared Strings Table** (the **SST**). This saves space by reusing strings, but 99% of the time those applications will place the SST **after** the sheet!
+The vast majority of applications that generate XLSX files will not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to an offset in the **Shared Strings Table** (the **SST**). This saves space by reusing strings, but 99% of the time those applications will place the SST **after** the sheet and that's not ideal...
 
-If the XLSX document is in the form of a file, then it's fine because SZXX can jump around the file to parse the SST before reading the rows. But the location of the SST matters when we cannot rewind, such as when parsing directly from an HTTP stream.
+If the XLSX document is in the form of a file, then it's fine because SZXX can jump around the file to parse the SST before reading the rows. But the location of the SST matters when we cannot rewind, such as when parsing directly from an HTTP stream, because it means we might need to cache rows until we can decode them using the SST. As you'll see, SZXX has options to handle this issue.
 
 We can inspect the structure of a file using `zipinfo`:
 ```sh
@@ -84,9 +84,9 @@ The SST is indicated by `xl/sharedStrings.xml` and sheets look like `xl/workshee
 
 ### Xlsx.stream_rows_double_pass
 
-This function extracts rows from an XLSX file. It is **guaranteed to run in constant memory**, without buffering.
+This function extracts rows from an XLSX file. It is **guaranteed to run in constant memory**, without ever buffering.
 
-It first skims the file to find and extract the SST, then it streams out fully parsed rows from the various sheets. Rows are always emitted strictly in the order they appear in the sheet(s).
+It first reads the file's index to locate and extract the SST, then it streams out fully parsed rows from the various sheets. Rows are always emitted strictly in the order they appear in the sheet(s).
 
 ```ocaml
 open! Core
@@ -105,7 +105,7 @@ let print_xlsx xlsx_path =
       `List row.data |> Yojson.Basic.to_string |> print_endline )
 ```
 
-There's just one limitation to `stream_rows_double_pass`: your XLSX document has to **a file** so that SZXX can "rewind" after extracting the SST. To stream XLSX data out of non-seekable streams such as HTTP transfers, use [Xlsx.stream_rows_single_pass](#xlsxstream_rows_single_pass) instead.
+There's just one limitation to `stream_rows_double_pass`: your XLSX document has to be **a file** so that SZXX can "rewind" after extracting the SST. To stream XLSX data out of non-seekable streams such as HTTP transfers, use [Xlsx.stream_rows_single_pass](#xlsxstream_rows_single_pass) instead.
 
 ```ocaml
 Xlsx.stream_rows_double_pass ?filter_sheets ~sw file cell_parser
@@ -146,9 +146,11 @@ Xlsx.stream_rows_single_pass ?max_buffering ?filter ?filter_sheets ~sw ~feed cel
 #### Arguments:
 - `max_buffering`
   - Default: unlimited.
-  - Sets a limit to the number of rows that may be buffered. Raises an exception if it runs out of buffer space before reaching the SST.
+  - Sets a limit to the number of rows that may be buffered while looking for the SST. Raises an exception if it runs out of buffer space before reaching the SST.
 - `filter`
   - Use this filter to drop uninteresting rows and reduce the number of rows that must be buffered.
+  - When `filter` returns `true`, the row is buffered
+  - When `filter` returns `false`, the row is dropped
   - If necessary, use `Xlsx.Expert.parse_row_without_sst` to access cell-level data. See the examples below.
   - This function is called on every row of every sheet (except for sheets removed by `filter_sheets`).
 - `filter_sheets`
@@ -176,14 +178,14 @@ Note that you must consume the Sequence from within the Switch. Attempting to re
 
 Let's read a file in a single pass.
 
-For this example we'll pretend we have 3 requirements:
+For this example we'll pretend we have these 3 requirements:
 - **R1:** we're only interested in the first 1000 rows
-- **R2:** and only the rows where the `K` column (11th column) contains a number `>= 100`
+- **R2:** and only the rows where the `K` column (10th column counting from 0) contains a number `>= 100`
 - **R3:** and we only care about sheet #1
 
 We'll use `Xlsx.yojson_cell_parser` to keep things simple.
 
-First, let's define our `filter` function:
+First, let's define our `filter` function. We'll drop all rows that are not useful given the requirements we made up for this example.
 ```ocaml
 let open SZXX in
 
@@ -193,19 +195,19 @@ let filter raw =
   if raw.row_number > 1000
   then false
   else (
-    (* Let's parse the row to the best that we can do without the SST,
+    (* Let's parse the row the best that we can do without having the SST,
        unless we feel like working with raw XML (and we sure don't!) *)
     let row = Expert.parse_row_without_sst yojson_cell_parser raw in
 
-    (* R2: 10th column is the "K" column we're interested in *)
+    (* R2: The column at position 10 is the "K" column we're interested in *)
     match List.nth row.data 10 with
     | Some (Available (`Float x)) ->
-      (* Keep the row only if the number is >= 100 *)
+      (* R2: Keep the row only if the number in "K" is >= 100 *)
       Float.(x >= 100.0)
 
-    | Some (Available _) (* The cell in K column isn't a Number *)
-    | Some (Delayed _) (* The cell in K column is a non-inlined String *)
-    | None (* There's fewer than 11 columns *)
+    | Some (Available _) (* R2: The cell in column "K" isn't a Number *)
+    | Some (Delayed _) (* R2: The cell in column "K" is a non-inlined String *)
+    | None (* R2: There's too few columns to even have a "K" column *)
       -> false )
 in
 ```
@@ -218,7 +220,7 @@ let src : Eio.Flow.source =
 in
 let seq =
   Xlsx.stream_rows_single_pass
-    ~max_buffering:1000 (* Not necessary unless we made a mistake in ~filter *)
+    ~max_buffering:1000 (* Not necessary but we'll pass this argument anyway just in case we made a mistake in ~filter *)
     ~filter
     ~filter_sheets:(fun ~sheet_id ~raw_size:_ ->
       (* R3: we only care about sheet #1 *)
@@ -229,7 +231,7 @@ let seq =
     Xlsx.yojson_cell_parser
 in
 ```
-We can then now work with the data in `seq` as usual.
+We can now work with the data in `seq` as usual.
 
 #### Example 2
 
@@ -260,7 +262,7 @@ Eio.traceln "Found %d rows" !count;
 ```
 
 There are two major benefits to using `~filter` in this way:
-1. we don't waste any time parsing the rows themselves; `~filter` operates on raw rows
+1. we don't waste any time parsing the rows since `~filter` operates on raw rows and we're dropping them all by always returning `false`
 2. we're guaranteed to run in constant memory, no matter the XLSX's internal layout
 
 ### Xlsx.parse_date
@@ -276,6 +278,10 @@ XLSX datetimes are stored as floats. This function converts from a `float` to a 
 ### Xlsx.index_of_column
 
 This function converts a column reference such as `"D7"` or `"AA2"` to a 0-based column index.
+```ocaml
+SZXX.Xlsx.index_of_column "D7" (* returns 3 because column D is the 4th column (0-based index) *)
+SZXX.Xlsx.index_of_column "AA2" (* returns 26 because column AA is the 27th column (0-based index) *)
+```
 
 ### Xlsx.Expert (module)
 
@@ -399,19 +405,19 @@ This module contains various utilities to traverse and process XML documents. Se
 - `Xml.DOM.dot_text`: get first child element's inner text by tag name
 - `Xml.DOM.at`: get the nth child element
 - `Xml.DOM.filter_map`: filter_map child elements
-- etc
+- and more, they're all documented in [xml.mli](src/xml.mli)
 
 ### Xml.Expert (module)
 
-See [xml.mli](src/xml.mli). Performs no automatic escaping.
+See [xml.mli](src/xml.mli).
 
 ## SZXX.Zip
 
-This ZIP parser is fully featured and will parse every common type of ZIP found in the wild: every subtype of ZIP `2.0` and `4.5`, with compression methods `0` or `8`.
+This ZIP parser supports every "normal" type of ZIP found in the wild: every type and subtype of ZIP `2.0` and `4.5`, with compression methods `0` or `8`.
 
-Other types of ZIPs are rare and not realistically expected to be understood by applications other than the one that created it.
+Other types of ZIPs are rare and, in practice, not realistically expected to be understood by applications other than the one that created it.
 
-There are two ways to use with `SZXX.Zip`:
+There are two ways to use `SZXX.Zip`:
 - if you only need a subset of files stored in a ZIP **AND** your ZIP is a file (not a stream)
   - ➡️ use `Zip.index_entries` and `Zip.extract_from_index`
 - otherwise:
@@ -475,18 +481,18 @@ SZXX will call `callback` for each file it encounters within the ZIP archive. Yo
   - Fold this file into a final state using function `f`, in string chunks of ~8192 bytes.
 - `Action.Fold_bigstring f`
   - Fold this file into a final state using function `f`, in bigstring chunks of ~8192 bytes.
-  - **IMPORTANT:** this `Bigstring.t` is volatile! It's only safe to read from it until the end of function `f` (the "folder" function). If you need to access the data again later, make a copy of it in before the end of function `f`.
+  - **IMPORTANT:** this `Bigstring.t` is volatile! It's only safe to read from it until the end of function `f` (the "folder" function). If you need to access the data again later, make a copy of it before the end of function `f`.
 - `Action.Parse p`
-  - Apply the `Angstrom.t` parser `p` to the file while it is being decompressed without having to fully decompress it first.
+  - Progressively apply the `Angstrom.t` parser `p` to the file while it is being decompressed.
   - `Action.Parse` expects `p` to consume all bytes and leave no trailing junk bytes after a successful parse.
 - `Action.Parse_many { parser; on_parse }`
-  - Repeatedly apply the `Angstrom.t` parser to the file while it is being decompressed without having to fully decompress it first.
+  - Repeatedly apply the `Angstrom.t` parser to the file while it is being decompressed.
   - It invokes `on_parse` on each parsed value.
   - `Action.Parse_many` expects the file to end on a complete parse and leave no trailing junk bytes.
 - `Action.Terminate`
   - Abruptly terminate processing of the ZIP archive.
   - The output Sequence will finish with a `Data.Terminate` element.
-  - SZXX stops reading from the `Feed.t` immediately, without even skipping over the bytes of that entry.
+  - SZXX stops reading from the `Feed.t` immediately.
 
 
 ```ocaml
@@ -516,7 +522,7 @@ Note that you must consume the Sequence from within the Switch. Attempting to re
 
 ### Zip.index_entries
 
-This function quickly indexes the contents of the ZIP file and returns a list of `Zip.entry`.
+This function finds and returns the ZIP's table of contents (`Zip.entry list`).
 
 You can then extract files one by one (in any order) using `Zip.extract_from_index`.
 
@@ -588,7 +594,7 @@ The Sequence's contents can safely leave the Switch.
 
 ### Is it fast?
 
-Given similar optimization efforts, streaming parsers should always be slower than parsers that deserialize a whole file into memory and read from that.
+Given similar optimization efforts, streaming parsers (like SZXX) should always be slower than parsers that deserialize a whole file into memory and read from that.
 
 However, SZXX has received **extensive** performance optimizations, to the point that SZXX is faster than many non-streaming XLSX libraries.
 
@@ -599,11 +605,11 @@ It takes a lot of CPU work to extract each row from an XLSX file:
 
 All in all:
 - `SZXX.Zip` and `SZXX.Xml` are fast
-- `SZXX.Xlsx` is extremely fast for a streaming parser, and fast compared to the average non-streaming parser that loads everything into memory.
+- `SZXX.Xlsx` is extremely fast for a streaming parser, and comparable in performance to the average non-streaming parser that loads everything into memory.
 
-Using 1 core on an ancient 2015 Macbook Pro, SZXX processes an enormous 28-column x 1,048,576-row XLSX file in 55 seconds **using only 9MB of memory**. In 2022, the same file used to take 70 seconds to open in LibreOffice using 2 cores and **1.8GB of memory**, but improvements to LibreOffice have recently brought it down to 36 seconds and **1.1GB**.
+Using 1 core on an ancient 2015 Macbook Pro, SZXX processes a gigantic 28-column x 1,048,576-row XLSX file in 55 seconds **using only 9MB of memory**. In 2022, the same file would take 70 seconds to open in LibreOffice using 2 cores and **1.8GB of memory**, but improvements to LibreOffice have recently brought it down to 36 seconds and **1.1GB**.
 
-Where SZXX wins is on memory usage and predictability.
+Where SZXX cannot be beaten is memory usage and predictability.
 
 ### Any performance tips?
 
