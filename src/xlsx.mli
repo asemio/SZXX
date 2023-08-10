@@ -62,7 +62,7 @@ val index_of_column : string -> int
 val stream_rows_double_pass :
   ?filter_sheets:(sheet_id:int -> raw_size:Byte_units.t -> bool) ->
   sw:Switch.t ->
-  #Eio.File.ro ->
+  _ Eio.File.ro ->
   'a cell_parser ->
   'a row Sequence.t
 
@@ -116,7 +116,7 @@ module Expert : sig
     (** Extract the SST from an XLSX file.
         This function does not advance the file cursor.
         It jumps around the file to only extract the SST while reading as few bytes as necessary. *)
-    val from_file : #Eio.File.ro -> t
+    val from_file : _ Eio.File.ro -> t
 
     (** Resolve a single reference into the Shared Strings Table. *)
     val resolve_sst_index : t -> sst_index:string -> string option

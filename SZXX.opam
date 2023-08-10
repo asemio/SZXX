@@ -15,6 +15,12 @@ homepage: "https://github.com/asemio/SZXX"
 dev-repo: "git://github.com/asemio/SZXX"
 doc: "https://github.com/asemio/SZXX"
 bug-reports: "https://github.com/asemio/SZXX/issues"
+pin-depends: [
+  [ "eio.0.11.variants" "git+https://github.com/talex5/eio.git#variants" ]
+  [ "eio_posix.0.11.variants" "git+https://github.com/talex5/eio.git#variants" ]
+  [ "eio_linux.0.11.variants" "git+https://github.com/talex5/eio.git#variants" ]
+  [ "eio_main.0.11.variants" "git+https://github.com/talex5/eio.git#variants" ]
+]
 depends: [
   "ocaml" { >= "5.0.0" }
   "dune" { >= "1.9.0" }
@@ -22,7 +28,7 @@ depends: [
   "angstrom" { >= "0.15.0" }
   "core" { >= "v0.16.0" & < "v0.18.0" }
   "decompress" { >= "1.4.1" }
-  "eio_main" { >= "0.11" & < "1.0.0" }
+  "eio_main" { = "0.11.variants" }
 
   "alcotest" { with-test }
   "yojson" { with-test }

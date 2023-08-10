@@ -584,7 +584,7 @@ let read_to_eof ~slice_size ~pos file =
   try read_slice (Optint.Int63.of_int pos) with
   | End_of_file -> Buffer.contents buf
 
-let index_entries (file : #Eio.File.ro) =
+let index_entries (file : _ Eio.File.ro) =
   (* First make sure the start is valid *)
   let () =
     let cs = Cstruct.create (String.length Magic.start_local_header) in

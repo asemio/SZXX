@@ -131,8 +131,8 @@ val stream_files : sw:Switch.t -> feed:Feed.t -> (entry -> 'a Action.t) -> (entr
 
 (** Return a list of all entries in a ZIP file.
     This function is more efficient than the [SZXX.Zip.stream_files] equivalent, but it can only operate on files. *)
-val index_entries : #Eio.File.ro -> entry list
+val index_entries : _ Eio.File.ro -> entry list
 
 (** Given an entry extracted from [SZXX.Zip.index_entries], this function extracts a single specific file.
     This function is more efficient than the [SZXX.Zip.stream_files] equivalent, but it can only operate on files.  *)
-val extract_from_index : #Eio.File.ro -> entry -> 'a Action.t -> 'a Data.t
+val extract_from_index : _ Eio.File.ro -> entry -> 'a Action.t -> 'a Data.t
