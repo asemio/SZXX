@@ -1,3 +1,3 @@
 (lang dune 1.9)
 (name SZXX)
-(version 4.0.0)
+(version 4.0.1)
