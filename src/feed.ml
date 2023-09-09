@@ -4,7 +4,7 @@ open! Core
 type t = unit -> [ `String of string | `Bigstring of Bigstring.t | `Eof ]
 
 (** Create a [Feed.t] from a standard [Eio.Flow.source] *)
-let of_flow ?(slice_size = 4096) (src : #Eio.Flow.source) : t =
+let of_flow ?(slice_size = 4096) (src : _ Eio.Flow.source) : t =
   let buf = Cstruct.create slice_size in
   fun () ->
     try
@@ -16,7 +16,7 @@ let of_flow ?(slice_size = 4096) (src : #Eio.Flow.source) : t =
 (** Same as [of_flow], but the resulting [Feed.t] does not advance the file cursor.
     In other words, even after processing, the flow will still appear to be "unread".
     Note: this function requires a flow that supports seeking, such as files. *)
-let of_flow_seekable ?(slice_size = 4096) ?(offset = 0) (src : #Eio.File.ro) : t =
+let of_flow_seekable ?(slice_size = 4096) ?(offset = 0) (src : _ Eio.File.ro) : t =
   let buf = Cstruct.create slice_size in
   let pos = ref (Optint.Int63.of_int offset) in
   fun () ->
