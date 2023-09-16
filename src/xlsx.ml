@@ -108,12 +108,10 @@ module SST = struct
 end
 
 let index_of_column s =
-  let key =
-    String.take_while s ~f:(function
-      | 'A' .. 'Z' -> true
-      | _ -> false )
-  in
-  String.fold key ~init:0 ~f:(fun acc c -> (acc * 26) + Char.to_int c - 64) - 1
+  String.fold_until s ~init:0 ~finish:Fn.id ~f:(fun acc -> function
+    | 'A' .. 'Z' as c -> Continue ((acc * 26) + Char.to_int c - 64)
+    | _ -> Stop acc )
+  - 1
 
 module Expert = struct
   module SST = SST
