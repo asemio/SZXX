@@ -1,4 +1,4 @@
-open! Core
+open! Base
 open Eio.Std
 
 type location = {
@@ -25,16 +25,15 @@ type 'a row = {
 }
 [@@deriving sexp_of]
 
-let origin = Date.add_days (Date.create_exn ~y:1900 ~m:(Month.of_int_exn 1) ~d:1) (-2)
+let epoch = -25569
 
-let parse_date f = Float.to_int f |> Date.add_days origin
+let parse_date f = Ptime.unsafe_of_d_ps (Float.to_int f + epoch, 0L) |> Ptime.to_date
 
-let parse_datetime ~zone f =
+let parse_datetime f =
   let parts = Float.modf f in
-  let date = Float.Parts.integral parts |> Float.to_int |> Date.add_days origin in
-  let frac = Float.(Parts.fractional parts * 86400000. |> round) |> Time_float.Span.of_ms in
-  let ofday = Time_float.Ofday.of_span_since_start_of_day_exn frac in
-  Time_float.of_date_ofday ~zone date ofday
+  let ps = Float.(Parts.fractional parts * 86_400_000. |> to_int64) |> Int64.( * ) 1_000_000_000L in
+  let d = Float.(Parts.integral parts |> to_int) in
+  Ptime.unsafe_of_d_ps (d + epoch, ps)
 
 let xml_parser_options =
   Xml.SAX.
@@ -80,7 +79,7 @@ module SST = struct
          | Zip.{ filename; _ }, Zip.Data.Parse_many state -> (
            match Zip.Data.parser_state_to_result state with
            | Ok x -> x
-           | Error msg -> failwithf "SZXX: File '%s' error: %s" filename msg () )
+           | Error msg -> Printf.failwithf "SZXX: File '%s' error: %s" filename msg () )
          | _ -> () );
 
     Queue.to_array q
@@ -96,7 +95,7 @@ module SST = struct
       | Zip.Data.Parse_many state ->
         (match Zip.Data.parser_state_to_result state with
         | Ok () -> ()
-        | Error msg -> failwithf "SZXX: File '%s' error: %s" entry.filename msg ());
+        | Error msg -> Printf.failwithf "SZXX: File '%s' error: %s" entry.filename msg ());
         Queue.to_array q
       | _ -> assert false )
 
@@ -164,9 +163,7 @@ module Expert = struct
         | Some el -> string location (parse_string_cell el) )
       | Some "b" -> dot "v" el |> extract ~null location boolean
       | Some t ->
-        failwithf "Unknown data type: %s. Please report this bug. %s" t
-          (sexp_of_element el |> Sexp.to_string)
-          ()
+        Printf.failwithf !"Unknown data type: %s. Please report this bug. %{sexp: element}" t el ()
     in
     let extract_cell_sst sst cell_parser location el =
       match Xml.DOM.get_attr el.attrs "t" with
@@ -228,7 +225,7 @@ let parse_sheet ~sheet_number push =
   let num = ref 0 in
   let on_match (el : Xml.DOM.element) =
     (match Xml.DOM.get_attr el.attrs "r" with
-    | None -> incr num
+    | None -> Int.incr num
     | Some s -> (
       try
         let i = Int.of_string s in
@@ -238,7 +235,7 @@ let parse_sheet ~sheet_number push =
         done;
         num := i
       with
-      | _ -> incr num ));
+      | _ -> Int.incr num ));
     push { sheet_number; row_number = !num; data = el.children }
   in
   fold_angstrom ~filter_path:[ "worksheet"; "sheetData"; "row" ] ~on_match ()
@@ -250,7 +247,7 @@ let get_sheet_action ~filter_sheets (entry : Zip.entry) push =
   >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
   |> Option.filter ~f:(fun sheet_id ->
        Option.value_map filter_sheets ~default:true ~f:(fun f ->
-         f ~sheet_id ~raw_size:(Byte_units.of_bytes_int64_exn entry.descriptor.uncompressed_size) ) )
+         f ~sheet_id ~raw_size:entry.descriptor.uncompressed_size ) )
   >>| fun sheet_number -> parse_sheet ~sheet_number push
 
 let stream_rows_double_pass ?filter_sheets ~sw file cell_parser =
@@ -268,7 +265,7 @@ let stream_rows_double_pass ?filter_sheets ~sw file cell_parser =
          | Zip.Data.Parse_many state -> (
            match Zip.Data.parser_state_to_result state with
            | Ok () -> ()
-           | Error msg -> failwithf "SZXX: File '%s': %s" filename msg () )
+           | Error msg -> Printf.failwithf "SZXX: File '%s': %s" filename msg () )
          | _ -> assert false ) )
 
 let process_file ?filter_sheets ~sw ~feed (sst_p, sst_w) yield =
@@ -283,11 +280,11 @@ let process_file ?filter_sheets ~sw ~feed (sst_p, sst_w) yield =
        | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Parse_many state -> (
          match Zip.Data.parser_state_to_result state with
          | Ok () -> Promise.resolve sst_w (Queue.to_array q)
-         | Error msg -> failwithf "SZXX: File '%s': %s" SST.zip_entry_filename msg () )
+         | Error msg -> Printf.failwithf "SZXX: File '%s': %s" SST.zip_entry_filename msg () )
        | Zip.{ filename; _ }, Zip.Data.Parse_many state -> (
          match Zip.Data.parser_state_to_result state with
          | Ok () -> ()
-         | Error msg -> failwithf "SZXX: File '%s': %s" filename msg () )
+         | Error msg -> Printf.failwithf "SZXX: File '%s': %s" filename msg () )
        | _ -> () );
 
   if not (Promise.is_resolved sst_p) then Promise.resolve sst_w (Queue.to_array q)
@@ -298,12 +295,13 @@ type status =
   | Got_SST of SST.t
 
 let with_minimal_buffering ?max_buffering ?filter cell_parser sst_p yield raw_rows =
+  let module Seq = Stdlib.Seq in
   let q = Queue.create ?capacity:max_buffering () in
   let highwater =
     match max_buffering with
     | None -> Int.max_value
     | Some x when Int.is_non_negative x -> x
-    | Some x -> failwithf "SZXX: stream_rows_single_pass max_buffering: %d < 0" x ()
+    | Some x -> Printf.failwithf "SZXX: stream_rows_single_pass max_buffering: %d < 0" x ()
   in
 
   let status, raw_rows =
@@ -328,7 +326,7 @@ let with_minimal_buffering ?max_buffering ?filter cell_parser sst_p yield raw_ro
     let sst = Promise.await sst_p in
     Queue.iter q ~f:(fun raw -> yield (Expert.parse_row_with_sst sst cell_parser raw))
   | Overflowed ->
-    failwithf "SZXX: stream_rows_single_pass max_buffering exceeded %d."
+    Printf.failwithf "SZXX: stream_rows_single_pass max_buffering exceeded %d."
       (Option.value max_buffering ~default:Int.max_value)
       ()
   | Got_SST sst -> (
@@ -354,7 +352,7 @@ let string_cell_parser : string cell_parser =
   {
     string = (fun _location s -> unescape s);
     formula = (fun _location ~formula:_ s -> unescape s);
-    error = (fun _location ~formula s -> sprintf !"#ERROR# %{unescape} -> %{unescape}" formula s);
+    error = (fun _location ~formula s -> Printf.sprintf !"#ERROR# %{unescape} -> %{unescape}" formula s);
     boolean = (fun _location s -> if String.(s = "0") then "false" else "true");
     number = (fun _location s -> s);
     date = (fun _location s -> s);
@@ -366,7 +364,8 @@ let yojson_cell_parser : [> `Bool of bool | `Float of float | `String of string 
     string = (fun _location s -> `String (unescape s));
     formula = (fun _location ~formula:_ s -> `String (unescape s));
     error =
-      (fun _location ~formula s -> `String (sprintf !"#ERROR# %{unescape} -> %{unescape}" formula s));
+      (fun _location ~formula s ->
+        `String (Printf.sprintf !"#ERROR# %{unescape} -> %{unescape}" formula s));
     boolean = (fun _location s -> `Bool String.(s = "1"));
     number = (fun _location s -> `Float (Float.of_string s));
     date = (fun _location s -> `String s);

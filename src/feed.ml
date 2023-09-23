@@ -1,7 +1,7 @@
-open! Core
+open! Base
 
 (** Feeds can also be created manually without going through the convenience functions in this module *)
-type t = unit -> [ `String of string | `Bigstring of Bigstring.t | `Eof ]
+type t = unit -> [ `String of string | `Bigstring of Bigstringaf.t | `Eof ]
 
 (** Create a [Feed.t] from a standard [Eio.Flow.source] *)
 let of_flow ?(slice_size = 4096) (src : _ Eio.Flow.source) : t =
@@ -49,7 +49,7 @@ let of_string ?(slice_size = 4096) s : t =
      and the sequence starts being processed. *)
   let chunks =
     if size < slice_size
-    then [ Bigstring.of_string s ]
+    then [ Bigstringaf.of_string s ~off:0 ~len:(String.length s) ]
     else (
       let n = size / slice_size in
       let rem = size - (slice_size * n) in

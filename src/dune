@@ -2,13 +2,16 @@
   (name SZXX)
   (public_name SZXX)
   (libraries
-    core
+    base
     angstrom
     decompress.de
     eio_main
+    ptime
   )
   (preprocess (pps
-    ppx_jane
+    ppx_sexp_conv
+    ppx_compare
+    ppx_custom_printf
   ))
 )
 

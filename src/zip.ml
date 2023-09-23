@@ -1,6 +1,7 @@
-open! Core
+module P = Parsing
+open! Base
 open Angstrom
-open Parsing
+open P
 
 type methd =
   | Stored
@@ -51,7 +52,7 @@ module Action = struct
       }
     | Fold_bigstring of {
         init: 'a;
-        f: entry -> Bigstring.t -> 'a -> 'a;
+        f: entry -> Bigstringaf.t -> 'a -> 'a;
       }
     | Parse of 'a Angstrom.t
     | Parse_many of {
@@ -60,6 +61,8 @@ module Action = struct
       }
     | Terminate
 end
+
+let bs_copy bs = Bigstringaf.copy bs ~off:0 ~len:(Bigstringaf.length bs)
 
 module Data = struct
   type 'a parser_state =
@@ -74,15 +77,28 @@ module Data = struct
 
   let parser_state_to_result = function
   | Success x -> Ok x
-  | Failed { error; unconsumed = _ } -> Error (sprintf "Parsing error: %s" error)
+  | Failed { error; unconsumed = _ } -> Error (Printf.sprintf "Parsing error: %s" error)
   | Terminated_early { unconsumed = _ } -> Error "Could not parse all input"
   | Incomplete -> Error "File incomplete, encountered EOF too early"
+
+  type bigstringaf = Bigstringaf.t
+
+  let sexp_of_bigstringaf bs = Sexp.Atom (Bigstringaf.to_string bs)
+
+  let compare_bigstringaf a b =
+    let len1 = Bigstringaf.length a in
+    let len2 = Bigstringaf.length b in
+    match Bigstringaf.unsafe_memcmp a 0 b 0 (min len1 len2) with
+    | 0 -> Int.compare len1 len2
+    | x -> x
+
+  let equal_bigstringaf a b = compare_bigstringaf a b = 0
 
   type 'a t =
     | Skip
     | Fast_skip
     | String of string
-    | Bigstring of Bigstring.t
+    | Bigstring of bigstringaf
     | Fold_string of 'a
     | Fold_bigstring of 'a
     | Parse of 'a parser_state
@@ -96,8 +112,8 @@ let slice_bits = 13
 let slice_size = Int.(2 ** slice_bits)
 
 module Storage = struct
-  type t = Parsing.Storage.t = {
-    add: Bigstring.t -> off:int -> len:int -> unit;
+  type t = P.Storage.t = {
+    add: Bigstringaf.t -> off:int -> len:int -> unit;
     finalize: unit -> unit;
     commit: unit Angstrom.t;
   }
@@ -119,7 +135,8 @@ module Storage = struct
         flush outbs ~off:0 ~len;
         De.Inf.flush decoder;
         do_decompress ()
-      | `Malformed err -> failwithf "SZXX: Corrupted file. Malformed deflate data. Error: %s" err ()
+      | `Malformed err ->
+        Printf.failwithf "SZXX: Corrupted file. Malformed deflate data. Error: %s" err ()
     in
     let decompress bs ~off ~len =
       De.Inf.src decoder bs off len;
@@ -137,7 +154,7 @@ end
 
 module Mode = struct
   type 'a t = {
-    flush: Bigstring.t -> off:int -> len:int -> unit;
+    flush: Bigstringaf.t -> off:int -> len:int -> unit;
     complete: unit -> 'a Data.t * int * Optint.t;
   }
 
@@ -212,7 +229,8 @@ module Mode = struct
     | Done ({ len = 0; _ }, x) -> Success x
     | Done (u, _) -> Terminated_early { unconsumed = unconsumed u }
     | Fail (u, ll, msg) ->
-      Failed { error = sprintf "%s: %s" (String.concat ~sep:" > " ll) msg; unconsumed = unconsumed u }
+      Failed
+        { error = Printf.sprintf "%s: %s" (String.concat ~sep:" > " ll) msg; unconsumed = unconsumed u }
     | Partial _ -> Incomplete
 
   let parse parser =
@@ -224,8 +242,8 @@ module Mode = struct
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs off len !crc;
       match !state with
-      | Done ({ len = 0; _ }, x) -> state := Done ({ buf = Bigstring.copy bs; len; off }, x)
-      | Fail ({ len = 0; _ }, x, y) -> state := Fail ({ buf = Bigstring.copy bs; len; off }, x, y)
+      | Done ({ len = 0; _ }, x) -> state := Done ({ buf = bs_copy bs; len; off }, x)
+      | Fail ({ len = 0; _ }, x, y) -> state := Fail ({ buf = bs_copy bs; len; off }, x, y)
       | Done _
        |Fail _ ->
         ()
@@ -248,8 +266,8 @@ module Mode = struct
       bytes_processed := !bytes_processed + len;
       crc := Checkseum.Crc32.digest_bigstring bs off len !crc;
       match !state with
-      | Done ({ len = 0; _ }, ()) -> state := Done ({ buf = Bigstring.copy bs; len; off }, ())
-      | Fail ({ len = 0; _ }, x, y) -> state := Fail ({ buf = Bigstring.copy bs; len; off }, x, y)
+      | Done ({ len = 0; _ }, ()) -> state := Done ({ buf = bs_copy bs; len; off }, ())
+      | Fail ({ len = 0; _ }, x, y) -> state := Fail ({ buf = bs_copy bs; len; off }, x, y)
       | Done _
        |Fail _ ->
         ()
@@ -284,7 +302,7 @@ module Parsers = struct
     LE.any_uint16 >>| function
     | 20 -> Zip_2_0
     | 45 -> Zip_4_5
-    | x -> failwithf "SZXX: Unsupported/unknown ZIP version: %d" x ()
+    | x -> Printf.failwithf "SZXX: Unsupported/unknown ZIP version: %d" x ()
 
   let flags_methd_parser =
     let+ flags = LE.any_uint16
@@ -295,7 +313,7 @@ module Parsers = struct
       | 0 -> Stored
       | 8 -> Deflated
       | x ->
-        failwithf
+        Printf.failwithf
           "SZXX: Unsupported ZIP compression method %d. You are welcome to open a feature request." x ()
     in
     flags, methd
@@ -368,7 +386,8 @@ module Parsers = struct
           crc;
           offset;
         }
-      | _ -> failwithf "SZXX: Corrupted file. Unexpected length of ZIP64 extra field data: %d" len () )
+      | _ ->
+        Printf.failwithf "SZXX: Corrupted file. Unexpected length of ZIP64 extra field data: %d" len () )
 end
 
 module Magic = struct
@@ -504,18 +523,18 @@ let parse_one cb =
      |_, true, true ->
       entry, data
     | _, false, false ->
-      failwithf "SZXX: File '%s': Size and CRC mismatch: %d bytes but expected %Ld bytes" entry.filename
-        size entry.descriptor.uncompressed_size ()
+      Printf.failwithf "SZXX: File '%s': Size and CRC mismatch: %d bytes but expected %Ld bytes"
+        entry.filename size entry.descriptor.uncompressed_size ()
     | _, false, true ->
-      failwithf "SZXX: File '%s': Size mismatch: %d bytes but expected %Ld bytes" entry.filename size
-        entry.descriptor.uncompressed_size ()
-    | _, true, false -> failwithf "SZXX: File '%s': CRC mismatch" entry.filename () )
+      Printf.failwithf "SZXX: File '%s': Size mismatch: %d bytes but expected %Ld bytes" entry.filename
+        size entry.descriptor.uncompressed_size ()
+    | _, true, false -> Printf.failwithf "SZXX: File '%s': CRC mismatch" entry.filename () )
 
 let skip_over_cd_and_drain = string Magic.start_cd_header *> skip_while (fun _ -> true) *> end_of_input
 
 let invalid = function
 | Ok x -> x
-| Error msg -> failwithf "SZXX: Corrupted file. Invalid ZIP structure. Error: %s" msg ()
+| Error msg -> Printf.failwithf "SZXX: Corrupted file. Invalid ZIP structure. Error: %s" msg ()
 
 let stream_files ~sw ~feed:(read : Feed.t) cb =
   Sequence.of_seq
@@ -549,7 +568,7 @@ let stream_files ~sw ~feed:(read : Feed.t) cb =
 
 let parse_eocd =
   let* offset =
-    bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:Magic.start_eocd Parsing.Storage.noop
+    bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:Magic.start_eocd P.Storage.noop
     *> advance 12
     *> Parsers.parse_initial_offset
   in
@@ -559,7 +578,7 @@ let parse_eocd =
 
 let parse_eocd64 =
   let+ raw =
-    bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:Magic.start_eocd64 Parsing.Storage.noop
+    bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:Magic.start_eocd64 P.Storage.noop
     *> advance 44
     *> take 8
   in
@@ -567,7 +586,7 @@ let parse_eocd64 =
 
 let parse_eocd64_locator =
   let+ raw =
-    bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:Magic.start_eocd64_locator Parsing.Storage.noop
+    bounded_file_reader ~slice_size:Int.(2 ** 10) ~pattern:Magic.start_eocd64_locator P.Storage.noop
     *> advance 4
     *> take 8
   in
@@ -594,7 +613,7 @@ let index_entries (file : _ Eio.File.ro) =
   in
   let do_parse ~kind parser raw =
     match Angstrom.parse_string ~consume:Prefix parser raw with
-    | Error msg -> failwithf "SZXX: Corrupted file. Unable to parse %s. Error: %s" kind msg ()
+    | Error msg -> Printf.failwithf "SZXX: Corrupted file. Unable to parse %s. Error: %s" kind msg ()
     | Ok x -> x
   in
   (* Find start of central dictory *)

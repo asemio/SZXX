@@ -1,4 +1,4 @@
-open! Core
+open! Base
 
 (** Basic XML types and accessor functions *)
 module DOM : sig
@@ -167,11 +167,11 @@ type document = {
       For example a [<br>] without a matching [</br>] will be treated as a self-closing [<br />].
 
     [feed]: A producer of raw input data. Create a [feed] by using the [SZXX.Feed] module. *)
-val parse_document : ?parser:SAX.node Angstrom.t -> ?strict:bool -> Feed.t -> (document, string) result
+val parse_document : ?parser:SAX.node Angstrom.t -> ?strict:bool -> Feed.t -> (document, string) Result.t
 
 (** Same as [parse_document], but from a string *)
 val parse_document_from_string :
-  ?parser:SAX.node Angstrom.t -> ?strict:bool -> string -> (document, string) result
+  ?parser:SAX.node Angstrom.t -> ?strict:bool -> string -> (document, string) Result.t
 
 val html_parser : SAX.node Angstrom.t
 
@@ -198,4 +198,4 @@ val stream_matching_elements :
   filter_path:string list ->
   on_match:(DOM.element -> unit) ->
   Feed.t ->
-  (document, string) result
+  (document, string) Result.t

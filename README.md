@@ -267,13 +267,13 @@ There are two major benefits to using `~filter` in this way:
 
 ### Xlsx.parse_date
 
-XLSX dates are stored as floats. This function converts from a `float` to a `Date.t`.
+XLSX dates are usually stored as floats. This function converts from a `float` to a `Ptime.date`.
 
-Note: the XLSX type `Date` exists, but it's rarely ever used.
+Note: the XLSX type `Date` also exists, but it's rarely seen.
 
 ### Xlsx.parse_datetime
 
-XLSX datetimes are stored as floats. This function converts from a `float` to a `Time_float.t`.
+XLSX datetimes are stored as floats. This function converts from a `float` to a `Ptime.t`.
 
 ### Xlsx.index_of_column
 

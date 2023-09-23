@@ -1,7 +1,7 @@
-open! Core
+open! Base
 open Angstrom
 
-let ( .*{} ) bs pos = Bigstring.unsafe_get_uint8 bs ~pos
+let ( .*{} ) bs pos = Bigstringaf.unsafe_get bs pos |> Char.to_int
 
 let return_true = return true
 
@@ -61,7 +61,7 @@ let skip_n_times n p =
     fix (fun m ->
       let count = ref 0 in
       let* _ = p in
-      incr count;
+      Int.incr count;
       if !count < n then m else return_unit )
 
 (* Faster version of Angstrom.count *)
@@ -81,7 +81,7 @@ let peek_with len f =
 let equal_sub buf1 ~pos1 buf2 ~pos2 ~len =
   let i = ref 0 in
   while !i < len && buf1.*{pos1 + !i} = buf2.*{pos2 + !i} do
-    incr i
+    Int.incr i
   done;
   !i = len
 
@@ -93,7 +93,7 @@ let string s =
   >>= Fn.id
 
 let bigstring bs =
-  Unsafe.take (Bigstring.length bs) (fun buf ~off ~len ->
+  Unsafe.take (Bigstringaf.length bs) (fun buf ~off ~len ->
     if equal_sub buf ~pos1:off bs ~pos2:0 ~len then return_unit else fail_pattern )
   >>= Fn.id
 
@@ -121,7 +121,7 @@ let sub_index ~pattern ~patlen bs ~off ~len =
 
 module Storage = struct
   type t = {
-    add: Bigstring.t -> off:int -> len:int -> unit;
+    add: Bigstringaf.t -> off:int -> len:int -> unit;
     finalize: unit -> unit;
     commit: unit Angstrom.t;
   }

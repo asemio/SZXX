@@ -20,9 +20,13 @@ depends: [
   "dune" { >= "1.9.0" }
 
   "angstrom" { >= "0.15.0" }
-  "core" { >= "v0.16.0" }
+  "base" { >= "v0.16.0" }
+  "ppx_sexp_conv" { >= "v0.16.0" }
+  "ppx_compare" { >= "v0.16.0" }
+  "ppx_custom_printf" { >= "v0.16.0" }
   "decompress" { >= "1.4.1" }
   "eio_main" { >= "0.12" }
+  "ptime" { >= "0.8.6" }
 
   "alcotest" { with-test }
   "yojson" { with-test }

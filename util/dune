@@ -6,7 +6,7 @@
     yojson
   )
   (preprocess (pps
-    ppx_jane
+    ppx_custom_printf
   ))
   (modes exe)
   (ocamlopt_flags -O3)

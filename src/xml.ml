@@ -1,4 +1,5 @@
-open! Core
+module P = Parsing
+open! Base
 
 module Unescape = struct
   type utf8_consts = {
@@ -46,8 +47,9 @@ module Unescape = struct
       Bytes.unsafe_to_string ~no_mutation_while_string_reachable:b
       |> Int.of_string
       |> encode_utf_8_codepoint
-    | '#', '0' .. '9' -> String.slice str 1 0 |> Int.of_string |> encode_utf_8_codepoint
-    | _ -> raise (Invalid_argument (sprintf "Not a valid XML-encoded entity: '%s'" str)) )
+    | '#', '0' .. '9' ->
+      String.sub str ~pos:1 ~len:(String.length str - 1) |> Int.of_string |> encode_utf_8_codepoint
+    | _ -> raise (Invalid_argument (Printf.sprintf "Not a valid XML-encoded entity: '%s'" str)) )
 
   let run original =
     let rec loop buf from =
@@ -59,7 +61,8 @@ module Unescape = struct
         | Some stop ->
           Buffer.add_substring buf original ~pos:from ~len:(start - from);
           (try
-             let s = decode_exn (String.slice original (start + 1) stop) in
+             let pos = start + 1 in
+             let s = decode_exn (String.sub original ~pos ~len:(stop - pos)) in
              Buffer.add_string buf s
            with
           | _ -> Buffer.add_substring buf original ~pos:start ~len:(stop - start + 1));
@@ -124,7 +127,7 @@ end
 
 module Parser = struct
   open Angstrom
-  open Parsing
+  open P
 
   module Types = struct
     type node =
@@ -290,9 +293,7 @@ module Parser = struct
       >>= Fn.id
     in
     let p = fast_path <|> slow_path in
-    if options.batch_size > 1
-    then choice [ (Parsing.count options.batch_size p >>| fun x -> Many x); p ]
-    else p
+    if options.batch_size > 1 then choice [ (count options.batch_size p >>| fun x -> Many x); p ] else p
 end
 
 module SAX = struct
@@ -327,14 +328,15 @@ module SAX = struct
     [@@deriving sexp_of, compare, equal]
 
     let make_partial tag attrs =
-      { tag; tag_hash = [%hash: string] tag; attrs; text = []; children = []; staged = [] }
+      { tag; tag_hash = String.hash tag; attrs; text = []; children = []; staged = [] }
 
     let squish_into raw final acc =
       String.fold raw ~init:acc ~f:(fun acc c ->
         match acc with
         | after_first, _ when Parser.is_ws c -> after_first, true
         | true, true ->
-          bprintf final " %c" c;
+          Buffer.add_char final ' ';
+          Buffer.add_char final c;
           true, false
         | _ ->
           Buffer.add_char final c;
@@ -405,8 +407,8 @@ module SAX = struct
           when String.( = ) tag current.tag ->
           { acc with stack = []; top = Some (partial_to_element current) }
         | Element_close tag, { stack = current :: _ :: _; _ } when strict ->
-          failwithf "SZXX: Invalid XML document. Closing element '%s' before element '%s'" tag current.tag
-            ()
+          Printf.failwithf "SZXX: Invalid XML document. Closing element '%s' before element '%s'" tag
+            current.tag ()
         | (Element_close _ as tried), ({ stack = current :: parent :: rest; _ } as acc) ->
           let acc =
             {
@@ -423,7 +425,8 @@ module SAX = struct
           in
           (folder [@tailcall]) ~strict acc (Many [ Element_close current.tag; tried ])
         | Element_close tag, _ ->
-          failwithf "SZXX: Invalid XML document. Closing tag without a matching opening tag: '%s'" tag ()
+          Printf.failwithf "SZXX: Invalid XML document. Closing tag without a matching opening tag: '%s'"
+            tag ()
     end
 
     module Stream = struct
@@ -465,7 +468,7 @@ module SAX = struct
             if path = filter_path
             then path, hash, level + 1
             else (
-              let hash = [%hash_fold: string] hash tag in
+              let hash = String.hash_fold_t hash tag in
               Hash.get_hash_value hash, hash, level + 1 )
           in
           { acc with stack = partial :: stack; path_stack = frame :: acc.path_stack }
@@ -508,8 +511,8 @@ module SAX = struct
           when String.( = ) tag current.tag ->
           { acc with stack = []; top = Some (partial_to_element current) }
         | Element_close tag, { stack = current :: _ :: _; _ } when strict ->
-          failwithf "SZXX: Invalid XML document. Closing element '%s' before element '%s'" tag current.tag
-            ()
+          Printf.failwithf "SZXX: Invalid XML document. Closing element '%s' before element '%s'" tag
+            current.tag ()
         | (Element_close _ as tried), ({ stack = current :: parent :: rest; _ } as acc) ->
           let acc =
             {
@@ -527,16 +530,17 @@ module SAX = struct
           (folder [@tailcall]) ~filter_path ~filter_level ~on_match ~strict acc
             (Many [ Element_close current.tag; tried ])
         | Element_close tag, _ ->
-          failwithf "SZXX: Invalid XML document. Closing tag without a matching opening tag: '%s'" tag ()
+          Printf.failwithf "SZXX: Invalid XML document. Closing tag without a matching opening tag: '%s'"
+            tag ()
 
       let folder ~filter_path:path_list ~on_match ?(strict = true) acc node =
         let filter_path, filter_level =
           List.fold path_list
             ~init:(Hash.create (), 0)
-            ~f:(fun (h, len) x -> [%hash_fold: string] h x, len + 1)
-          |> Tuple2.map_fst ~f:Hash.get_hash_value
+            ~f:(fun (h, len) x -> String.hash_fold_t h x, len + 1)
         in
-        folder ~filter_path ~filter_level ~on_match ~strict acc (node : node)
+        folder ~filter_path:(Hash.get_hash_value filter_path) ~filter_level ~on_match ~strict acc
+          (node : node)
     end
   end
 end
@@ -563,11 +567,11 @@ let rec unescape_text = function
 
 let invalid = function
 | Ok x -> x
-| Error msg -> failwithf "SZXX: Invalid XML structure. Error: %s" msg ()
+| Error msg -> Printf.failwithf "SZXX: Invalid XML structure. Error: %s" msg ()
 
 let parse_feed ?parser:(node_parser = SAX.parser) ~feed:read on_parse =
   let open Angstrom in
-  let open Parsing in
+  let open P in
   let parser = skip_many (node_parser >>| on_parse) *> end_of_input in
   let open Buffered in
   let rec loop = function
@@ -592,10 +596,10 @@ let parse_document ?parser ?strict feed =
   | { stack = []; top = Some top; decl_attrs; _ } ->
     Ok { top; decl_attrs = Option.value ~default:[] decl_attrs }
   | { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
-  | { stack = [ x ]; _ } -> Error (sprintf "SZXX: Unclosed XML element: %s" x.tag)
+  | { stack = [ x ]; _ } -> Error (Printf.sprintf "SZXX: Unclosed XML element: %s" x.tag)
   | { stack; _ } ->
     Error
-      (sprintf "SZXX: Unclosed XML elements: %s"
+      (Printf.sprintf "SZXX: Unclosed XML elements: %s"
          (List.map stack ~f:(fun { tag; _ } -> tag) |> String.concat ~sep:", ") )
   | exception Failure msg -> Error msg
 
@@ -614,9 +618,9 @@ let stream_matching_elements ?parser ?strict ~filter_path ~on_match feed =
   | { stack = []; top = Some top; decl_attrs; _ } ->
     Ok { top; decl_attrs = Option.value ~default:[] decl_attrs }
   | { stack = []; top = None; _ } -> Error "SZXX: Empty XML document"
-  | { stack = [ x ]; _ } -> Error (sprintf "SZXX: Unclosed XML element: %s" x.tag)
+  | { stack = [ x ]; _ } -> Error (Printf.sprintf "SZXX: Unclosed XML element: %s" x.tag)
   | { stack; _ } ->
     Error
-      (sprintf "SZXX: Unclosed XML elements: %s"
+      (Printf.sprintf "SZXX: Unclosed XML elements: %s"
          (List.map stack ~f:(fun { tag; _ } -> tag) |> String.concat ~sep:", ") )
   | exception Failure msg -> Error msg

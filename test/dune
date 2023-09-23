@@ -5,12 +5,14 @@
     angstrom
 
     alcotest
-    core
+    base
     yojson
   )
   (preprocess (pps
+    ppx_sexp_conv
+    ppx_compare
+    ppx_custom_printf
     ppx_deriving_yojson
-    ppx_jane
   ))
   (ocamlopt_flags -Oclassic)
 )

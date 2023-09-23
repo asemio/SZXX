@@ -1,7 +1,9 @@
-open! Core
+open! Base
 open Eio.Std
 
-let get_file_path = sprintf "../../../test/files/%s"
+exception Exit = Stdlib.Exit
+
+let get_file_path = Printf.sprintf "../../../test/files/%s"
 
 let fold env xlsx_filename json_filename () =
   let xlsx_path = get_file_path xlsx_filename in
@@ -77,14 +79,14 @@ let read_outside_switch env filename () =
 
 let index_entries env filename () =
   let zip_path = get_file_path filename in
-  let json_path = get_file_path (sprintf "%s.contents.json" filename) in
+  let json_path = get_file_path (Printf.sprintf "%s.contents.json" filename) in
   let against = Eio.Path.(load (Eio.Stdenv.fs env / json_path)) |> Yojson.Safe.from_string in
   let open SZXX in
   Eio.Path.(with_open_in (Eio.Stdenv.fs env / zip_path)) @@ fun file ->
   let parsed =
     let ll =
       Zip.index_entries file
-      |> List.map ~f:(fun entry ->
+      |> List.map ~f:(fun (entry : Zip.entry) ->
            `List
              [
                `String entry.filename;
@@ -101,7 +103,8 @@ let extract_contents env filename ~entry_name () =
   let open SZXX in
   Eio.Path.(with_open_in (Eio.Stdenv.fs env / zip_path)) @@ fun file ->
   let entry =
-    Zip.index_entries file |> List.find_exn ~f:(fun entry -> String.(entry.filename = entry_name))
+    Zip.index_entries file
+    |> List.find_exn ~f:(fun (entry : Zip.entry) -> String.(entry.filename = entry_name))
   in
   let folder _entry chunk init = String.fold chunk ~init ~f:(fun acc c -> acc + Char.to_int c) in
   let checksum =
@@ -109,7 +112,7 @@ let extract_contents env filename ~entry_name () =
     | Zip.Data.Fold_string x -> x
     | _ -> assert false
   in
-  if checksum <> 26819507 then failwithf "checksum: %d <> 26819507" checksum ()
+  if checksum <> 26819507 then Printf.failwithf "checksum: %d <> 26819507" checksum ()
 
 let corrupted env filename () =
   try

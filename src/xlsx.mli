@@ -1,4 +1,4 @@
-open! Core
+open! Base
 open Eio.Std
 
 type location = {
@@ -33,11 +33,11 @@ val string_cell_parser : string cell_parser
 (** Convenience cell_parser to convert from XLSX types to JSON *)
 val yojson_cell_parser : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_parser
 
-(** XLSX dates are stored as floats. Convert from a [float] to a [Date.t] *)
-val parse_date : float -> Date.t
+(** XLSX dates are stored as floats. Convert from a [float] to a [Ptime.date] *)
+val parse_date : float -> Ptime.date
 
-(** XLSX datetimes are stored as floats. Convert from a [float] to a [Time_float.t] *)
-val parse_datetime : zone:Time_float.Zone.t -> float -> Time_float.t
+(** XLSX datetimes are stored as floats. Convert from a [float] to a [Ptime.t] *)
+val parse_datetime : float -> Ptime.t
 
 (** Convert from a column reference such as "D7" or "AA2" to a 0-based column index *)
 val index_of_column : string -> int
@@ -60,7 +60,7 @@ val index_of_column : string -> int
 
     SZXX will wait for you to consume rows from the Sequence before extracting more. *)
 val stream_rows_double_pass :
-  ?filter_sheets:(sheet_id:int -> raw_size:Byte_units.t -> bool) ->
+  ?filter_sheets:(sheet_id:int -> raw_size:int64 -> bool) ->
   sw:Switch.t ->
   _ Eio.File.ro ->
   'a cell_parser ->
@@ -93,7 +93,7 @@ val stream_rows_double_pass :
 val stream_rows_single_pass :
   ?max_buffering:int ->
   ?filter:(Xml.DOM.element row -> bool) ->
-  ?filter_sheets:(sheet_id:int -> raw_size:Byte_units.t -> bool) ->
+  ?filter_sheets:(sheet_id:int -> raw_size:int64 -> bool) ->
   sw:Switch.t ->
   feed:Feed.t ->
   'a cell_parser ->

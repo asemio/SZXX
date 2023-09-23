@@ -1,6 +1,8 @@
-open! Core
+open! Base
 
-let get_file_path = sprintf "../../../test/files/%s"
+exception Exit = Stdlib.Exit
+
+let get_file_path = Printf.sprintf "../../../test/files/%s"
 
 module Test1 = struct
   let raw =
@@ -133,7 +135,7 @@ module Test2 = struct
 
 |s}
     (* UTF-8 BOM *)
-    |> sprintf "\xEF\xBB\xBF%s"
+    |> Printf.sprintf "\xEF\xBB\xBF%s"
 
   let data =
     Yojson.Safe.from_string
@@ -240,7 +242,7 @@ module Test3 = struct
 </worksheet>
 |s}
     (* UTF-8 BOM *)
-    |> sprintf "\xEF\xBB\xBF%s"
+    |> Printf.sprintf "\xEF\xBB\xBF%s"
 
   let data =
     Yojson.Safe.from_string
@@ -481,12 +483,12 @@ let test_large_cdata () =
     let s = String.init 256 ~f:Char.of_int_exn in
     String.concat [ s; s; s; s; s ]
   in
-  bprintf buf "<![CDATA[%s]]>" random;
+  Buffer.add_string buf (Printf.sprintf "<![CDATA[%s]]>" random);
   let node =
     Angstrom.parse_string ~consume:All SZXX.Xml.SAX.parser (Buffer.contents buf) |> Result.ok_or_failwith
   in
   if not ([%equal: SZXX.Xml.SAX.node] node (SZXX.Xml.SAX.Cdata random))
-  then failwithf !"CDATA Strings did not match %{sexp#hum: SZXX.Xml.SAX.node}" node ()
+  then Printf.failwithf !"CDATA Strings did not match %{sexp#hum: SZXX.Xml.SAX.node}" node ()
 
 type element = SZXX.Xml.DOM.element = {
   tag: string;
@@ -551,7 +553,7 @@ let readme_example2 env filename () =
     doc.top |> Xml.DOM.(get [ dot "body"; dot "div" ]) |> Option.bind ~f:(Xml.DOM.dot_text "h1")
   in
   if not ([%equal: string option] text (Some "BOO!"))
-  then failwithf !"h1 contained %{sexp: string option}" text ()
+  then Printf.failwithf !"h1 contained %{sexp: string option}" text ()
 
 let corrupted env filename () =
   try
