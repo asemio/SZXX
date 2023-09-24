@@ -74,11 +74,11 @@ Most XLSX applications use Number cells (OCaml float) to encode Date and DateTim
 
 The vast majority of applications that generate XLSX files will not inline the contents of String cells directly into the spreadsheet. Instead, String cells will contain a reference to an offset in the **Shared Strings Table** (the **SST**). This saves space by reusing strings, but 99% of the time those applications will place the SST **after** the sheet and that's not ideal...
 
-If the XLSX document is in the form of a file, then it's fine because SZXX can jump around the file to parse the SST before reading the rows. But the location of the SST matters when we cannot rewind, such as when parsing directly from an HTTP stream, because it means we might need to cache rows until we can decode them using the SST. As you'll see, SZXX has options to handle this issue.
+If the XLSX document is in the form of a file, then it's fine because SZXX can jump around the file to parse the SST before reading the rows. But the location of the SST matters when we cannot rewind, such as when parsing directly from an HTTP stream, because it means we might need to cache rows until we can decode them using the SST. As you'll see, SZXX provides options to handle this issue.
 
 We can inspect the structure of a file using `zipinfo`:
 ```sh
-zipinfo financial.xlsx
+$ zipinfo financial.xlsx
 ```
 The SST is indicated by `xl/sharedStrings.xml` and sheets look like `xl/worksheets/sheet1.xml`.
 
