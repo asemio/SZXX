@@ -143,12 +143,11 @@ let process_file ?only_sheet ~skip_sst ~feed push finalize =
         let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
         fold_angstrom ~filter_path:SST.filter_path ~on_match
       | { filename; _ } ->
-        let open Option.Monad_infix in
-        String.chop_prefix ~prefix:"xl/worksheets/sheet" filename
-        >>= String.chop_suffix ~suffix:".xml"
-        >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
-        |> Option.filter ~f:(fun i -> Option.value_map only_sheet ~default:true ~f:(( = ) i))
-        >>| (fun sheet_number -> parse_sheet ~sheet_number push)
+        Option.try_with (fun () -> Scanf.sscanf filename "xl/worksheets/%[sS]heet%d.xml" (fun _ d -> d))
+        |> Option.bind ~f:(fun i ->
+               if Option.value_map only_sheet ~default:true ~f:(( = ) i)
+               then Some (parse_sheet ~sheet_number:i push)
+               else None)
         |> Option.value ~default:Zip.Action.Skip)
   in
   let result_p =
