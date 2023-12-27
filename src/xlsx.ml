@@ -241,14 +241,12 @@ let parse_sheet ~sheet_number push =
   fold_angstrom ~filter_path:[ "worksheet"; "sheetData"; "row" ] ~on_match ()
 
 let get_sheet_action ~filter_sheets (entry : Zip.entry) push =
-  let open Option.Monad_infix in
-  String.chop_prefix ~prefix:"xl/worksheets/sheet" entry.filename
-  >>= String.chop_suffix ~suffix:".xml"
-  >>= (fun s -> Option.try_with (fun () -> Int.of_string s))
+  Option.try_with (fun () ->
+    Stdlib.Scanf.sscanf entry.filename "xl/worksheets/%[sS]heet%d.xml" (fun _ d -> d) )
   |> Option.filter ~f:(fun sheet_id ->
        Option.value_map filter_sheets ~default:true ~f:(fun f ->
          f ~sheet_id ~raw_size:entry.descriptor.uncompressed_size ) )
-  >>| fun sheet_number -> parse_sheet ~sheet_number push
+  |> Option.map ~f:(fun sheet_number -> parse_sheet ~sheet_number push)
 
 let stream_rows_double_pass ?filter_sheets ~sw file cell_parser =
   let entries = Zip.index_entries file in
