@@ -300,9 +300,8 @@ let parse_le_uint64 ?(offset = 0) s =
 module Parsers = struct
   let version_needed =
     LE.any_uint16 >>| function
-    | 20 -> Zip_2_0
-    | 45 -> Zip_4_5
-    | x -> Printf.failwithf "SZXX: Unsupported/unknown ZIP version: %d" x ()
+    | x when x < 45 -> Zip_2_0
+    | _ -> Zip_4_5
 
   let flags_methd_parser =
     let+ flags = LE.any_uint16
