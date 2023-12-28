@@ -257,9 +257,8 @@ let parser cb =
   let entry_parser =
     Parsing.skip_until_pattern ~pattern:"PK\003\004"
     *> (LE.any_uint16 >>| function
-        | 20 -> Zip_2_0
-        | 45 -> Zip_4_5
-        | x -> failwithf "Unsupported version: %d. Please report this bug." x ())
+        | x when x < 45 -> Zip_2_0
+        | _ -> Zip_4_5)
     >>= fun version_needed ->
     lift3
       (fun (flags, methd) descriptor (filename, extra_fields) ->
