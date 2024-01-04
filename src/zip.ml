@@ -421,10 +421,7 @@ let parse_entry =
     {
       version_needed;
       flags;
-      trailing_descriptor_present =
-        ( flags land 0x008 <> 0
-        || Int64.(descriptor.compressed_size = 0L)
-        || Int64.(descriptor.uncompressed_size = 0L) );
+      trailing_descriptor_present = flags land 0x008 <> 0;
       methd;
       descriptor;
       filename;
@@ -455,10 +452,7 @@ let parse_cd_entry =
     {
       version_needed;
       flags;
-      trailing_descriptor_present =
-        ( flags land 0x008 <> 0
-        || Int64.(descriptor.compressed_size = 0L)
-        || Int64.(descriptor.uncompressed_size = 0L) );
+      trailing_descriptor_present = flags land 0x008 <> 0;
       methd;
       descriptor;
       filename;
@@ -490,7 +484,7 @@ let parse_one cb =
       | Stored, _ -> Storage.stored flush, entry.descriptor.uncompressed_size
     in
     let file_reader =
-      if Int64.(entry.descriptor.compressed_size = 0L) || Int64.(entry.descriptor.uncompressed_size = 0L)
+      if entry.trailing_descriptor_present
       then bounded_file_reader ~slice_size:Int.(2 ** 11) ~pattern:Magic.end_bounded_file
       else fixed_size_reader (Int64.to_int_exn zipped_length)
     in
