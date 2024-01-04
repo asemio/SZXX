@@ -272,10 +272,7 @@ let parser cb =
         {
           version_needed;
           flags;
-          trailing_descriptor_present =
-            (flags land 0x008 <> 0
-            || Int64.(descriptor.compressed_size = 0L)
-            || Int64.(descriptor.uncompressed_size = 0L));
+          trailing_descriptor_present = flags land 0x008 <> 0;
           methd;
           descriptor;
           filename;
@@ -302,7 +299,7 @@ let parser cb =
       | Deflated -> Storage.deflated flush, entry.descriptor.compressed_size
     in
     let file_reader =
-      if Int64.(entry.descriptor.compressed_size = 0L) || Int64.(entry.descriptor.uncompressed_size = 0L)
+      if entry.trailing_descriptor_present
       then Parsing.bounded_file_reader ~pattern:"PK\007\008"
       else fixed_size_reader (Int64.to_int_exn zipped_length)
     in

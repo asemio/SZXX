@@ -233,6 +233,15 @@ let count_tokens xlsx_path =
     );
   Lwt.return_unit
 
+let index xlsx_path =
+  Lwt_io.with_file ~flags:flags_read ~mode:Input xlsx_path (fun ic ->
+      let files, success =
+        Zip.stream_files ~feed:(feed_bigstring ic) (fun _entry -> Zip.Action.String)
+      in
+      let p = Lwt_stream.iter_s (fun (entry, _) -> Lwt_io.printlf !"%{sexp: Zip.entry}" entry) files in
+      let* () = success in
+      p)
+
 let () =
   Sys.get_argv () |> function
   | [| _; "extract_sst"; file |] -> Lwt_main.run (extract_sst file)
@@ -242,4 +251,5 @@ let () =
   | [| _; "count_types"; file |] -> Lwt_main.run (count_types file)
   | [| _; "count_length"; file |] -> Lwt_main.run (count_total_string_length file)
   | [| _; "count_tokens"; file |] -> Lwt_main.run (count_tokens file)
+  | [| _; "index"; file |] -> Lwt_main.run (index file)
   | _ -> failwith "Invalid arguments"
