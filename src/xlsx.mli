@@ -25,7 +25,7 @@ type delayed_string = {
 
 type 'a status =
   | Available of 'a
-  | Delayed   of delayed_string
+  | Delayed of delayed_string
 [@@deriving sexp_of]
 
 type 'a row = {
@@ -84,7 +84,7 @@ val stream_rows_unparsed :
   Xml.DOM.element row Lwt_stream.t * SST.t Lwt.t * unit Lwt.t
 
 (** Convenience cell_parser to read rows as JSON (Yojson) *)
-val yojson_cell_parser : [> `Bool   of bool | `Float  of float | `String of string | `Null ] cell_parser
+val yojson_cell_parser : [> `Bool of bool | `Float of float | `String of string | `Null ] cell_parser
 
 (** Convert an XML element as returned by [stream_rows_unparsed] into a nicer ['a row] as returned by [stream_rows_buffer] *)
 val parse_row_with_sst : SST.t -> 'a cell_parser -> Xml.DOM.element row -> 'a row

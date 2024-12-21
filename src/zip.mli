@@ -39,7 +39,7 @@ module Action : sig
   type 'a t =
     | Skip
     | String
-    | Fold_string    of {
+    | Fold_string of {
         init: 'a;
         f: entry -> string -> 'a -> 'a;
       }
@@ -47,16 +47,16 @@ module Action : sig
         init: 'a;
         f: entry -> Bigstring.t -> len:int -> 'a -> 'a;
       }
-    | Parse          of 'a Angstrom.t
+    | Parse of 'a Angstrom.t
 end
 
 module Data : sig
   type 'a t =
     | Skip
-    | String         of string
-    | Fold_string    of 'a
+    | String of string
+    | Fold_string of 'a
     | Fold_bigstring of 'a
-    | Parse          of ('a, string) result
+    | Parse of ('a, string) result
 end
 
 type 'a slice = {
@@ -66,7 +66,7 @@ type 'a slice = {
 }
 
 type feed =
-  | String    of (unit -> string option Lwt.t)
+  | String of (unit -> string option Lwt.t)
   | Bigstring of (unit -> Bigstring.t slice option Lwt.t)
 
 (**

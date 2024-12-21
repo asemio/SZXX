@@ -25,12 +25,12 @@ module DOM = struct
   let dot_text tag node =
     Array.find_map node.children ~f:(function
       | x when String.(x.tag = tag) -> Some x.text
-      | _ -> None)
+      | _ -> None )
 
   let filter_map tag ~f node =
     Array.filter_map node.children ~f:(function
       | x when String.(x.tag = tag) -> f x
-      | _ -> None)
+      | _ -> None )
 
   let at i node = Option.try_with (fun () -> Int.of_string i |> Array.get node.children)
 
@@ -44,16 +44,16 @@ end
 
 module SAX = struct
   type node =
-    | Prologue      of attr_list
-    | Element_open  of {
+    | Prologue of attr_list
+    | Element_open of {
         tag: string;
         attrs: attr_list;
       }
     | Element_close of string
-    | Text          of string
-    | Cdata         of string
+    | Text of string
+    | Cdata of string
     | Nothing
-    | Many          of node list
+    | Many of node list
   [@@deriving sexp_of]
 
   type partial_text = {
@@ -90,15 +90,15 @@ module SAX = struct
 
   let squish_into raw final acc =
     String.fold raw ~init:acc ~f:(fun acc c ->
-        match acc with
-        | after_first, _ when is_ws c -> after_first, true
-        | true, true ->
-          Buffer.add_char final ' ';
-          Buffer.add_char final c;
-          true, false
-        | _ ->
-          Buffer.add_char final c;
-          true, false)
+      match acc with
+      | after_first, _ when is_ws c -> after_first, true
+      | true, true ->
+        Buffer.add_char final ' ';
+        Buffer.add_char final c;
+        true, false
+      | _ ->
+        Buffer.add_char final c;
+        true, false )
 
   let render attrs text =
     match Queue.length text with
@@ -114,7 +114,7 @@ module SAX = struct
             if after_first && not prev_ws then Buffer.add_char final ' ';
             Buffer.add_string final raw;
             true, is_ws raw.[String.length raw - 1]
-          | { raw; _ } -> squish_into raw final (if after_first then true, true else acc))
+          | { raw; _ } -> squish_into raw final (if after_first then true, true else acc) )
       in
       Buffer.contents final
 
@@ -245,8 +245,8 @@ module SAX = struct
       let filter_path =
         let buf = Buffer.create 30 in
         List.iter path_list ~f:(fun s ->
-            Buffer.add_char buf ' ';
-            Buffer.add_string buf s);
+          Buffer.add_char buf ' ';
+          Buffer.add_string buf s );
         Buffer.contents buf
       in
       folder ~filter_path ~on_match ~strict acc (node : node)
@@ -280,10 +280,10 @@ let encode_utf_8_codepoint code =
     in
     let consts = consts.(num_bytes - 1) in
     String.init num_bytes ~f:(fun i ->
-        (* lsr: Shift the relevant bits to the least significant position *)
-        (* land: Blank out the reserved bits *)
-        (* lor: Set the reserved bits to the right value *)
-        (code lsr consts.shifts.(i)) land consts.masks.(i) lor consts.blends.(i) |> Char.unsafe_of_int)
+      (* lsr: Shift the relevant bits to the least significant position *)
+      (* land: Blank out the reserved bits *)
+      (* lor: Set the reserved bits to the right value *)
+      (code lsr consts.shifts.(i)) land consts.masks.(i) lor consts.blends.(i) |> Char.unsafe_of_int )
 
 let decode_exn = function
 (* https://en.wikipedia.org/wiki/List_of_XML_and_HTML_character_entity_references#List_of_predefined_entities_in_XML *)
@@ -301,7 +301,7 @@ let decode_exn = function
     |> Int.of_string
     |> encode_utf_8_codepoint
   | '#', '0' .. '9' -> String.slice str 1 0 |> Int.of_string |> encode_utf_8_codepoint
-  | _ -> raise (Invalid_argument str))
+  | _ -> raise (Invalid_argument str) )
 
 let unescape original =
   let rec loop buf from =
@@ -315,7 +315,7 @@ let unescape original =
         (match decode_exn (String.slice original (start + 1) stop) with
         | s -> Buffer.add_string buf s
         | exception _ -> Buffer.add_substring buf original ~pos:start ~len:(stop - start + 1));
-        loop buf (stop + 1))
+        loop buf (stop + 1) )
   in
   (* Unroll first index call for performance *)
   match String.index original '&' with
@@ -382,9 +382,9 @@ let make_parser { accept_html_boolean_attributes; accept_unquoted_attributes } =
            |'>'
            |'`' ->
             false
-          | _ -> true)
+          | _ -> true )
       in
-      choice [ dq_string; sq_string; uq_string ])
+      choice [ dq_string; sq_string; uq_string ] )
     else choice [ dq_string; sq_string ]
   in
   let attr_parser =
@@ -400,9 +400,9 @@ let make_parser { accept_html_boolean_attributes; accept_unquoted_attributes } =
     in
     let declarations = char '[' *> skip_many (blank *> declaration) <* blank <* char ']' in
     (string "<!DOCTYPE" <|> string "<!doctype")
-    *> (skip_many (blank *> choice [ drop token_parser; drop xml_string_parser; declarations ])
+    *> ( skip_many (blank *> choice [ drop token_parser; drop xml_string_parser; declarations ])
        <* blank
-       <* char '>')
+       <* char '>' )
     >>| const SAX.Nothing
   in
   let comment_parser = comment >>| const SAX.Nothing in

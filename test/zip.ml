@@ -27,20 +27,20 @@ let fold xlsx_filename json_filename () =
   let json_path = sprintf "../../../test/files/%s" json_filename in
   let* against =
     Lwt_io.with_file ~flags ~mode:Input json_path (fun ic ->
-        let+ contents = Lwt_io.read ic in
-        Yojson.Safe.from_string contents)
+      let+ contents = Lwt_io.read ic in
+      Yojson.Safe.from_string contents )
   in
   let* parsed =
     let queue = Queue.create () in
     Lwt_io.with_file ~flags ~mode:Input xlsx_path (fun ic ->
-        let stream, success =
-          SZXX.Zip.stream_files ~feed:(feed_bigstring ic) (fun _ ->
-              Fold_string { init = (); f = (fun _entry s () -> Queue.enqueue queue (`String s)) })
-        in
-        let processed = Lwt_stream.iter (const ()) stream in
-        let* () = success in
-        let+ () = processed in
-        `Assoc [ "data", `List (List.rev (Queue.to_list queue)) ])
+      let stream, success =
+        SZXX.Zip.stream_files ~feed:(feed_bigstring ic) (fun _ ->
+          Fold_string { init = (); f = (fun _entry s () -> Queue.enqueue queue (`String s)) } )
+      in
+      let processed = Lwt_stream.iter (const ()) stream in
+      let* () = success in
+      let+ () = processed in
+      `Assoc [ "data", `List (List.rev (Queue.to_list queue)) ] )
   in
 
   Json_diff.check parsed against;
@@ -74,7 +74,7 @@ let readme_example extract_filename input_channel =
     let+ files = Lwt_stream.to_list stream in
     List.find_map files ~f:(function
       | _entry, Zip.Data.String raw -> Some raw
-      | _ -> None)
+      | _ -> None )
   in
 
   (* 4. Bind/await the `success` promise to catch any error that may have terminated the stream early

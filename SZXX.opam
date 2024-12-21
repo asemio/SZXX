@@ -28,7 +28,7 @@ depends: [
   "angstrom-lwt-unix" { >= "0.15.0" & with-test }
   "yojson" { with-test }
   "ppx_deriving_yojson" { >= "3.5.2" & with-test }
-  # "ocamlformat" { = "0.21.0" } # Development
+  # "ocamlformat" { = "0.25.1" } # Development
   # "ocaml-lsp-server" # Development
 ]
 build: ["dune" "build" "-p" name "-j" jobs]

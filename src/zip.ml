@@ -41,7 +41,7 @@ module Action = struct
   type 'a t =
     | Skip
     | String
-    | Fold_string    of {
+    | Fold_string of {
         init: 'a;
         f: entry -> string -> 'a -> 'a;
       }
@@ -49,16 +49,16 @@ module Action = struct
         init: 'a;
         f: entry -> Bigstring.t -> len:int -> 'a -> 'a;
       }
-    | Parse          of 'a Angstrom.t
+    | Parse of 'a Angstrom.t
 end
 
 module Data = struct
   type 'a t =
     | Skip
-    | String         of string
-    | Fold_string    of 'a
+    | String of string
+    | Fold_string of 'a
     | Fold_bigstring of 'a
-    | Parse          of ('a, string) result
+    | Parse of ('a, string) result
 end
 
 let slice_size = Parsing.slice_size
@@ -252,13 +252,13 @@ let parser cb =
           }
       | { id = 1; size; _ } ->
         failwithf "Expected 16 bytes for ZIP64 extra field length but found %d" size ()
-      | _ -> None)
+      | _ -> None )
   in
   let entry_parser =
     Parsing.skip_until_pattern ~pattern:"PK\003\004"
     *> (LE.any_uint16 >>| function
         | x when x < 45 -> Zip_2_0
-        | _ -> Zip_4_5)
+        | _ -> Zip_4_5 )
     >>= fun version_needed ->
     lift3
       (fun (flags, methd) descriptor (filename, extra_fields) ->
@@ -278,9 +278,9 @@ let parser cb =
           filename;
           extra_fields;
         })
-      (flags_methd_parser
+      ( flags_methd_parser
       <* LE.any_uint16 (* last modified time *)
-      <* LE.any_uint16 (* last modified date *))
+      <* LE.any_uint16 (* last modified date *) )
       descriptor_parser dynamic_len_fields_parser
   in
   lift2 const entry_parser commit >>= fun entry ->
@@ -332,7 +332,7 @@ type 'a slice = {
 }
 
 type feed =
-  | String    of (unit -> string option Lwt.t)
+  | String of (unit -> string option Lwt.t)
   | Bigstring of (unit -> Bigstring.t slice option Lwt.t)
 
 let stream_files ~feed:read cb =
@@ -354,14 +354,14 @@ let stream_files ~feed:read cb =
       let* () = Lwt_mutex.with_lock mutex (fun () -> bounded#push pair) in
       match parse (parser cb) with
       | Partial feed -> (loop [@tailcall]) (feed (`Bigstring (Bigstring.sub_shared buf ~pos ~len)))
-      | state -> (loop [@tailcall]) state)
+      | state -> (loop [@tailcall]) state )
     | Partial feed -> (
       read () >>= function
       | None -> (
         match feed `Eof with
         | Done (_, pair) -> Lwt_mutex.with_lock mutex (fun () -> bounded#push pair)
-        | _ -> Lwt.return_unit)
-      | Some chunk -> (loop [@tailcall]) (feed chunk))
+        | _ -> Lwt.return_unit )
+      | Some chunk -> (loop [@tailcall]) (feed chunk) )
   in
   let p =
     Lwt.finalize
