@@ -2,10 +2,4 @@
 .vscode
 _opam/
 _build/
-**/.merlin
-*.xml
-*.xlsx
-*.html
-!test/files/*.xlsx
 *.txt
-fuzz

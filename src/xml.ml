@@ -330,17 +330,7 @@ module SAX = struct
     let make_partial tag attrs =
       { tag; tag_hash = String.hash tag; attrs; text = []; children = []; staged = [] }
 
-    let squish_into raw final acc =
-      String.fold raw ~init:acc ~f:(fun acc c ->
-        match acc with
-        | after_first, _ when Parser.is_ws c -> after_first, true
-        | true, true ->
-          Buffer.add_char final ' ';
-          Buffer.add_char final c;
-          true, false
-        | _ ->
-          Buffer.add_char final c;
-          true, false )
+    let find_not_ws (_ : int) c = not (Parser.is_ws c)
 
     let render attrs = function
     | [] -> ""
@@ -351,12 +341,21 @@ module SAX = struct
           match partial with
           | Literal raw ->
             Buffer.add_string final raw;
-            true, true
+            true, false
           | Standard raw when DOM.preserve_space attrs ->
             if after_first && not prev_ws then Buffer.add_char final ' ';
             Buffer.add_string final raw;
             true, Parser.is_ws raw.[String.length raw - 1]
-          | Standard raw -> squish_into raw final (if after_first then true, true else acc) )
+          | Standard raw -> (
+            match String.lfindi raw ~f:find_not_ws with
+            | None -> acc
+            | Some start -> (
+              match String.rfindi raw ~f:find_not_ws with
+              | None -> raise (Sys_error "Impossible case in Xml.render. Please report this bug.")
+              | Some stop ->
+                if after_first && not prev_ws then Buffer.add_char final ' ';
+                Buffer.add_substring final raw ~pos:start ~len:(stop - start + 1);
+                true, false ) ) )
       in
       Buffer.contents final
 

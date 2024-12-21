@@ -218,6 +218,7 @@ let () =
           "hybrid.xlsx", `Quick, single_pass env "hybrid";
           "formatting.xlsx", `Quick, single_pass env "formatting";
           "inline.xlsx", `Quick, single_pass env "inline";
+          "spaces.xlsx", `Quick, single_pass env "spaces";
           "Readme example 1", `Quick, readme_example1 env "financial";
           "Readme example 1b", `Quick, readme_example1b env "financial";
           "Readme example 2", `Quick, readme_example2 env "financial";

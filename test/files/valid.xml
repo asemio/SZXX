@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet>
+  <c>hello &amp; goodbye</c>
+  <c>world<v>woot</v>WORLD<v>hurray</v></c>
+  <t xml:space="preserve" scoped> &quot;hello!&quot;  world <x/>  &#124; &#xa; &#x1F1E8;&#x1F1E6; </t>
+  <c>bad1: &abc&amp; -</c>
+  <c>bad2: &#1welp; -</c>
+</worksheet>
