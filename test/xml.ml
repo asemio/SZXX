@@ -105,7 +105,7 @@ comment -->
       {
         "tag": "t",
         "attrs": [],
-        "text": "hello world y",
+        "text": "hello  world y",
         "children": [
           { "tag": "x", "attrs": [], "text": "", "children": [] }
         ]
@@ -344,7 +344,7 @@ module Test4 = struct
       {
         "tag": "head",
         "attrs": [],
-        "text": "clear head text X some lost text back to the top",
+        "text": "clear head   text X some lost text back to the top",
         "children": [
           {
             "tag": "meta",

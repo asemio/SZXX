@@ -2,7 +2,3 @@
 .vscode
 _opam/
 _build/
-**/.merlin
-*.xml
-*.xlsx
-!test/files
