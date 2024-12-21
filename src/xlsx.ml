@@ -44,9 +44,9 @@ let parse_date f = Float.to_int f |> Date.add_days origin
 let parse_datetime ~zone f =
   let parts = Float.modf f in
   let date = Float.Parts.integral parts |> Float.to_int |> Date.add_days origin in
-  let frac = Float.(Parts.fractional parts * 86400000. |> round) |> Time.Span.of_ms in
-  let ofday = Time.Ofday.of_span_since_start_of_day_exn frac in
-  Time.of_date_ofday ~zone date ofday
+  let frac = Float.(Parts.fractional parts * 86400000. |> round) |> Time_float.Span.of_ms in
+  let ofday = Time_float.Ofday.of_span_since_start_of_day_exn frac in
+  Time_float.of_date_ofday ~zone date ofday
 
 let xml_parser =
   Xml.make_parser Xml.{ accept_html_boolean_attributes = false; accept_unquoted_attributes = false }

@@ -108,7 +108,7 @@ val resolve_sst_index : SST.t -> sst_index:string -> string option
 val parse_date : float -> Date.t
 
 (** XLSX datetimes are stored as floats. Convert from a [float] to a [Time.t] *)
-val parse_datetime : zone:Time.Zone.t -> float -> Time.t
+val parse_datetime : zone:Time_float.Zone.t -> float -> Time_float.t
 
 (** Convert from a column reference such as ["D7"] or ["AA2"] to a 0-based column index *)
 val index_of_column : string -> int

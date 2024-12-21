@@ -133,7 +133,8 @@ let count_total_string_length xlsx_path =
   in
   let t1 = Time_now.nanoseconds_since_unix_epoch () in
   print_endline
-    (sprintf !"%s" (Int63.(t1 - t0 |> to_float) |> Time.Span.of_ns |> Time.Span.to_string_hum));
+    (sprintf !"%s"
+       (Int63.(t1 - t0 |> to_float) |> Time_float.Span.of_ns |> Time_float.Span.to_string_hum) );
   let num_rows = ref 0 in
   let num_strings = ref 0 in
   let total_length = ref 0 in
