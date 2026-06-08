@@ -60,6 +60,7 @@ val index_of_column : string -> int
 
     SZXX will wait for you to consume rows from the Sequence before extracting more. *)
 val stream_rows_double_pass :
+  ?prefix:string ->
   ?filter_sheets:(sheet_id:int -> raw_size:int64 -> bool) ->
   sw:Switch.t ->
   _ Eio.File.ro ->
@@ -91,6 +92,7 @@ val stream_rows_double_pass :
 
     As much as possible, SZXX will wait for you to consume rows from the Sequence before extracting more. *)
 val stream_rows_single_pass :
+  ?prefix:string ->
   ?max_buffering:int ->
   ?filter:(Xml.DOM.element row -> bool) ->
   ?filter_sheets:(sheet_id:int -> raw_size:int64 -> bool) ->
@@ -103,20 +105,17 @@ module Expert : sig
   module SST : sig
     type t
 
-    (** Advanced: for use with [SZXX.Xml.SAX.Expert.Stream.folder] *)
-    val filter_path : string list
-
     (** Advanced: for use with [SZXX.Zip.stream_files] *)
     val zip_entry_filename : string
 
     (** Extract the SST from an XLSX document.
         This function will stop reading from the Feed as soon as it has retrieved the SST. *)
-    val from_feed : Feed.t -> t
+    val from_feed : ?prefix:string -> Feed.t -> t
 
     (** Extract the SST from an XLSX file.
         This function does not advance the file cursor.
         It jumps around the file to only extract the SST while reading as few bytes as necessary. *)
-    val from_file : _ Eio.File.ro -> t
+    val from_file : ?prefix:string -> _ Eio.File.ro -> t
 
     (** Resolve a single reference into the Shared Strings Table. *)
     val resolve_sst_index : t -> sst_index:string -> string option
