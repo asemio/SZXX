@@ -57,14 +57,18 @@ let parse_string_cell el =
   | Some { text; _ } -> text
   | None -> filter_map "r" el ~f:(dot_text "t") |> String.concat
 
+let sst_filter_path = ["sst"; "si"]
+let sheet_filter_path = ["worksheet"; "sheetData"; "row"]
+
+let with_prefix prefix = List.map ~f:(fun tag -> prefix ^ tag)
+
 module SST = struct
   type t = string Lazy.t array
 
-  let filter_path = [ "sst"; "si" ]
-
   let zip_entry_filename = "xl/sharedStrings.xml"
 
-  let from_feed feed =
+  let from_feed ?(prefix = "") feed =
+    let filter_path = with_prefix prefix sst_filter_path in
     Switch.run @@ fun sw ->
     let q = Queue.create () in
     let seen = ref false in
@@ -84,7 +88,8 @@ module SST = struct
 
     Queue.to_array q
 
-  let from_entries file (entries : Zip.entry list) =
+  let from_entries ?(prefix = "") file (entries : Zip.entry list) =
+    let filter_path = with_prefix prefix sst_filter_path in
     match List.find entries ~f:(fun entry -> String.( = ) entry.filename zip_entry_filename) with
     | None -> [||]
     | Some entry -> (
@@ -99,7 +104,7 @@ module SST = struct
         Queue.to_array q
       | _ -> assert false )
 
-  let from_file file = Zip.index_entries file |> from_entries file
+  let from_file ?prefix file = Zip.index_entries file |> from_entries ?prefix file
 
   let resolve_sst_index (sst : t) ~sst_index =
     try Some (force (Array.get sst (Int.of_string sst_index))) with
@@ -221,7 +226,8 @@ module Expert = struct
       { row with data = loop 0 [] data }
 end
 
-let parse_sheet ~sheet_number push =
+let parse_sheet ~prefix ~sheet_number push =
+  let filter_path = with_prefix prefix sheet_filter_path in
   let num = ref 0 in
   let on_match (el : Xml.DOM.element) =
     (match Xml.DOM.get_attr el.attrs "r" with
@@ -238,26 +244,26 @@ let parse_sheet ~sheet_number push =
       | _ -> Int.incr num ));
     push { sheet_number; row_number = !num; data = el.children }
   in
-  fold_angstrom ~filter_path:[ "worksheet"; "sheetData"; "row" ] ~on_match ()
+  fold_angstrom ~filter_path ~on_match ()
 
-let get_sheet_action ~filter_sheets (entry : Zip.entry) push =
+let get_sheet_action ~prefix ~filter_sheets (entry : Zip.entry) push =
   Option.try_with (fun () ->
     Stdlib.Scanf.sscanf entry.filename "xl/worksheets/%[sS]heet%d.xml" (fun _ d -> d) )
   |> Option.filter ~f:(fun sheet_id ->
        Option.value_map filter_sheets ~default:true ~f:(fun f ->
          f ~sheet_id ~raw_size:entry.descriptor.uncompressed_size ) )
-  |> Option.map ~f:(fun sheet_number -> parse_sheet ~sheet_number push)
+  |> Option.map ~f:(fun sheet_number -> parse_sheet ~prefix ~sheet_number push)
 
-let stream_rows_double_pass ?filter_sheets ~sw file cell_parser =
+let stream_rows_double_pass ?(prefix = "") ?filter_sheets ~sw file cell_parser =
   let entries = Zip.index_entries file in
-  let sst = SST.from_entries file entries in
+  let sst = SST.from_entries ~prefix file entries in
   Sequence.of_seq
   @@ Fiber.fork_seq ~sw
   @@ fun yield ->
   let push x = yield (Expert.parse_row_with_sst sst cell_parser x) in
 
   List.iter entries ~f:(fun ({ filename; _ } as entry) ->
-    get_sheet_action ~filter_sheets entry push
+    get_sheet_action ~prefix ~filter_sheets entry push
     |> Option.iter ~f:(fun action ->
          match Zip.extract_from_index file entry action with
          | Zip.Data.Parse_many state -> (
@@ -266,14 +272,15 @@ let stream_rows_double_pass ?filter_sheets ~sw file cell_parser =
            | Error msg -> Printf.failwithf "SZXX: File '%s': %s" filename msg () )
          | _ -> assert false ) )
 
-let process_file ?filter_sheets ~sw ~feed (sst_p, sst_w) yield =
+let process_file ~prefix ?filter_sheets ~sw ~feed (sst_p, sst_w) yield =
   let q = Queue.create () in
+  let filter_path = with_prefix prefix sst_filter_path in
 
   Zip.stream_files ~sw ~feed (function
     | { filename = "xl/sharedStrings.xml"; _ } ->
       let on_match el = Queue.enqueue q (lazy (parse_string_cell el)) in
-      fold_angstrom ~filter_path:SST.filter_path ~on_match ()
-    | entry -> get_sheet_action ~filter_sheets entry yield |> Option.value ~default:Zip.Action.Fast_skip )
+      fold_angstrom ~filter_path ~on_match ()
+    | entry -> get_sheet_action ~prefix ~filter_sheets entry yield |> Option.value ~default:Zip.Action.Fast_skip )
   |> Sequence.iter ~f:(function
        | Zip.{ filename = "xl/sharedStrings.xml"; _ }, Zip.Data.Parse_many state -> (
          match Zip.Data.parser_state_to_result state with
@@ -336,12 +343,12 @@ let with_minimal_buffering ?max_buffering ?filter cell_parser sst_p yield raw_ro
         (fun raw -> if filter raw then yield (Expert.parse_row_with_sst sst cell_parser raw))
         raw_rows )
 
-let stream_rows_single_pass ?max_buffering ?filter ?filter_sheets ~sw ~feed cell_parser =
+let stream_rows_single_pass ?(prefix = "") ?max_buffering ?filter ?filter_sheets ~sw ~feed cell_parser =
   Sequence.of_seq
   @@ Fiber.fork_seq ~sw
   @@ fun yield ->
   let ((sst_p, _) as p) = Promise.create () in
-  Fiber.fork_seq ~sw (process_file ?filter_sheets ~sw ~feed p)
+  Fiber.fork_seq ~sw (process_file ~prefix ?filter_sheets ~sw ~feed p)
   |> with_minimal_buffering ?max_buffering ?filter cell_parser sst_p yield
 
 let unescape = Xml.DOM.unescape
