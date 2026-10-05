@@ -337,12 +337,13 @@ type feed =
 
 let stream_files ~feed:read cb =
   let read =
-    let open Lwt.Infix in
     match read with
-    | String f -> (fun () -> f () >|= Option.map ~f:(fun s -> `String s))
+    | String f -> (fun () -> Lwt.pause () >>= f >|= Option.map ~f:(fun s -> `String s))
     | Bigstring f ->
       fun () ->
-        f () >|= Option.map ~f:(fun { buf; pos; len } -> `Bigstring (Bigstring.sub_shared buf ~pos ~len))
+        Lwt.pause ()
+        >>= f
+        >|= Option.map ~f:(fun { buf; pos; len } -> `Bigstring (Bigstring.sub_shared buf ~pos ~len))
   in
   let stream, bounded = Lwt_stream.create_bounded 1 in
   let mutex = Lwt_mutex.create () in
